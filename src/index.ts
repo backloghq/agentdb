@@ -19,6 +19,8 @@ export type {
 export { TextIndex } from "./text-index.js";
 export type { ViewDefinition } from "./view.js";
 export { AgentDB } from "./agentdb.js";
+export { resolveProvider, OpenAIEmbeddingProvider, HttpEmbeddingProvider } from "./embeddings/index.js";
+export type { EmbeddingProvider, EmbeddingConfig } from "./embeddings/index.js";
 export type {
   AgentDBOptions,
   CollectionInfo,

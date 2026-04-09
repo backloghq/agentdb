@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { Store } from "@backloghq/opslog";
 import { Collection } from "./collection.js";
 import type { CollectionOptions } from "./collection.js";
+import type { EmbeddingConfig, EmbeddingProvider } from "./embeddings/index.js";
+import { resolveProvider } from "./embeddings/index.js";
 
 const META_DIR = "meta";
 const COLLECTIONS_DIR = "collections";
@@ -13,6 +15,8 @@ export interface AgentDBOptions {
   maxOpenCollections?: number;
   /** Checkpoint threshold passed to opslog stores (default: 100). */
   checkpointThreshold?: number;
+  /** Embedding provider configuration for semantic search. */
+  embeddings?: EmbeddingConfig;
 }
 
 export interface CollectionInfo {
@@ -37,10 +41,11 @@ interface MetaManifest {
  */
 export class AgentDB {
   readonly dir: string;
-  private opts: Required<AgentDBOptions>;
+  private opts: Required<Omit<AgentDBOptions, "embeddings">> & Pick<AgentDBOptions, "embeddings">;
   private open: Map<string, Collection> = new Map();
   private opening: Map<string, Promise<Collection>> = new Map();
   private collectionOpts: Map<string, CollectionOptions> = new Map();
+  private embeddingProvider: EmbeddingProvider | null = null;
   private lru: string[] = []; // Most recently used at end
   private meta: MetaManifest = { collections: [], dropped: [] };
   private _opened = false;
@@ -50,7 +55,16 @@ export class AgentDB {
     this.opts = {
       maxOpenCollections: opts?.maxOpenCollections ?? 20,
       checkpointThreshold: opts?.checkpointThreshold ?? 100,
+      embeddings: opts?.embeddings,
     };
+    if (opts?.embeddings) {
+      this.embeddingProvider = resolveProvider(opts.embeddings);
+    }
+  }
+
+  /** Get the configured embedding provider, or null if none. */
+  getEmbeddingProvider(): EmbeddingProvider | null {
+    return this.embeddingProvider;
   }
 
   /** Initialize the database directory and load metadata. */
