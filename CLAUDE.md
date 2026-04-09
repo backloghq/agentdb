@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** All phases complete. 491 tests, 24 tools. Auth + security hardened. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints.
+**Status:** All phases complete. 492 tests, 24 tools. Auth + security hardened. Group commit for ~12x faster writes. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints.
 
 ## Commands
 
@@ -21,6 +21,7 @@ npm run test:coverage  # vitest coverage
 - Lint before committing — all code must pass eslint
 - Tests for everything — aim for high coverage, run `test:coverage` to verify
 - Tests use temp directories, cleaned up after each test
+- **IMPORTANT: On every commit, update ALL docs** — README.md, CLAUDE.md, CHANGELOG.md. Never commit code changes without updating docs in the same commit.
 - Update `CHANGELOG.md` on every change ([Keep a Changelog](https://keepachangelog.com) format)
 - Errors in tools return `{ isError: true, content: [...] }`, never throw across the tool boundary
 - NOTES.md is gitignored — it's a private design doc, not shipped
@@ -74,3 +75,4 @@ src/
 - Semantic search requires external embedding provider (OpenAI, HTTP, or custom)
 - Auth: bearer token (default), multi-token, JWT via jose, pluggable authFn
 - Rate limiting, CORS, audit logging on HTTP transport
+- Group commit (writeMode: "group") for ~12x faster writes — single-writer only, auto-disabled for multi-writer

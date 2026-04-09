@@ -37,6 +37,12 @@ export interface AgentDBOptions {
   agentId?: string;
   /** Memory budget in bytes. Warns when collections exceed this total. 0 = unlimited. */
   memoryBudget?: number;
+  /** Write mode: "immediate" (default, safe for multi-writer) or "group" (~12x faster, single-writer only). */
+  writeMode?: "immediate" | "group";
+  /** Group commit: flush after N ops (default: 50). */
+  groupCommitSize?: number;
+  /** Group commit: flush after N ms (default: 100). */
+  groupCommitMs?: number;
 }
 
 export interface CollectionInfo {
@@ -169,6 +175,9 @@ export class AgentDB {
       checkpointThreshold: this.opts.checkpointThreshold,
       backend: this.opts.backend,
       agentId: this.opts.agentId,
+      writeMode: this.opts.writeMode,
+      groupCommitSize: this.opts.groupCommitSize,
+      groupCommitMs: this.opts.groupCommitMs,
     });
 
     this.open.set(name, col);

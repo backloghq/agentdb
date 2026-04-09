@@ -446,7 +446,7 @@ export class Collection {
   }
 
   /** Open the underlying opslog store at the given directory. */
-  async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string }): Promise<void> {
+  async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
     // Build text index from existing records

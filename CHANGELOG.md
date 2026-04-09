@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [0.1.0] - 2026-04-09
 
+### Performance
+- **Group commit** — `writeMode: "group"` buffers writes, ~12x faster. CLI: `--group-commit`. Env: `AGENTDB_WRITE_MODE=group`. Auto-disabled for multi-writer (agentId). Opslog v0.5.0.
+- **B-tree indexed queries** — `find()` and `count()` use B-tree indexes for equality filters. 3.4x speedup on 10K records with indexed fields.
+- B-tree indexes kept in sync on all mutations (insert, update, delete, undo).
+
 ### Improved (MCP tool quality — backlog patterns adopted)
 - Every tool has `title` for human-readable display names
 - Every tool has `outputSchema` — typed zod response schemas for structured output

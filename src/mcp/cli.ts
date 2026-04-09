@@ -20,6 +20,9 @@ let authToken = process.env.AGENTDB_AUTH_TOKEN ?? "";
 let rateLimit = parseInt(process.env.AGENTDB_RATE_LIMIT ?? "0", 10) || 0;
 let corsOrigins = process.env.AGENTDB_CORS_ORIGINS ?? "";
 
+// Write mode
+let writeMode = process.env.AGENTDB_WRITE_MODE ?? "immediate";
+
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   const next = args[i + 1];
@@ -35,12 +38,15 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === "--auth-token" && next) { authToken = next; i++; }
   else if (arg === "--rate-limit" && next) { rateLimit = parseInt(next, 10); i++; }
   else if (arg === "--cors" && next) { corsOrigins = next; i++; }
+  else if (arg === "--write-mode" && next) { writeMode = next; i++; }
+  else if (arg === "--group-commit") { writeMode = "group"; }
 }
 
 async function resolveBackend(): Promise<AgentDBOptions> {
   const opts: AgentDBOptions = {};
 
   if (agentId) opts.agentId = agentId;
+  if (writeMode === "group") opts.writeMode = "group";
 
   if (backend === "s3") {
     if (!s3Bucket) {

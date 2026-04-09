@@ -46,7 +46,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@backloghq/opslog": "^0.4.1",
+    "@backloghq/opslog": "^0.5.0",
     "@backloghq/opslog-s3": "^0.1.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/express": "^5.0.6",

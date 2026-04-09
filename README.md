@@ -294,6 +294,23 @@ startHttp(dir, {
 });
 ```
 
+### Group commit (faster writes)
+
+Buffer writes in memory and flush as a single disk write. ~12x faster for sustained writes. Single-writer only — auto-disabled when `agentId` is set.
+
+```bash
+npx agentdb --http --group-commit
+
+# Or via env var
+AGENTDB_WRITE_MODE=group npx agentdb --http
+```
+
+```typescript
+const db = new AgentDB("./data", { writeMode: "group" });
+```
+
+**Tradeoff:** A crash can lose buffered ops (up to 100ms of data). Default `"immediate"` mode is safe — every write survives a crash.
+
 ### Rate limiting and CORS
 
 ```bash
