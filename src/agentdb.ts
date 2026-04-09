@@ -5,6 +5,8 @@ import { Collection } from "./collection.js";
 import type { CollectionOptions } from "./collection.js";
 import type { EmbeddingConfig, EmbeddingProvider } from "./embeddings/index.js";
 import { resolveProvider } from "./embeddings/index.js";
+import { PermissionManager } from "./permissions.js";
+import type { AgentPermissions } from "./permissions.js";
 
 const META_DIR = "meta";
 const COLLECTIONS_DIR = "collections";
@@ -17,6 +19,8 @@ export interface AgentDBOptions {
   checkpointThreshold?: number;
   /** Embedding provider configuration for semantic search. */
   embeddings?: EmbeddingConfig;
+  /** Per-agent permission rules. Keys are agent IDs. */
+  permissions?: Record<string, Partial<AgentPermissions>>;
 }
 
 export interface CollectionInfo {
@@ -41,11 +45,12 @@ interface MetaManifest {
  */
 export class AgentDB {
   readonly dir: string;
-  private opts: Required<Omit<AgentDBOptions, "embeddings">> & Pick<AgentDBOptions, "embeddings">;
+  private opts: Required<Omit<AgentDBOptions, "embeddings" | "permissions">> & Pick<AgentDBOptions, "embeddings" | "permissions">;
   private open: Map<string, Collection> = new Map();
   private opening: Map<string, Promise<Collection>> = new Map();
   private collectionOpts: Map<string, CollectionOptions> = new Map();
   private embeddingProvider: EmbeddingProvider | null = null;
+  private permissions: PermissionManager;
   private lru: string[] = []; // Most recently used at end
   private meta: MetaManifest = { collections: [], dropped: [] };
   private _opened = false;
@@ -60,6 +65,12 @@ export class AgentDB {
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
     }
+    this.permissions = new PermissionManager(opts?.permissions);
+  }
+
+  /** Get the permission manager. Used by tools to enforce access control. */
+  getPermissions(): PermissionManager {
+    return this.permissions;
   }
 
   /** Get the configured embedding provider, or null if none. */

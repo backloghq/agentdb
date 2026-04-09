@@ -19,10 +19,16 @@ export interface ToolResult {
   isError?: boolean;
 }
 
-/** Wrap a handler in error handling. */
-function safe(fn: (args: Record<string, unknown>) => Promise<unknown>): (args: unknown) => Promise<ToolResult> {
+type PermLevel = "read" | "write" | "admin";
+
+/** Wrap a handler in error handling and permission checking. */
+function safe(fn: (args: Record<string, unknown>) => Promise<unknown>, permCheck?: { db: AgentDB; level: PermLevel; operation: string }): (args: unknown) => Promise<ToolResult> {
   return async (args) => {
     try {
+      if (permCheck) {
+        const agent = (args as Record<string, unknown>).agent as string | undefined;
+        permCheck.db.getPermissions().require(agent, permCheck.level, permCheck.operation);
+      }
       const result = await fn(args as Record<string, unknown>);
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
