@@ -2,7 +2,16 @@
  * Authentication and authorization middleware for AgentDB HTTP transport.
  */
 import { timingSafeEqual } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Request, Response, NextFunction } from "express";
+
+/** AsyncLocalStorage for propagating auth identity to tool handlers. */
+export const authContext = new AsyncLocalStorage<AuthIdentity>();
+
+/** Get the current request's authenticated identity (if any). */
+export function getCurrentAuth(): AuthIdentity | undefined {
+  return authContext.getStore();
+}
 
 /** Authenticated agent identity. */
 export interface AuthIdentity {
@@ -66,9 +75,9 @@ export function createAuthMiddleware(opts: {
         return;
       }
 
-      // Attach identity to request for downstream use
+      // Attach identity to request + AsyncLocalStorage for tool handlers
       (req as AuthenticatedRequest).auth = identity;
-      next();
+      authContext.run(identity, () => next());
     } catch {
       res.status(500).json({ error: "Authentication error" });
     }

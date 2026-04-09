@@ -9,10 +9,10 @@ import { AgentDB } from "../agentdb.js";
 import { VERSION } from "../index.js";
 import { getTools } from "../tools/index.js";
 import type { AgentDBOptions } from "../agentdb.js";
-import { createAuthMiddleware, RateLimiter, AuditLogger } from "./auth.js";
+import { createAuthMiddleware, RateLimiter, AuditLogger, authContext, getCurrentAuth } from "./auth.js";
 import type { TokenMap, AuthFn } from "./auth.js";
 
-export { createAuthMiddleware, RateLimiter, AuditLogger };
+export { createAuthMiddleware, RateLimiter, AuditLogger, authContext, getCurrentAuth };
 export type { TokenMap, AuthFn, AuthIdentity, AuthenticatedRequest, AuditEntry } from "./auth.js";
 export { createJwtAuth } from "./jwt.js";
 export type { JwtAuthOptions } from "./jwt.js";

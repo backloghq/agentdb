@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AgentDB } from "../agentdb.js";
+import { getCurrentAuth } from "../mcp/auth.js";
 
 /** A framework-agnostic tool definition. */
 export interface AgentTool {
@@ -39,7 +40,9 @@ function makeSafe(db: AgentDB, toolName: string, annotations: { readOnlyHint?: b
   return (fn: (args: Record<string, unknown>) => Promise<unknown>): (args: unknown) => Promise<ToolResult> => {
     return async (args) => {
       try {
-        const agent = (args as Record<string, unknown>).agent as string | undefined;
+        // Prefer authenticated identity from HTTP auth over self-reported args.agent
+        const authId = getCurrentAuth();
+        const agent = authId?.agentId ?? (args as Record<string, unknown>).agent as string | undefined;
         db.getPermissions().require(agent, level, toolName);
         const result = await fn(args as Record<string, unknown>);
         const structured = result as Record<string, unknown>;
