@@ -16,6 +16,7 @@ export type {
   FieldInfo,
 } from "./collection.js";
 
+export { TextIndex } from "./text-index.js";
 export { AgentDB } from "./agentdb.js";
 export type {
   AgentDBOptions,

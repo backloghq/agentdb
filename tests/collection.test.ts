@@ -505,6 +505,76 @@ describe("Collection", () => {
     });
   });
 
+  describe("full-text search", () => {
+    let searchCol: Collection;
+
+    beforeEach(async () => {
+      const sDir = await mkdtemp(join(tmpdir(), "agentdb-search-"));
+      const sStore = new Store<Record<string, unknown>>();
+      searchCol = new Collection("search", sStore, { textSearch: true });
+      await searchCol.open(sDir, { checkpointThreshold: 1000 });
+      (searchCol as Record<string, unknown>)._testDir = sDir;
+
+      await searchCol.insertMany([
+        { _id: "1", title: "Build the API endpoint", tags: ["backend", "urgent"] },
+        { _id: "2", title: "Fix login page CSS", tags: ["frontend", "bug"] },
+        { _id: "3", title: "Write API documentation", tags: ["docs", "backend"] },
+        { _id: "4", title: "Deploy to production", tags: ["devops"] },
+      ]);
+    });
+
+    afterEach(async () => {
+      const sDir = (searchCol as Record<string, unknown>)._testDir as string;
+      try { await searchCol.close(); } catch { /* */ }
+      await rm(sDir, { recursive: true, force: true });
+    });
+
+    it("searches by text across all string fields", () => {
+      const result = searchCol.search("API");
+      expect(result.total).toBe(2); // "Build the API" + "Write API documentation"
+    });
+
+    it("multi-term search uses AND", () => {
+      const result = searchCol.search("API documentation");
+      expect(result.total).toBe(1);
+      expect(result.records[0].title).toBe("Write API documentation");
+    });
+
+    it("searches tag content", () => {
+      const result = searchCol.search("backend");
+      expect(result.total).toBe(2);
+    });
+
+    it("respects pagination", () => {
+      const result = searchCol.search("API", { limit: 1 });
+      expect(result.records).toHaveLength(1);
+      expect(result.truncated).toBe(true);
+    });
+
+    it("throws when textSearch not enabled", () => {
+      expect(() => col.search("test")).toThrow("not enabled");
+    });
+
+    it("index updates on insert", async () => {
+      await searchCol.insert({ _id: "5", title: "New search feature" });
+      const result = searchCol.search("search feature");
+      expect(result.total).toBe(1);
+    });
+
+    it("index updates on remove", async () => {
+      await searchCol.remove({ _id: "1" });
+      const result = searchCol.search("API");
+      expect(result.total).toBe(1); // Only "Write API documentation" remains
+    });
+
+    it("index updates on undo", async () => {
+      await searchCol.insert({ _id: "5", title: "Temporary item" });
+      expect(searchCol.search("temporary").total).toBe(1);
+      await searchCol.undo();
+      expect(searchCol.search("temporary").total).toBe(0);
+    });
+  });
+
   describe("virtual filters", () => {
     let vfCol: Collection;
 

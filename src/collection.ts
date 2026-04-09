@@ -3,6 +3,7 @@ import { Store } from "@backloghq/opslog";
 import type { Operation } from "@backloghq/opslog";
 import { compileFilter } from "./filter.js";
 import { parseCompactFilter } from "./compact-filter.js";
+import { TextIndex } from "./text-index.js";
 
 // Internal record type — what's stored in opslog
 type StoredRecord = Record<string, unknown>;
@@ -123,6 +124,8 @@ export interface CollectionOptions {
   computed?: Record<string, ComputedFn>;
   /** Virtual filters — domain-specific query predicates. Keys like "+OVERDUE" usable in filters. */
   virtualFilters?: Record<string, VirtualFilterFn>;
+  /** Enable full-text search index. Automatically indexes all string fields. */
+  textSearch?: boolean;
 }
 
 /** Reserved field prefix for internal metadata. */
@@ -221,11 +224,22 @@ export class Collection {
   private store: Store<StoredRecord>;
   private _opened = false;
   private opts: CollectionOptions;
+  private textIdx: TextIndex | null = null;
 
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
     this.store = store;
     this.opts = opts ?? {};
+    if (this.opts.textSearch) this.textIdx = new TextIndex();
+  }
+
+  /** Rebuild the full text index from current store contents. */
+  private rebuildTextIndex(): void {
+    if (!this.textIdx) return;
+    this.textIdx.clear();
+    for (const [id, record] of this.store.entries()) {
+      this.textIdx.add(id, stripMeta(record));
+    }
   }
 
   /** Run the validate hook on a clean record (meta stripped). Throws on invalid. */
@@ -276,6 +290,12 @@ export class Collection {
   async open(dir: string, options?: { checkpointThreshold?: number }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
+    // Build text index from existing records
+    if (this.textIdx) {
+      for (const [id, record] of this.store.entries()) {
+        this.textIdx.add(id, stripMeta(record));
+      }
+    }
   }
 
   /** Close the underlying store. */
@@ -295,6 +315,7 @@ export class Collection {
     if (opts?.reason) stored[META_REASON] = opts.reason;
     this.validateRecord(stored);
     await this.store.set(id, stored);
+    if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
     return id;
   }
 
@@ -319,6 +340,11 @@ export class Collection {
         this.store.set(id, stored);
       }
     });
+    if (this.textIdx) {
+      for (const { id, stored } of prepared) {
+        this.textIdx.add(id, stripMeta(stored));
+      }
+    }
     return prepared.map((p) => p.id);
   }
 
@@ -414,6 +440,7 @@ export class Collection {
         this.store.set(id, updated);
       }
     });
+    this.rebuildTextIndex();
 
     return updates.length;
   }
@@ -433,6 +460,7 @@ export class Collection {
     if (opts?.reason) stored[META_REASON] = opts.reason;
     this.validateRecord(stored);
     await this.store.set(id, stored);
+    if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
     return { id, action: existing ? "updated" : "inserted" };
   }
 
@@ -468,6 +496,9 @@ export class Collection {
         this.store.delete(id);
       }
     });
+    if (this.textIdx) {
+      for (const id of toDelete) this.textIdx.remove(id);
+    }
 
     return toDelete.length;
   }
@@ -476,7 +507,9 @@ export class Collection {
    * Undo the last mutation in this collection.
    */
   async undo(): Promise<boolean> {
-    return this.store.undo();
+    const result = await this.store.undo();
+    if (result) this.rebuildTextIndex();
+    return result;
   }
 
   /**
@@ -491,6 +524,40 @@ export class Collection {
    */
   getOps(since?: string): Operation<StoredRecord>[] {
     return this.store.getOps(since);
+  }
+
+  /**
+   * Full-text search across all string fields.
+   * Requires textSearch: true in collection options.
+   * Returns records matching ALL query terms (AND semantics).
+   */
+  search(query: string, opts?: { limit?: number; offset?: number; summary?: boolean }): FindResult {
+    if (!this.textIdx) {
+      throw new Error("Full-text search not enabled. Set textSearch: true in collection options.");
+    }
+    const matchIds = this.textIdx.search(query);
+    const allAccessor = this.allCleanRecords();
+    const limit = opts?.limit ?? 50;
+    const offset = opts?.offset ?? 0;
+    const useSummary = opts?.summary ?? false;
+
+    const records: Record<string, unknown>[] = [];
+    for (const id of matchIds) {
+      const record = this.store.get(id);
+      if (record) {
+        let clean = stripMeta(record);
+        clean = this.applyComputed(clean, allAccessor);
+        records.push(useSummary ? summarize(clean) : clean);
+      }
+    }
+
+    const total = records.length;
+    const sliced = records.slice(offset, offset + limit);
+    return {
+      records: sliced,
+      total,
+      truncated: total > offset + limit,
+    };
   }
 
   /** Get collection stats. */
