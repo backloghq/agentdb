@@ -30,15 +30,55 @@ export interface FindOpts {
   summary?: boolean;
 }
 
-/** Resolve a filter (string or object) into a compiled predicate. */
-function resolveFilter(filter: Filter): (record: Record<string, unknown>) => boolean {
+/** Resolve a filter (string or object) into a compiled predicate, with optional virtual filter support. */
+function resolveFilter(
+  filter: Filter,
+  virtualFilters?: Record<string, VirtualFilterFn>,
+  getter?: (id: string) => Record<string, unknown> | undefined,
+): (record: Record<string, unknown>) => boolean {
   if (filter === null || filter === undefined) return () => true;
+
+  let filterObj: Record<string, unknown>;
   if (typeof filter === "string") {
     if (filter.trim() === "") return () => true;
-    return compileFilter(parseCompactFilter(filter));
+    filterObj = parseCompactFilter(filter);
+  } else {
+    filterObj = filter;
   }
-  if (Object.keys(filter).length === 0) return () => true;
-  return compileFilter(filter);
+  if (Object.keys(filterObj).length === 0) return () => true;
+
+  // Extract virtual filter keys and build separate predicates
+  if (virtualFilters) {
+    const vfKeys = Object.keys(filterObj).filter((k) => k.startsWith("+") && virtualFilters[k]);
+    if (vfKeys.length > 0) {
+      const remaining: Record<string, unknown> = {};
+      const vfPredicates: ((record: Record<string, unknown>) => boolean)[] = [];
+
+      for (const [key, value] of Object.entries(filterObj)) {
+        if (key.startsWith("+") && virtualFilters[key]) {
+          const vfFn = virtualFilters[key];
+          const g = getter ?? (() => undefined);
+          // value of true = include matching, false = include non-matching
+          if (value === false) {
+            vfPredicates.push((record) => !vfFn(record, g));
+          } else {
+            vfPredicates.push((record) => vfFn(record, g));
+          }
+        } else {
+          remaining[key] = value;
+        }
+      }
+
+      const basePredicate = Object.keys(remaining).length > 0
+        ? compileFilter(remaining)
+        : () => true;
+
+      return (record) =>
+        basePredicate(record) && vfPredicates.every((p) => p(record));
+    }
+  }
+
+  return compileFilter(filterObj);
 }
 
 /** Result of a find query. */
@@ -63,12 +103,17 @@ export interface UpdateOps {
 /** Computed field function — receives the record and a lazy accessor for all records. */
 export type ComputedFn = (record: Record<string, unknown>, allRecords: () => Record<string, unknown>[]) => unknown;
 
+/** Virtual filter function — receives the record and a getter for looking up records by ID. */
+export type VirtualFilterFn = (record: Record<string, unknown>, getter: (id: string) => Record<string, unknown> | undefined) => boolean;
+
 /** Options for configuring collection middleware. */
 export interface CollectionOptions {
   /** Validation function — called before every insert/update/upsert. Throw to reject. */
   validate?: (record: Record<string, unknown>) => void;
   /** Computed fields — calculated on read, not stored. Keys are field names, values are compute functions. */
   computed?: Record<string, ComputedFn>;
+  /** Virtual filters — domain-specific query predicates. Keys like "+OVERDUE" usable in filters. */
+  virtualFilters?: Record<string, VirtualFilterFn>;
 }
 
 /** Reserved field prefix for internal metadata. */
@@ -200,6 +245,19 @@ export class Collection {
     };
   }
 
+  /** Create a getter for looking up clean records by ID. */
+  private recordGetter(): (id: string) => Record<string, unknown> | undefined {
+    return (id: string) => {
+      const record = this.store.get(id);
+      return record ? stripMeta(record) : undefined;
+    };
+  }
+
+  /** Resolve a filter with virtual filter support. */
+  private resolve(filter: Filter): (record: Record<string, unknown>) => boolean {
+    return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter());
+  }
+
   /** Whether the underlying store is open. */
   get opened(): boolean {
     return this._opened;
@@ -274,7 +332,7 @@ export class Collection {
     const offset = opts?.offset ?? 0;
     const useSummary = opts?.summary ?? false;
 
-    const predicate = resolveFilter(opts?.filter);
+    const predicate = this.resolve(opts?.filter);
     const records = this.store.filter((value) => predicate(stripMeta(value)));
 
     const total = records.length;
@@ -297,7 +355,7 @@ export class Collection {
    * Count records matching a filter.
    */
   count(filter?: Filter): number {
-    const predicate = resolveFilter(filter);
+    const predicate = this.resolve(filter);
     return this.store.count((value) => predicate(stripMeta(value)));
   }
 
@@ -305,7 +363,7 @@ export class Collection {
    * Update records matching a filter. Returns number of modified records.
    */
   async update(filter: Filter, update: UpdateOps, opts?: MutationOpts): Promise<number> {
-    const predicate = resolveFilter(filter);
+    const predicate = this.resolve(filter);
     const matches: [string, StoredRecord][] = [];
     for (const [id, value] of this.store.entries()) {
       if (predicate(stripMeta(value))) {
@@ -356,7 +414,7 @@ export class Collection {
    * Delete records matching a filter. Returns number of deleted records.
    */
   async remove(filter: Filter, opts?: MutationOpts): Promise<number> {
-    const predicate = resolveFilter(filter);
+    const predicate = this.resolve(filter);
     const toDelete: string[] = [];
     for (const [id, value] of this.store.entries()) {
       if (predicate(stripMeta(value))) {

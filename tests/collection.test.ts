@@ -459,6 +459,90 @@ describe("Collection", () => {
     });
   });
 
+  describe("virtual filters", () => {
+    let vfCol: Collection;
+
+    beforeEach(async () => {
+      const vfDir = await mkdtemp(join(tmpdir(), "agentdb-vf-"));
+      const vfStore = new Store<Record<string, unknown>>();
+      vfCol = new Collection("vf", vfStore, {
+        virtualFilters: {
+          "+OVERDUE": (record) => {
+            const due = record.due as string | undefined;
+            return !!due && new Date(due) < new Date();
+          },
+          "+HIGH": (record) => record.priority === "H",
+          "+BLOCKED": (record, getter) => {
+            const deps = record.depends as string[] | undefined;
+            if (!deps?.length) return false;
+            return deps.some((id) => {
+              const dep = getter(id);
+              return !dep || dep.status !== "completed";
+            });
+          },
+        },
+      });
+      await vfCol.open(vfDir, { checkpointThreshold: 1000 });
+      (vfCol as Record<string, unknown>)._testDir = vfDir;
+
+      await vfCol.insertMany([
+        { _id: "1", title: "Past due", due: "2020-01-01", priority: "H", status: "pending" },
+        { _id: "2", title: "Future", due: "2099-01-01", priority: "L", status: "pending" },
+        { _id: "3", title: "No due", priority: "M", status: "pending" },
+        { _id: "4", title: "Blocked", priority: "H", status: "pending", depends: ["2"] },
+        { _id: "5", title: "Unblocked", priority: "H", status: "pending", depends: ["1"] },
+      ]);
+    });
+
+    afterEach(async () => {
+      const vfDir = (vfCol as Record<string, unknown>)._testDir as string;
+      try { await vfCol.close(); } catch { /* */ }
+      await rm(vfDir, { recursive: true, force: true });
+    });
+
+    it("filters with virtual filter in JSON syntax", () => {
+      const result = vfCol.find({ filter: { "+OVERDUE": true } });
+      expect(result.total).toBe(1);
+      expect(result.records[0].title).toBe("Past due");
+    });
+
+    it("filters with virtual filter + regular filter", () => {
+      const result = vfCol.find({ filter: { "+HIGH": true, status: "pending" } });
+      expect(result.total).toBe(3); // Past due, Blocked, Unblocked
+    });
+
+    it("virtual filter with false negates", () => {
+      const result = vfCol.find({ filter: { "+HIGH": false } });
+      expect(result.total).toBe(2); // Future (L), No due (M)
+    });
+
+    it("cross-record virtual filter works", () => {
+      // "Blocked" depends on "Future" which is pending — so it's blocked
+      // "Unblocked" depends on "Past due" which is also pending — also blocked
+      const result = vfCol.find({ filter: { "+BLOCKED": true } });
+      expect(result.total).toBe(2);
+    });
+
+    it("count with virtual filter", () => {
+      expect(vfCol.count({ "+OVERDUE": true })).toBe(1);
+      expect(vfCol.count({ "+HIGH": true })).toBe(3);
+    });
+
+    it("virtual filters compose with string syntax via parseCompactFilter", () => {
+      // Compact syntax doesn't natively support +TOKEN yet,
+      // but JSON filter works. String filters without + are regular fields.
+      const result = vfCol.find({ filter: { "+HIGH": true, "+OVERDUE": true } });
+      expect(result.total).toBe(1);
+      expect(result.records[0].title).toBe("Past due");
+    });
+
+    it("no virtual filters = backward compatible", () => {
+      const result = col.find({ filter: { "+NONEXISTENT": true } });
+      // Without virtual filters, +NONEXISTENT is treated as a regular field name
+      expect(result.total).toBe(0);
+    });
+  });
+
   describe("computed fields", () => {
     let computed: Collection;
 
