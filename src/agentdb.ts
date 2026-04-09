@@ -32,6 +32,7 @@ export class AgentDB {
   readonly dir: string;
   private opts: Required<AgentDBOptions>;
   private open: Map<string, Collection> = new Map();
+  private opening: Map<string, Promise<Collection>> = new Map();
   private lru: string[] = []; // Most recently used at end
   private meta: MetaManifest = { collections: [], dropped: [] };
   private _opened = false;
@@ -67,12 +68,26 @@ export class AgentDB {
       return existing;
     }
 
+    // If already opening (concurrent call), wait for that promise
+    const pending = this.opening.get(name);
+    if (pending) return pending;
+
+    // Open and cache the promise to prevent concurrent open races
+    const promise = this._openCollection(name);
+    this.opening.set(name, promise);
+    try {
+      return await promise;
+    } finally {
+      this.opening.delete(name);
+    }
+  }
+
+  private async _openCollection(name: string): Promise<Collection> {
     // Evict if at limit
     if (this.open.size >= this.opts.maxOpenCollections) {
       await this.evictLru();
     }
 
-    // Open the collection
     const colDir = join(this.dir, COLLECTIONS_DIR, name);
     await mkdir(colDir, { recursive: true });
 
