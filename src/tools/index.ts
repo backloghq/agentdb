@@ -174,6 +174,7 @@ export function getTools(db: AgentDB): AgentTool[] {
         offset: z.number().optional().default(0).describe("Skip N records"),
         summary: z.boolean().optional().default(false).describe("Return summary fields only (omit long text)"),
         maxTokens: z.number().optional().describe("Approximate token budget — stop adding records when estimated tokens exceed this"),
+        sort: z.string().optional().describe("Sort by field. Prefix with '-' for descending. E.g. 'name' or '-score'. Supports dot notation."),
       }),
       outputSchema: z.object({ records: z.array(z.record(z.unknown())), total: z.number(), truncated: z.boolean(), estimatedTokens: z.number().optional() }),
       annotations: READ,
@@ -185,6 +186,7 @@ export function getTools(db: AgentDB): AgentTool[] {
           offset: args.offset as number,
           summary: args.summary as boolean,
           maxTokens: args.maxTokens as number | undefined,
+          sort: args.sort as string | undefined,
         });
       }),
     },

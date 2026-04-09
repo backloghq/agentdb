@@ -149,11 +149,6 @@ export async function startHttp(
     res.json({ status: "ok", version: VERSION });
   });
 
-  // Strip stack traces in production
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    res.status(500).json({ error: "Internal server error" });
-  });
 
   // Session management with limits and idle timeout
   const MAX_SESSIONS = 100;
@@ -231,6 +226,12 @@ export async function startHttp(
     } else {
       res.status(400).json({ error: "Invalid session" });
     }
+  });
+
+  // Error handler — must be after all routes
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    res.status(500).json({ error: "Internal server error" });
   });
 
   const httpServer = await new Promise<ReturnType<typeof app.listen>>((resolve) => {

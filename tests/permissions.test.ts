@@ -37,9 +37,10 @@ describe("PermissionManager", () => {
     expect(pm.check("writer", "admin")).toBe(false);
   });
 
-  it("unknown agent gets full access (default)", () => {
+  it("unknown agent is denied when rules configured", () => {
     const pm = new PermissionManager({ reader: { read: true, write: false } });
-    expect(pm.check("unknown-agent", "write")).toBe(true);
+    expect(pm.check("unknown-agent", "write")).toBe(false);
+    expect(pm.check("unknown-agent", "read")).toBe(false);
   });
 
   it("require throws on denied", () => {

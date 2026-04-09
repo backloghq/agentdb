@@ -223,23 +223,27 @@ function summarize(record: Record<string, unknown>): Record<string, unknown> {
 /**
  * Apply update operators to a record, returning a new record.
  */
+/** Fields that cannot be modified via $set/$unset/$inc/$push. */
+const PROTECTED_FIELDS = new Set([META_AGENT, META_REASON, META_EXPIRES, META_EMBEDDING, META_VERSION, "_id"]);
+
 function applyUpdate(record: StoredRecord, update: UpdateOps): StoredRecord {
   const result = { ...record };
 
   if (update.$set) {
     for (const [key, value] of Object.entries(update.$set)) {
-      result[key] = value;
+      if (!PROTECTED_FIELDS.has(key)) result[key] = value;
     }
   }
 
   if (update.$unset) {
     for (const key of Object.keys(update.$unset)) {
-      delete result[key];
+      if (!PROTECTED_FIELDS.has(key)) delete result[key];
     }
   }
 
   if (update.$inc) {
     for (const [key, amount] of Object.entries(update.$inc)) {
+      if (PROTECTED_FIELDS.has(key)) continue;
       const current = result[key];
       if (typeof current === "number") {
         result[key] = current + amount;
@@ -253,6 +257,7 @@ function applyUpdate(record: StoredRecord, update: UpdateOps): StoredRecord {
 
   if (update.$push) {
     for (const [key, value] of Object.entries(update.$push)) {
+      if (PROTECTED_FIELDS.has(key)) continue;
       const current = result[key];
       if (Array.isArray(current)) {
         result[key] = [...current, value];
@@ -546,6 +551,9 @@ export class Collection {
         this.textIdx.add(id, stripMeta(stored));
       }
     }
+    for (const { id, stored } of prepared) {
+      this.updateBTreeIndexes(id, undefined, stored);
+    }
     this.emitChange("insert", prepared.map((p) => p.id), opts?.agent);
     return prepared.map((p) => p.id);
   }
@@ -564,6 +572,11 @@ export class Collection {
   /**
    * Find records matching a filter with pagination and summary mode.
    */
+  /** Return all non-expired records (no limit, no pagination). For internal use (export, etc). */
+  findAll(): Record<string, unknown>[] {
+    return this.store.all().filter((r) => !isExpired(r)).map(stripMeta);
+  }
+
   find(opts?: FindOpts): FindResult {
     const MAX_LIMIT = 10000;
     const limit = Math.min(opts?.limit ?? 50, MAX_LIMIT);
@@ -672,7 +685,7 @@ export class Collection {
     if (matches.length === 0) return 0;
 
     // Check optimistic locks, apply updates, validate, stamp versions
-    const updates: { id: string; updated: StoredRecord }[] = [];
+    const updates: { id: string; old: StoredRecord; updated: StoredRecord }[] = [];
     for (const [id, record] of matches) {
       this.checkVersion(id, opts?.expectedVersion);
       const updated = applyUpdate(record, update);
@@ -684,7 +697,7 @@ export class Collection {
       }
       this.validateRecord(updated);
       this.stampVersion(updated, id);
-      updates.push({ id, updated });
+      updates.push({ id, old: record, updated });
     }
 
     await this.store.batch(() => {
@@ -698,8 +711,8 @@ export class Collection {
         this.textIdx.add(id, stripMeta(updated));
       }
     }
-    for (const { id, updated } of updates) {
-      this.updateBTreeIndexes(id, undefined, updated);
+    for (const { id, old, updated } of updates) {
+      this.updateBTreeIndexes(id, old, updated);
     }
     this.emitChange("update", updates.map((u) => u.id), opts?.agent);
 
@@ -715,7 +728,8 @@ export class Collection {
     doc: Record<string, unknown>,
     opts?: MutationOpts,
   ): Promise<{ id: string; action: "inserted" | "updated" }> {
-    const existing = this.store.has(id);
+    const oldRecord = this.store.get(id);
+    const existing = oldRecord !== undefined;
     this.checkVersion(id, opts?.expectedVersion);
     const stored: StoredRecord = { ...doc, _id: id };
     if (opts?.agent) stored[META_AGENT] = opts.agent;
@@ -725,6 +739,7 @@ export class Collection {
     this.stampVersion(stored, id);
     await this.store.set(id, stored);
     if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+    this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("upsert", [id], opts?.agent);
     return { id, action: existing ? "updated" : "inserted" };
   }
@@ -743,6 +758,9 @@ export class Collection {
 
     if (toDelete.length === 0) return 0;
 
+    // Capture old records for B-tree cleanup
+    const oldRecords = toDelete.map((id) => ({ id, record: this.store.get(id) }));
+
     await this.store.batch(() => {
       for (const id of toDelete) {
         this.store.delete(id);
@@ -750,6 +768,9 @@ export class Collection {
     });
     if (this.textIdx) {
       for (const id of toDelete) this.textIdx.remove(id);
+    }
+    for (const { id, record } of oldRecords) {
+      if (record) this.updateBTreeIndexes(id, record, undefined);
     }
     this.emitChange("delete", toDelete, opts?.agent);
 

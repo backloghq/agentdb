@@ -69,7 +69,7 @@ describe("HnswIndex", () => {
         index.add(`v${i}`, randomVector(DIM));
       }
       // Add a very similar vector to target
-      const similar = target.map((v) => v + (Math.random() - 0.5) * 0.01);
+      const similar = target.map((v) => v + (seededRandom() - 0.5) * 0.01);
       const norm = Math.sqrt(similar.reduce((s, v) => s + v * v, 0));
       index.add("similar", similar.map((v) => v / norm));
 

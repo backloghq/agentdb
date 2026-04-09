@@ -86,6 +86,9 @@ export class AgentDB {
       embeddings: opts?.embeddings,
       backend: opts?.backend,
       agentId: opts?.agentId,
+      writeMode: opts?.writeMode,
+      groupCommitSize: opts?.groupCommitSize,
+      groupCommitMs: opts?.groupCommitMs,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -290,8 +293,7 @@ export class AgentDB {
     };
     for (const name of names) {
       const col = await this.collection(name);
-      const result = col.find({ limit: Infinity });
-      data.collections[name] = { records: result.records };
+      data.collections[name] = { records: col.findAll() };
     }
     return data;
   }

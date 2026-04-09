@@ -5,8 +5,8 @@ export interface AgentPermissions {
   admin: boolean;
 }
 
-/** Default permissions: full access. */
-const DEFAULT_PERMISSIONS: AgentPermissions = { read: true, write: true, admin: true };
+/** Default permissions when rules exist: deny all (unknown agents get nothing). */
+const DENY_ALL: AgentPermissions = { read: false, write: false, admin: false };
 
 /**
  * Permission manager for per-agent access control.
@@ -32,7 +32,7 @@ export class PermissionManager {
   check(agent: string | undefined, level: "read" | "write" | "admin"): boolean {
     if (this.rules.size === 0) return true; // No rules = unrestricted
     if (!agent) return this.rules.size === 0; // No agent + rules configured = denied
-    const perms = this.rules.get(agent) ?? DEFAULT_PERMISSIONS;
+    const perms = this.rules.get(agent) ?? DENY_ALL;
     return perms[level];
   }
 
