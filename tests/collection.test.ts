@@ -766,6 +766,70 @@ describe("Collection", () => {
       expect(col.count({ score: { $gt: 15 } })).toBe(2);
       expect(col.count({ score: { $lte: 10 } })).toBe(1);
     });
+
+    // --- Composite indexes ---
+
+    it("creates a composite index and resolves compound equality", () => {
+      col.createCompositeIndex(["role", "score"]);
+      expect(col.listCompositeIndexes()).toEqual([["role", "score"]]);
+
+      // Compound equality: role=admin AND score=10
+      const result = col.find({ filter: { role: "admin", score: 10 } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].name).toBe("Alice");
+    });
+
+    it("composite index with range on trailing field", () => {
+      col.createCompositeIndex(["role", "score"]);
+
+      // role=admin AND score >= 20
+      const result = col.find({ filter: { role: "admin", score: { $gte: 20 } } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].name).toBe("Charlie");
+    });
+
+    it("composite index with combined range on trailing field", () => {
+      col.createCompositeIndex(["role", "score"]);
+
+      // role=admin AND 5 <= score <= 25
+      const result = col.find({ filter: { role: "admin", score: { $gte: 5, $lte: 25 } } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].name).toBe("Alice");
+    });
+
+    it("composite index maintained through insert/update/delete", async () => {
+      col.createCompositeIndex(["role", "score"]);
+
+      await col.insert({ _id: "d", name: "Dave", role: "admin", score: 40 });
+      const r1 = col.find({ filter: { role: "admin", score: 40 } });
+      expect(r1.records).toHaveLength(1);
+
+      await col.update({ _id: "d" }, { $set: { score: 50 } });
+      expect(col.find({ filter: { role: "admin", score: 40 } }).records).toHaveLength(0);
+      expect(col.find({ filter: { role: "admin", score: 50 } }).records).toHaveLength(1);
+
+      await col.remove({ _id: "d" });
+      expect(col.find({ filter: { role: "admin", score: 50 } }).records).toHaveLength(0);
+    });
+
+    it("composite index prefix-only falls back to single-field index", () => {
+      col.createIndex("role");
+      col.createCompositeIndex(["role", "score"]);
+
+      // Only role in filter — composite not eligible, single-field used
+      const result = col.find({ filter: { role: "admin" } });
+      expect(result.records).toHaveLength(2);
+    });
+
+    it("drops a composite index", () => {
+      col.createCompositeIndex(["role", "score"]);
+      expect(col.dropCompositeIndex(["role", "score"])).toBe(true);
+      expect(col.listCompositeIndexes()).toHaveLength(0);
+    });
+
+    it("rejects composite index with fewer than 2 fields", () => {
+      expect(() => col.createCompositeIndex(["role"])).toThrow("at least 2 fields");
+    });
   });
 
   describe("WAL tailing", () => {

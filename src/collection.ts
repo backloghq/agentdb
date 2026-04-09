@@ -184,6 +184,33 @@ export interface CollectionOptions {
   textSearch?: boolean;
 }
 
+// --- Composite key serialization ---
+
+const COMPOSITE_SEP = "\x00";
+
+/** Serialize a single value for composite key ordering. Type-prefixed for stable cross-type sort. */
+function serializeKeyPart(v: unknown): string {
+  if (v === null || v === undefined) return "\x01null";
+  if (typeof v === "number") {
+    // Prefix: \x02 for numbers. Pad to fixed width so lexicographic = numeric order.
+    // Handle negatives: offset so all values are positive in the string representation.
+    const offset = v + 1e15; // shift range so negatives sort correctly
+    return "\x02" + offset.toFixed(10).padStart(30, "0");
+  }
+  if (typeof v === "boolean") return "\x03" + (v ? "1" : "0");
+  return "\x04" + String(v);
+}
+
+/** Build a composite key from field values. */
+function compositeKey(values: unknown[]): string {
+  return values.map(serializeKeyPart).join(COMPOSITE_SEP);
+}
+
+/** Internal key for a composite index (fields joined by separator). */
+function compositeIndexKey(fields: string[]): string {
+  return fields.join(COMPOSITE_SEP);
+}
+
 /** Change event emitted after mutations. */
 export interface ChangeEvent {
   type: "insert" | "update" | "upsert" | "delete" | "undo";
@@ -311,6 +338,7 @@ export class Collection {
   private embeddingProvider: EmbeddingProvider | null = null;
   private emitter = new EventEmitter();
   private btreeIndexes = new Map<string, BTreeIndex>();
+  private compositeIndexes = new Map<string, { fields: string[]; idx: BTreeIndex }>();
   private bloomFilters = new Map<string, BloomFilter>();
   private queryTracker = new QueryFrequencyTracker();
   private _hasTTL = false; // Tracks if any record has been inserted with TTL
@@ -358,9 +386,9 @@ export class Collection {
     this.emitter.emit("change", { type, collection: this.name, ids, agent } satisfies ChangeEvent);
   }
 
-  /** Update B-tree indexes for a record change. */
+  /** Update B-tree indexes (single-field + composite) for a record change. */
   private updateBTreeIndexes(id: string, oldRecord: StoredRecord | undefined, newRecord: StoredRecord | undefined): void {
-    if (this.btreeIndexes.size === 0) return;
+    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0) return;
     for (const [field, idx] of this.btreeIndexes) {
       if (oldRecord) {
         const oldVal = getNestedValue(stripMeta(oldRecord), field);
@@ -369,6 +397,18 @@ export class Collection {
       if (newRecord && !isExpired(newRecord)) {
         const newVal = getNestedValue(stripMeta(newRecord), field);
         if (newVal !== undefined) idx.add(newVal, id);
+      }
+    }
+    for (const [, { fields, idx }] of this.compositeIndexes) {
+      if (oldRecord) {
+        const oldClean = stripMeta(oldRecord);
+        const oldKey = compositeKey(fields.map((f) => getNestedValue(oldClean, f)));
+        idx.remove(oldKey, id);
+      }
+      if (newRecord && !isExpired(newRecord)) {
+        const newClean = stripMeta(newRecord);
+        const newKey = compositeKey(fields.map((f) => getNestedValue(newClean, f)));
+        idx.add(newKey, id);
       }
     }
   }
@@ -382,7 +422,7 @@ export class Collection {
     }
   }
 
-  /** Rebuild all B-tree indexes from current store contents. */
+  /** Rebuild all B-tree indexes (single-field + composite) from current store contents. */
   private rebuildBTreeIndexes(): void {
     for (const [field, idx] of this.btreeIndexes) {
       idx.clear();
@@ -390,6 +430,15 @@ export class Collection {
         if (isExpired(record)) continue;
         const value = getNestedValue(stripMeta(record), field);
         if (value !== undefined) idx.add(value, id);
+      }
+    }
+    for (const [, { fields, idx }] of this.compositeIndexes) {
+      idx.clear();
+      for (const [id, record] of this.store.entries()) {
+        if (isExpired(record)) continue;
+        const clean = stripMeta(record);
+        const key = compositeKey(fields.map((f) => getNestedValue(clean, f)));
+        idx.add(key, id);
       }
     }
   }
@@ -460,7 +509,7 @@ export class Collection {
    * Returns a Set of candidate IDs if an index was used, or null for full scan.
    */
   private indexedCandidates(filter: Filter): Set<string> | null {
-    if (!filter || this.btreeIndexes.size === 0) return null;
+    if (!filter || (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0)) return null;
 
     let filterObj: Record<string, unknown>;
     if (typeof filter === "string") {
@@ -469,6 +518,11 @@ export class Collection {
       filterObj = filter;
     }
 
+    // Try composite indexes first (more selective)
+    const compositeResult = this.compositeIndexedCandidates(filterObj);
+    if (compositeResult) return compositeResult;
+
+    // Fall back to single-field indexes
     for (const [key, value] of Object.entries(filterObj)) {
       if (key.startsWith("$") || key.startsWith("+")) continue;
       const idx = this.btreeIndexes.get(key);
@@ -494,7 +548,6 @@ export class Collection {
         if ((hasGt || hasGte) && (hasLt || hasLte)) {
           const lo = hasGt ? ops.$gt : ops.$gte;
           const hi = hasLt ? ops.$lt : ops.$lte;
-          // Use inclusive range then filter out exclusive bounds
           const candidates = idx.range(lo, hi);
           if (hasGt) {
             for (const id of idx.eq(lo)) candidates.delete(id);
@@ -505,7 +558,6 @@ export class Collection {
           return candidates;
         }
 
-        // Single bound
         if (hasGt) return idx.gt(ops.$gt);
         if (hasGte) return idx.gte(ops.$gte);
         if (hasLt) return idx.lt(ops.$lt);
@@ -514,6 +566,77 @@ export class Collection {
     }
 
     return null; // No indexed field found
+  }
+
+  /** Check if a value is a range operator object (all keys are $gt/$gte/$lt/$lte). */
+  private static isRangeOp(value: unknown): value is Record<string, unknown> {
+    if (value === null || value === undefined || typeof value !== "object" || Array.isArray(value)) return false;
+    const keys = Object.keys(value as Record<string, unknown>);
+    return keys.length > 0 && keys.every((k) => k === "$gt" || k === "$gte" || k === "$lt" || k === "$lte");
+  }
+
+  /**
+   * Try to resolve a filter using a composite index.
+   * Eligible when filter has equality on all leading fields and equality or range on the trailing field.
+   */
+  private compositeIndexedCandidates(filterObj: Record<string, unknown>): Set<string> | null {
+    if (this.compositeIndexes.size === 0) return null;
+
+    for (const [, { fields, idx }] of this.compositeIndexes) {
+      // Check all fields are present in the filter
+      const values: unknown[] = [];
+      let eligible = true;
+      let trailingRange: Record<string, unknown> | null = null;
+
+      for (let i = 0; i < fields.length; i++) {
+        const fval = filterObj[fields[i]];
+        if (fval === undefined) { eligible = false; break; }
+
+        if (i < fields.length - 1) {
+          // Leading fields: must be simple equality
+          if (fval !== null && typeof fval === "object") { eligible = false; break; }
+          values.push(fval);
+        } else {
+          // Trailing field: equality or range
+          if (fval === null || typeof fval !== "object") {
+            values.push(fval);
+          } else if (Collection.isRangeOp(fval)) {
+            trailingRange = fval as Record<string, unknown>;
+          } else {
+            eligible = false; break;
+          }
+        }
+      }
+
+      if (!eligible) continue;
+
+      if (trailingRange) {
+        // Range on trailing field: build composite key prefix, then range scan
+        const prefix = values; // leading field values
+        const hasGt = "$gt" in trailingRange;
+        const hasGte = "$gte" in trailingRange;
+        const hasLt = "$lt" in trailingRange;
+        const hasLte = "$lte" in trailingRange;
+
+        if ((hasGt || hasGte) && (hasLt || hasLte)) {
+          const lo = compositeKey([...prefix, hasGt ? trailingRange.$gt : trailingRange.$gte]);
+          const hi = compositeKey([...prefix, hasLt ? trailingRange.$lt : trailingRange.$lte]);
+          const candidates = idx.range(lo, hi);
+          if (hasGt) { for (const id of idx.eq(lo)) candidates.delete(id); }
+          if (hasLt) { for (const id of idx.eq(hi)) candidates.delete(id); }
+          return candidates;
+        }
+        if (hasGt) return idx.gt(compositeKey([...prefix, trailingRange.$gt]));
+        if (hasGte) return idx.gte(compositeKey([...prefix, trailingRange.$gte]));
+        if (hasLt) return idx.lt(compositeKey([...prefix, trailingRange.$lt]));
+        if (hasLte) return idx.lte(compositeKey([...prefix, trailingRange.$lte]));
+      } else {
+        // All fields are equality
+        return idx.eq(compositeKey(values));
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -1135,6 +1258,35 @@ export class Collection {
   /** List indexed fields. */
   listIndexes(): string[] {
     return [...this.btreeIndexes.keys()];
+  }
+
+  /**
+   * Create a composite index on multiple fields for fast compound lookups.
+   * Supports equality on all fields, or equality on leading fields + range on trailing field.
+   * Builds immediately from existing records.
+   */
+  createCompositeIndex(fields: string[]): void {
+    if (fields.length < 2) throw new Error("Composite index requires at least 2 fields");
+    const key = compositeIndexKey(fields);
+    if (this.compositeIndexes.has(key)) return;
+    const idx = new BTreeIndex(key);
+    for (const [id, record] of this.store.entries()) {
+      if (isExpired(record)) continue;
+      const clean = stripMeta(record);
+      const ck = compositeKey(fields.map((f) => getNestedValue(clean, f)));
+      idx.add(ck, id);
+    }
+    this.compositeIndexes.set(key, { fields, idx });
+  }
+
+  /** Remove a composite index. */
+  dropCompositeIndex(fields: string[]): boolean {
+    return this.compositeIndexes.delete(compositeIndexKey(fields));
+  }
+
+  /** List composite indexes (each as an array of field names). */
+  listCompositeIndexes(): string[][] {
+    return [...this.compositeIndexes.values()].map((c) => c.fields);
   }
 
   /**
