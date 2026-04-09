@@ -23,6 +23,9 @@ let corsOrigins = process.env.AGENTDB_CORS_ORIGINS ?? "";
 // Write mode
 let writeMode = process.env.AGENTDB_WRITE_MODE ?? "immediate";
 
+// Embeddings
+let embeddings = process.env.AGENTDB_EMBEDDINGS ?? "";
+
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   const next = args[i + 1];
@@ -40,6 +43,7 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === "--cors" && next) { corsOrigins = next; i++; }
   else if (arg === "--write-mode" && next) { writeMode = next; i++; }
   else if (arg === "--group-commit") { writeMode = "group"; }
+  else if (arg === "--embeddings" && next) { embeddings = next; i++; }
 }
 
 async function resolveBackend(): Promise<AgentDBOptions> {
@@ -47,6 +51,27 @@ async function resolveBackend(): Promise<AgentDBOptions> {
 
   if (agentId) opts.agentId = agentId;
   if (writeMode === "group" || writeMode === "async") opts.writeMode = writeMode;
+
+  // Parse --embeddings provider[:model] (e.g. "ollama", "openai:text-embedding-3-small", "voyage", "cohere")
+  if (embeddings) {
+    const [provider, model] = embeddings.split(":");
+    const apiKey = process.env.AGENTDB_EMBEDDINGS_API_KEY ?? "";
+    if (provider === "ollama") {
+      opts.embeddings = { provider: "ollama", model: model || undefined, baseUrl: process.env.AGENTDB_OLLAMA_URL || undefined } as import("../embeddings/index.js").EmbeddingConfig;
+    } else if (provider === "openai") {
+      opts.embeddings = { provider: "openai", apiKey: apiKey || process.env.OPENAI_API_KEY || "", model: model || undefined } as import("../embeddings/index.js").EmbeddingConfig;
+    } else if (provider === "voyage") {
+      opts.embeddings = { provider: "voyage", apiKey, model: model || undefined } as import("../embeddings/index.js").EmbeddingConfig;
+    } else if (provider === "cohere") {
+      opts.embeddings = { provider: "cohere", apiKey, model: model || undefined } as import("../embeddings/index.js").EmbeddingConfig;
+    } else if (provider === "http") {
+      opts.embeddings = { provider: "http", url: model || "", dimensions: 0 } as import("../embeddings/index.js").EmbeddingConfig;
+    } else {
+      console.error(`Unknown embedding provider: ${provider}. Use: ollama, openai, voyage, cohere, http`);
+      process.exit(1);
+    }
+    console.error(`Embeddings: ${provider}${model ? `:${model}` : ""}`);
+  }
 
   if (backend === "s3") {
     if (!s3Bucket) {

@@ -100,6 +100,11 @@ export class HnswIndex {
     return this.nodes.size;
   }
 
+  /** Vector dimensions. */
+  get dims(): number {
+    return this.dimensions;
+  }
+
   /** Add a vector to the index. */
   add(id: string, vector: number[]): void {
     if (vector.length !== this.dimensions) {

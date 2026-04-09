@@ -503,6 +503,52 @@ export function getTools(db: AgentDB): AgentTool[] {
     },
 
     {
+      name: "db_vector_upsert",
+      title: "Upsert Vector",
+      description: "Store a pre-computed vector for a record. No embedding provider required. Creates or replaces the record with the given vector and optional metadata fields." + API_NOTE,
+      schema: z.object({
+        collection: collectionParam,
+        id: z.string().describe("Record ID"),
+        vector: z.array(z.number()).describe("Vector (array of numbers)"),
+        metadata: z.record(z.unknown()).optional().describe("Optional metadata fields to store with the vector"),
+      }),
+      outputSchema: z.object({ id: z.string() }),
+      annotations: WRITE,
+      execute: safe("db_vector_upsert", WRITE)(async (args) => {
+        const col = await db.collection(args.collection as string);
+        await col.insertVector(
+          args.id as string,
+          args.vector as number[],
+          args.metadata as Record<string, unknown> | undefined,
+        );
+        return { id: args.id as string };
+      }),
+    },
+
+    {
+      name: "db_vector_search",
+      title: "Vector Search",
+      description: "Search by a raw vector (array of numbers). Returns the most similar records with cosine similarity scores. No embedding provider required — works with vectors stored via db_vector_upsert. Use db_semantic_search instead if you have a text query and an embedding provider configured." + API_NOTE,
+      schema: z.object({
+        collection: collectionParam,
+        vector: z.array(z.number()).describe("Query vector"),
+        filter: z.union([z.record(z.unknown()), z.string()]).optional().describe("Optional attribute filter"),
+        limit: z.number().optional().describe("Max results (default: 10)"),
+        summary: z.boolean().optional().describe("Return summary fields only"),
+      }),
+      outputSchema: z.object({ records: z.array(z.record(z.unknown())), scores: z.array(z.number()) }),
+      annotations: READ,
+      execute: safe("db_vector_search", READ)(async (args) => {
+        const col = await db.collection(args.collection as string);
+        return col.searchByVector(args.vector as number[], {
+          filter: args.filter as Record<string, unknown> | string | undefined,
+          limit: args.limit as number | undefined,
+          summary: args.summary as boolean | undefined,
+        });
+      }),
+    },
+
+    {
       name: "db_export",
       title: "Export Collections",
       description: "Export all or named collections as a self-contained JSON backup. The export includes all records with their _id fields. Use db_import to restore into a fresh or existing database." + API_NOTE,

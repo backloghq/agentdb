@@ -695,16 +695,17 @@ export class Collection {
       if (record[META_EXPIRES]) this._hasTTL = true;
       if (this.textIdx) this.textIdx.add(id, stripMeta(record));
     }
-    // Load existing embeddings into HNSW index
-    if (this.hnswIdx) {
-      for (const [id, record] of this.store.entries()) {
-        if (isExpired(record)) continue;
-        const stored = record[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
-        if (stored) {
-          const q = deserializeQuantized(stored);
-          const vec = Array.from(q.data).map((v) => v / q.scale); // dequantize
-          this.hnswIdx.add(id, vec);
+    // Load existing embeddings into HNSW index (auto-init if stored vectors exist but no provider)
+    for (const [id, record] of this.store.entries()) {
+      if (isExpired(record)) continue;
+      const stored = record[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
+      if (stored) {
+        const q = deserializeQuantized(stored);
+        const vec = Array.from(q.data).map((v) => v / q.scale);
+        if (!this.hnswIdx) {
+          this.hnswIdx = new HnswIndex({ dimensions: vec.length });
         }
+        this.hnswIdx.add(id, vec);
       }
     }
   }
@@ -1480,6 +1481,76 @@ export class Collection {
     }
 
     return toEmbed.length;
+  }
+
+  // --- Explicit Vector API ---
+
+  /**
+   * Store a pre-computed vector for a record. No embedding provider required.
+   * Creates/updates the record and indexes the vector in HNSW.
+   */
+  async insertVector(id: string, vector: number[], metadata?: Record<string, unknown>): Promise<void> {
+    if (!Array.isArray(vector) || vector.length === 0) {
+      throw new Error("Vector must be a non-empty number array");
+    }
+    // Initialize HNSW if needed
+    if (!this.hnswIdx) {
+      this.hnswIdx = new HnswIndex({ dimensions: vector.length });
+    }
+    // Validate dimensions
+    if (vector.length !== this.hnswIdx.dims) {
+      throw new Error(`Vector dimension mismatch: collection expects ${this.hnswIdx.dims}, got ${vector.length}`);
+    }
+    // Build stored record
+    const stored: StoredRecord = { _id: id, ...metadata };
+    const q = quantize(vector);
+    stored[META_EMBEDDING] = serializeQuantized(q);
+    this.stampVersion(stored, id);
+    const oldRecord = this.store.get(id);
+    await this.store.set(id, stored);
+    this.updateBTreeIndexes(id, oldRecord, stored);
+    if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+    // Update HNSW (remove old if exists, add new)
+    if (this.hnswIdx.size > 0) {
+      try { this.hnswIdx.remove(id); } catch { /* not in index yet */ }
+    }
+    this.hnswIdx.add(id, vector);
+    this.emitChange("upsert", [id]);
+  }
+
+  /**
+   * Search the HNSW index by a raw vector. No embedding provider required.
+   * Returns records sorted by similarity with scores.
+   */
+  searchByVector(
+    vector: number[],
+    opts?: { filter?: Filter; limit?: number; summary?: boolean },
+  ): { records: Record<string, unknown>[]; scores: number[] } {
+    if (!this.hnswIdx) {
+      throw new Error("Vector search not available. Call insertVector first or configure an embedding provider.");
+    }
+    if (vector.length !== this.hnswIdx.dims) {
+      throw new Error(`Vector dimension mismatch: index has ${this.hnswIdx.dims} dimensions, query has ${vector.length}`);
+    }
+    const limit = opts?.limit ?? 10;
+    const candidates = this.hnswIdx.search(vector, limit * 3);
+    const predicate = opts?.filter ? this.resolve(opts.filter) : () => true;
+    const allAccessor = this.opts.computed ? this.allCleanRecords() : () => [];
+
+    const records: Record<string, unknown>[] = [];
+    const scores: number[] = [];
+    for (const { id, score } of candidates) {
+      if (records.length >= limit) break;
+      const record = this.store.get(id);
+      if (!record || isExpired(record)) continue;
+      const clean = stripMeta(record);
+      if (!predicate(clean)) continue;
+      const withComputed = this.opts.computed ? this.applyComputed(clean, allAccessor) : clean;
+      records.push(opts?.summary ? summarize(withComputed) : withComputed);
+      scores.push(score);
+    }
+
+    return { records, scores };
   }
 
   /** Get collection stats. */

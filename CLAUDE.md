@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** All phases complete. 555 tests, 24 tools. Auth + security hardened. Group commit ~12x faster writes. Sorted-array indexed queries with range support ($gt/$lt/$gte/$lte). Count-from-index fast path. Predicate cache. HNSW MaxHeap optimized. Incremental index rebuild on tail/watch/undo. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints.
+**Status:** All phases complete. 587 tests, 26 tools. Auth + security hardened. Group commit ~12x faster writes. Sorted-array indexed queries with range support ($gt/$lt/$gte/$lte). Count-from-index fast path. Predicate cache. HNSW MaxHeap optimized. Incremental index rebuild on tail/watch/undo. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints.
 
 ## Commands
 
@@ -53,6 +53,9 @@ src/
   embeddings/
     types.ts            # EmbeddingProvider interface
     openai.ts           # OpenAI embedding provider
+    ollama.ts           # Ollama local embedding provider
+    voyage.ts           # Voyage AI embedding provider
+    cohere.ts           # Cohere embedding provider
     http.ts             # Custom HTTP embedding provider
     quantize.ts         # Int8 quantization for vector storage
     index.ts            # Provider factory

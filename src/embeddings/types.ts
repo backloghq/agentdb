@@ -10,4 +10,7 @@ export interface EmbeddingProvider {
 export type EmbeddingConfig =
   | { provider: "openai"; apiKey: string; model?: string; dimensions?: number }
   | { provider: "http"; url: string; headers?: Record<string, string>; dimensions: number }
+  | { provider: "ollama"; model?: string; baseUrl?: string; dimensions?: number }
+  | { provider: "voyage"; apiKey: string; model?: string; baseUrl?: string; dimensions?: number }
+  | { provider: "cohere"; apiKey: string; model?: string; baseUrl?: string; inputType?: string; dimensions?: number }
   | { provider: EmbeddingProvider };

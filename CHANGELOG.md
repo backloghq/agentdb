@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **HNSW MaxHeap** — search queue uses binary MaxHeap (O(log n) extract) instead of sorted array + shift (O(n log n + n)). Candidates use binary insert. Preserves >70% recall quality.
 
 ### Added
+- **Explicit vector API** — `insertVector(id, vector, metadata?)` stores pre-computed vectors without an embedding provider. `searchByVector(vector, opts?)` searches by raw vector with filter/limit support. HNSW auto-initializes from stored vectors on collection open.
+- **`db_vector_upsert` tool** — store a vector with metadata via MCP.
+- **`db_vector_search` tool** — search by raw vector via MCP.
+- **Ollama embedding provider** — local embeddings via Ollama API (`nomic-embed-text`). No API key required.
+- **Voyage AI embedding provider** — `voyage-3-lite` model. Batch API.
+- **Cohere embedding provider** — `embed-english-v3.0` with `input_type` support.
+- **CLI `--embeddings` flag** — configure embedding provider from CLI (e.g. `--embeddings ollama`, `--embeddings openai:text-embedding-3-small`). Env: `AGENTDB_EMBEDDINGS`.
 - **Sort on find** — `sort: "name"` (ascending) or `sort: "-score"` (descending). Supports dot notation for nested fields.
 - **Max query limit** — `find()` enforces max 10,000 records per query to prevent memory exhaustion.
 - **Error sanitization** — filesystem paths stripped from error messages returned to clients.

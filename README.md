@@ -312,6 +312,39 @@ const db = new AgentDB("./data", { writeMode: "group" });
 
 **Tradeoff:** A crash can lose buffered ops (up to 100ms of data). Default `"immediate"` mode is safe — every write survives a crash.
 
+### Embeddings and vector search
+
+AgentDB supports semantic search via embedding providers and explicit vector storage.
+
+**Embedding providers** (for automatic text embedding):
+
+```bash
+# Local via Ollama (no API key)
+npx agentdb --http --embeddings ollama
+
+# OpenAI
+OPENAI_API_KEY=sk-... npx agentdb --http --embeddings openai:text-embedding-3-small
+
+# Voyage AI / Cohere
+AGENTDB_EMBEDDINGS_API_KEY=... npx agentdb --http --embeddings voyage
+AGENTDB_EMBEDDINGS_API_KEY=... npx agentdb --http --embeddings cohere
+```
+
+**Explicit vector API** (no provider needed):
+
+```typescript
+const col = await db.collection("docs");
+
+// Store pre-computed vectors
+await col.insertVector("doc1", [0.1, 0.2, ...], { title: "My Document" });
+
+// Search by vector
+const results = col.searchByVector([0.1, 0.2, ...], { limit: 10, filter: { status: "active" } });
+// → { records: [...], scores: [0.98, 0.91, ...] }
+```
+
+MCP tools: `db_vector_upsert`, `db_vector_search`, `db_semantic_search`, `db_embed`.
+
 ### Rate limiting and CORS
 
 ```bash

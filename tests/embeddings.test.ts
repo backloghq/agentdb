@@ -1,7 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { resolveProvider } from "../src/embeddings/index.js";
 import { OpenAIEmbeddingProvider } from "../src/embeddings/openai.js";
 import { HttpEmbeddingProvider } from "../src/embeddings/http.js";
+import { OllamaEmbeddingProvider } from "../src/embeddings/ollama.js";
+import { VoyageEmbeddingProvider } from "../src/embeddings/voyage.js";
+import { CohereEmbeddingProvider } from "../src/embeddings/cohere.js";
 import type { EmbeddingProvider } from "../src/embeddings/types.js";
 
 /** Mock provider for testing — returns deterministic vectors. */
@@ -198,6 +201,366 @@ describe("Embedding Providers", () => {
       });
       const vectors = await provider.embed([]);
       expect(vectors).toEqual([]);
+    });
+  });
+
+  describe("resolveProvider - new providers", () => {
+    it("resolves ollama provider", () => {
+      const provider = resolveProvider({
+        provider: "ollama",
+        model: "nomic-embed-text",
+        dimensions: 768,
+      });
+      expect(provider).toBeInstanceOf(OllamaEmbeddingProvider);
+      expect(provider.dimensions).toBe(768);
+    });
+
+    it("resolves voyage provider", () => {
+      const provider = resolveProvider({
+        provider: "voyage",
+        apiKey: "test-key",
+        model: "voyage-3-lite",
+        dimensions: 512,
+      });
+      expect(provider).toBeInstanceOf(VoyageEmbeddingProvider);
+      expect(provider.dimensions).toBe(512);
+    });
+
+    it("resolves cohere provider", () => {
+      const provider = resolveProvider({
+        provider: "cohere",
+        apiKey: "test-key",
+        model: "embed-english-v3.0",
+        dimensions: 1024,
+      });
+      expect(provider).toBeInstanceOf(CohereEmbeddingProvider);
+      expect(provider.dimensions).toBe(1024);
+    });
+  });
+
+  describe("Ollama provider (mocked)", () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it("calls the API with correct URL and body", async () => {
+      const calls: Array<{ url: string; body: unknown }> = [];
+      vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        calls.push({ url: url.toString(), body });
+        return new Response(JSON.stringify({ embedding: [0.1, 0.2, 0.3, 0.4] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new OllamaEmbeddingProvider({ dimensions: 4 });
+      const vectors = await provider.embed(["hello"]);
+      expect(vectors).toHaveLength(1);
+      expect(vectors[0]).toEqual([0.1, 0.2, 0.3, 0.4]);
+      expect(calls[0].url).toBe("http://localhost:11434/api/embeddings");
+      expect(calls[0].body).toEqual({ model: "nomic-embed-text", prompt: "hello" });
+    });
+
+    it("respects custom baseUrl and model", async () => {
+      const calls: Array<{ url: string; body: unknown }> = [];
+      vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        calls.push({ url: url.toString(), body });
+        return new Response(JSON.stringify({ embedding: [0.1, 0.2] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new OllamaEmbeddingProvider({
+        model: "mxbai-embed-large",
+        baseUrl: "http://myhost:5000",
+        dimensions: 2,
+      });
+      await provider.embed(["test"]);
+      expect(calls[0].url).toBe("http://myhost:5000/api/embeddings");
+      expect(calls[0].body).toEqual({ model: "mxbai-embed-large", prompt: "test" });
+    });
+
+    it("auto-detects dimensions from first response", async () => {
+      vi.stubGlobal("fetch", async () => {
+        return new Response(JSON.stringify({ embedding: [0.1, 0.2, 0.3] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new OllamaEmbeddingProvider(); // no dimensions specified
+      expect(provider.dimensions).toBe(0);
+      await provider.embed(["hello"]);
+      expect(provider.dimensions).toBe(3);
+    });
+
+    it("throws on non-2xx response", async () => {
+      vi.stubGlobal("fetch", async () => new Response("Model not found", { status: 404 }));
+
+      const provider = new OllamaEmbeddingProvider({ dimensions: 4 });
+      await expect(provider.embed(["test"])).rejects.toThrow("404");
+    });
+
+    it("returns empty array for empty input", async () => {
+      const provider = new OllamaEmbeddingProvider({ dimensions: 4 });
+      const vectors = await provider.embed([]);
+      expect(vectors).toEqual([]);
+    });
+
+    it("batches N texts with sequential calls", async () => {
+      let callCount = 0;
+      vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+        callCount++;
+        const body = JSON.parse(init?.body as string);
+        const len = body.prompt.length;
+        return new Response(JSON.stringify({ embedding: [len * 0.1, len * 0.2, len * 0.3] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new OllamaEmbeddingProvider({ dimensions: 3 });
+      const vectors = await provider.embed(["hello", "world", "foo"]);
+      expect(vectors).toHaveLength(3);
+      expect(callCount).toBe(3); // one fetch per text
+      expect(vectors[0]).toEqual([0.5, 1.0, 1.5]); // "hello" length=5
+      expect(vectors[1]).toEqual([0.5, 1.0, 1.5]); // "world" length=5
+      expect(vectors[2]).toEqual([0.30000000000000004, 0.6000000000000001, 0.8999999999999999]); // "foo" length=3
+    });
+  });
+
+  describe("Voyage provider (mocked)", () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it("calls the API with correct URL, headers, and body", async () => {
+      const calls: Array<{ url: string; headers: Record<string, string>; body: unknown }> = [];
+      vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        const headers = Object.fromEntries(
+          Object.entries(init?.headers as Record<string, string>),
+        );
+        calls.push({ url: url.toString(), headers, body });
+        return new Response(JSON.stringify({
+          data: [{ embedding: [0.1, 0.2, 0.3] }],
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new VoyageEmbeddingProvider({ apiKey: "voy-key", dimensions: 3 });
+      const vectors = await provider.embed(["hello"]);
+      expect(vectors).toHaveLength(1);
+      expect(vectors[0]).toEqual([0.1, 0.2, 0.3]);
+      expect(calls[0].url).toBe("https://api.voyageai.com/v1/embeddings");
+      expect(calls[0].headers["Authorization"]).toBe("Bearer voy-key");
+      expect(calls[0].body).toEqual({
+        model: "voyage-3-lite",
+        input: ["hello"],
+        input_type: "document",
+      });
+    });
+
+    it("respects custom baseUrl and model", async () => {
+      const calls: Array<{ url: string; body: unknown }> = [];
+      vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: url.toString(), body: JSON.parse(init?.body as string) });
+        return new Response(JSON.stringify({
+          data: [{ embedding: [0.5] }],
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new VoyageEmbeddingProvider({
+        apiKey: "key",
+        model: "voyage-3",
+        baseUrl: "https://custom.voyage.ai/v1",
+        dimensions: 1,
+      });
+      await provider.embed(["test"]);
+      expect(calls[0].url).toBe("https://custom.voyage.ai/v1/embeddings");
+      expect(calls[0].body).toEqual({
+        model: "voyage-3",
+        input: ["test"],
+        input_type: "document",
+      });
+    });
+
+    it("auto-detects dimensions from first response", async () => {
+      vi.stubGlobal("fetch", async () => {
+        return new Response(JSON.stringify({
+          data: [{ embedding: [0.1, 0.2, 0.3, 0.4, 0.5] }],
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new VoyageEmbeddingProvider({ apiKey: "key" });
+      expect(provider.dimensions).toBe(0);
+      await provider.embed(["hello"]);
+      expect(provider.dimensions).toBe(5);
+    });
+
+    it("throws on non-2xx response", async () => {
+      vi.stubGlobal("fetch", async () => new Response("Forbidden", { status: 403 }));
+
+      const provider = new VoyageEmbeddingProvider({ apiKey: "bad-key", dimensions: 3 });
+      await expect(provider.embed(["test"])).rejects.toThrow("403");
+    });
+
+    it("returns empty array for empty input", async () => {
+      const provider = new VoyageEmbeddingProvider({ apiKey: "key", dimensions: 3 });
+      const vectors = await provider.embed([]);
+      expect(vectors).toEqual([]);
+    });
+
+    it("batch of N texts works correctly", async () => {
+      vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        const embeddings = body.input.map((_text: string, i: number) => ({
+          embedding: [i * 0.1, i * 0.2, i * 0.3],
+        }));
+        return new Response(JSON.stringify({ data: embeddings }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new VoyageEmbeddingProvider({ apiKey: "key", dimensions: 3 });
+      const vectors = await provider.embed(["a", "b", "c"]);
+      expect(vectors).toHaveLength(3);
+      expect(vectors[0]).toEqual([0, 0, 0]);
+      expect(vectors[1]).toEqual([0.1, 0.2, 0.3]);
+      expect(vectors[2]).toEqual([0.2, 0.4, 0.6]);
+    });
+  });
+
+  describe("Cohere provider (mocked)", () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it("calls the API with correct URL, headers, and body", async () => {
+      const calls: Array<{ url: string; headers: Record<string, string>; body: unknown }> = [];
+      vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        const headers = Object.fromEntries(
+          Object.entries(init?.headers as Record<string, string>),
+        );
+        calls.push({ url: url.toString(), headers, body });
+        return new Response(JSON.stringify({
+          embeddings: { float: [[0.1, 0.2, 0.3]] },
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new CohereEmbeddingProvider({ apiKey: "co-key", dimensions: 3 });
+      const vectors = await provider.embed(["hello"]);
+      expect(vectors).toHaveLength(1);
+      expect(vectors[0]).toEqual([0.1, 0.2, 0.3]);
+      expect(calls[0].url).toBe("https://api.cohere.com/v2/embed");
+      expect(calls[0].headers["Authorization"]).toBe("Bearer co-key");
+      expect(calls[0].body).toEqual({
+        model: "embed-english-v3.0",
+        texts: ["hello"],
+        input_type: "search_document",
+        embedding_types: ["float"],
+      });
+    });
+
+    it("respects custom baseUrl, model, and inputType", async () => {
+      const calls: Array<{ url: string; body: unknown }> = [];
+      vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+        calls.push({ url: url.toString(), body: JSON.parse(init?.body as string) });
+        return new Response(JSON.stringify({
+          embeddings: { float: [[0.5]] },
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new CohereEmbeddingProvider({
+        apiKey: "key",
+        model: "embed-multilingual-v3.0",
+        baseUrl: "https://custom.cohere.ai/v2",
+        inputType: "search_query",
+        dimensions: 1,
+      });
+      await provider.embed(["test"]);
+      expect(calls[0].url).toBe("https://custom.cohere.ai/v2/embed");
+      expect(calls[0].body).toEqual({
+        model: "embed-multilingual-v3.0",
+        texts: ["test"],
+        input_type: "search_query",
+        embedding_types: ["float"],
+      });
+    });
+
+    it("auto-detects dimensions from first response", async () => {
+      vi.stubGlobal("fetch", async () => {
+        return new Response(JSON.stringify({
+          embeddings: { float: [[0.1, 0.2, 0.3, 0.4]] },
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new CohereEmbeddingProvider({ apiKey: "key" });
+      expect(provider.dimensions).toBe(0);
+      await provider.embed(["hello"]);
+      expect(provider.dimensions).toBe(4);
+    });
+
+    it("throws on non-2xx response", async () => {
+      vi.stubGlobal("fetch", async () => new Response("Unauthorized", { status: 401 }));
+
+      const provider = new CohereEmbeddingProvider({ apiKey: "bad-key", dimensions: 3 });
+      await expect(provider.embed(["test"])).rejects.toThrow("401");
+    });
+
+    it("returns empty array for empty input", async () => {
+      const provider = new CohereEmbeddingProvider({ apiKey: "key", dimensions: 3 });
+      const vectors = await provider.embed([]);
+      expect(vectors).toEqual([]);
+    });
+
+    it("batch of N texts works correctly", async () => {
+      vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        const floatEmbeddings = body.texts.map((_text: string, i: number) => [i * 0.1, i * 0.2]);
+        return new Response(JSON.stringify({
+          embeddings: { float: floatEmbeddings },
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+      const provider = new CohereEmbeddingProvider({ apiKey: "key", dimensions: 2 });
+      const vectors = await provider.embed(["a", "b", "c", "d"]);
+      expect(vectors).toHaveLength(4);
+      expect(vectors[0]).toEqual([0, 0]);
+      expect(vectors[1]).toEqual([0.1, 0.2]);
+      expect(vectors[2]).toEqual([0.2, 0.4]);
+      expect(vectors[3]).toEqual([0.30000000000000004, 0.6000000000000001]);
     });
   });
 
