@@ -20,6 +20,33 @@ const db = new AgentDB("./data");
 
 ---
 
+## Single Agent, MCP Stdio
+
+One agent connects via stdio MCP transport. No network overhead — communication is via stdin/stdout pipes. This is how Claude Code and most MCP clients connect.
+
+```bash
+npx agentdb --path ./data
+```
+
+Add to your MCP client config (e.g., Claude Code `settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "agentdb": {
+      "command": "npx",
+      "args": ["agentdb", "--path", "./data"]
+    }
+  }
+}
+```
+
+**When:** Single agent, local development, Claude Code, any MCP client.
+**Latency:** ~0.05ms per tool call (no HTTP overhead).
+**Memory:** One copy of all records in memory.
+
+---
+
 ## Multiple Agents, Single Server (Recommended)
 
 One AgentDB HTTP server holds the data. Multiple agents connect to it. This is the recommended pattern for most multi-agent use cases.
@@ -82,6 +109,9 @@ npx agentdb --backend s3 --bucket my-bucket --agent-id agent-1
 Or in code:
 
 ```typescript
+import { AgentDB, loadS3Backend } from "@backloghq/agentdb";
+
+const { S3Backend } = await loadS3Backend();
 const db = new AgentDB("mydb", {
   backend: new S3Backend({ bucket: "my-bucket", region: "us-east-1" }),
   agentId: "agent-1",
@@ -127,8 +157,11 @@ const result = tasks.find({ filter: { status: "active" } });
 One agent per invocation, data on S3. Each invocation opens the store, does work, closes. No long-running server.
 
 ```typescript
+import { AgentDB, loadS3Backend } from "@backloghq/agentdb";
+
 // Lambda handler
 export async function handler(event) {
+  const { S3Backend } = await loadS3Backend();
   const db = new AgentDB("lambda-db", {
     backend: new S3Backend({ bucket: "my-bucket", region: "us-east-1" }),
   });
@@ -199,9 +232,10 @@ store.watch((newOps) => {
 
 | Scenario | Pattern | Memory per agent | Write latency | Read consistency |
 |---|---|---|---|---|
-| Single dev, local | Filesystem | 1× | <1ms | Immediate |
-| Multiple agents, same machine | HTTP server | 0× (server holds it) | ~2ms (HTTP) | Immediate |
-| Multiple agents, different machines | HTTP server + S3 | 0× (server holds it) | ~50ms (S3 write) | Immediate |
+| Single dev, library embed | Direct import | 1× | <1ms | Immediate |
+| Single agent, MCP client | Stdio MCP | 1× | <1ms | Immediate |
+| Multiple agents, same machine | HTTP MCP server | 0× (server holds it) | ~2ms (HTTP) | Immediate |
+| Multiple agents, different machines | HTTP MCP + S3 | 0× (server holds it) | ~50ms (S3 write) | Immediate |
 | Agents on different machines, no server | Multi-writer S3 | 1× per agent | ~50ms (S3 write) | Eventual (refresh) |
 | Serverless (Lambda) | S3 per invocation | 1× per invocation | ~50ms (S3 write) | Per-invocation |
 | Read scaling | ReadOnly replicas | 1× per reader | N/A (read-only) | Near-real-time (tail) |

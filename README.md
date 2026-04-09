@@ -351,6 +351,20 @@ Use `summary: true` on find to get compact results. Omits long text fields (>200
 col.find({ filter: { status: "active" }, summary: true });
 ```
 
+## Deployment Patterns
+
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed deployment guidance:
+
+| Scenario | Pattern | Latency |
+|----------|---------|---------|
+| Single agent, local | Direct import / stdio MCP | <1ms |
+| Multiple agents, same machine | HTTP MCP server | ~1-5ms |
+| Multiple agents, distributed | HTTP MCP + S3 backend | ~50ms |
+| Decentralized, no server | Multi-writer S3 | ~50ms (eventual consistency) |
+| Serverless (Lambda) | S3 per invocation | ~50ms |
+
+**Default recommendation: HTTP server.** Use the library directly for maximum performance, stdio MCP for single-agent, HTTP MCP for multi-agent.
+
 ## Development
 
 ```bash
