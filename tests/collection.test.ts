@@ -172,6 +172,69 @@ describe("Collection", () => {
     });
   });
 
+  describe("change notifications", () => {
+    it("emits on insert", async () => {
+      const events: Array<{ type: string; ids: string[] }> = [];
+      col.on("change", (e) => events.push({ type: e.type, ids: e.ids }));
+
+      const id = await col.insert({ name: "Alice" });
+      expect(events).toHaveLength(1);
+      expect(events[0].type).toBe("insert");
+      expect(events[0].ids).toEqual([id]);
+    });
+
+    it("emits on update", async () => {
+      await col.insert({ _id: "a", name: "Alice" });
+      const events: Array<{ type: string }> = [];
+      col.on("change", (e) => events.push({ type: e.type }));
+
+      await col.update({ _id: "a" }, { $set: { name: "Updated" } });
+      expect(events).toHaveLength(1);
+      expect(events[0].type).toBe("update");
+    });
+
+    it("emits on delete", async () => {
+      await col.insert({ _id: "a", name: "Alice" });
+      const events: Array<{ type: string }> = [];
+      col.on("change", (e) => events.push({ type: e.type }));
+
+      await col.remove({ _id: "a" });
+      // delete emits twice: tag + delete (if agent specified) or just delete
+      expect(events.some((e) => e.type === "delete")).toBe(true);
+    });
+
+    it("emits on undo", async () => {
+      await col.insert({ _id: "a", name: "Alice" });
+      const events: Array<{ type: string }> = [];
+      col.on("change", (e) => events.push({ type: e.type }));
+
+      await col.undo();
+      expect(events).toHaveLength(1);
+      expect(events[0].type).toBe("undo");
+    });
+
+    it("includes agent in event", async () => {
+      const events: Array<{ agent?: string }> = [];
+      col.on("change", (e) => events.push({ agent: e.agent }));
+
+      await col.insert({ name: "Alice" }, { agent: "test-bot" });
+      expect(events[0].agent).toBe("test-bot");
+    });
+
+    it("off removes listener", async () => {
+      const events: Array<{ type: string }> = [];
+      const listener = (e: { type: string }) => events.push({ type: e.type });
+      col.on("change", listener);
+
+      await col.insert({ name: "Alice" });
+      expect(events).toHaveLength(1);
+
+      col.off("change", listener);
+      await col.insert({ name: "Bob" });
+      expect(events).toHaveLength(1); // no new event
+    });
+  });
+
   describe("optimistic locking", () => {
     it("records have _version starting at 1", async () => {
       const id = await col.insert({ _id: "a", name: "Alice" });

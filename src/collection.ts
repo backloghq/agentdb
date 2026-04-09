@@ -6,6 +6,7 @@ import { parseCompactFilter } from "./compact-filter.js";
 import { TextIndex } from "./text-index.js";
 import { ViewManager } from "./view.js";
 import type { ViewDefinition } from "./view.js";
+import { EventEmitter } from "node:events";
 import { HnswIndex } from "./hnsw.js";
 import type { EmbeddingProvider } from "./embeddings/types.js";
 import { quantize, serializeQuantized, deserializeQuantized } from "./embeddings/quantize.js";
@@ -137,6 +138,14 @@ export interface CollectionOptions {
   textSearch?: boolean;
 }
 
+/** Change event emitted after mutations. */
+export interface ChangeEvent {
+  type: "insert" | "update" | "upsert" | "delete" | "undo";
+  collection: string;
+  ids: string[];
+  agent?: string;
+}
+
 /** Reserved field prefix for internal metadata. */
 const META_AGENT = "_agent";
 const META_REASON = "_reason";
@@ -247,6 +256,7 @@ export class Collection {
   private views = new ViewManager();
   private hnswIdx: HnswIndex | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
+  private emitter = new EventEmitter();
 
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
@@ -275,9 +285,20 @@ export class Collection {
     stored[META_VERSION] = currentVersion + 1;
   }
 
-  /** Called after any mutation to invalidate caches. */
-  private onMutate(): void {
+  /** Subscribe to change events. */
+  on(event: "change", listener: (e: ChangeEvent) => void): void {
+    this.emitter.on(event, listener);
+  }
+
+  /** Unsubscribe from change events. */
+  off(event: "change", listener: (e: ChangeEvent) => void): void {
+    this.emitter.off(event, listener);
+  }
+
+  /** Emit a change event and invalidate caches. */
+  private emitChange(type: ChangeEvent["type"], ids: string[], agent?: string): void {
     this.views.invalidate();
+    this.emitter.emit("change", { type, collection: this.name, ids, agent } satisfies ChangeEvent);
   }
 
   /** Rebuild the full text index from current store contents. */
@@ -383,7 +404,7 @@ export class Collection {
     this.stampVersion(stored, id);
     await this.store.set(id, stored);
     if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
-    this.onMutate();
+    this.emitChange("insert", [id], opts?.agent);
     return id;
   }
 
@@ -415,7 +436,7 @@ export class Collection {
         this.textIdx.add(id, stripMeta(stored));
       }
     }
-    this.onMutate();
+    this.emitChange("insert", prepared.map((p) => p.id), opts?.agent);
     return prepared.map((p) => p.id);
   }
 
@@ -514,7 +535,7 @@ export class Collection {
       }
     });
     this.rebuildTextIndex();
-    this.onMutate();
+    this.emitChange("update", updates.map((u) => u.id), opts?.agent);
 
     return updates.length;
   }
@@ -538,7 +559,7 @@ export class Collection {
     this.stampVersion(stored, id);
     await this.store.set(id, stored);
     if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
-    this.onMutate();
+    this.emitChange("upsert", [id], opts?.agent);
     return { id, action: existing ? "updated" : "inserted" };
   }
 
@@ -577,7 +598,7 @@ export class Collection {
     if (this.textIdx) {
       for (const id of toDelete) this.textIdx.remove(id);
     }
-    this.onMutate();
+    this.emitChange("delete", toDelete, opts?.agent);
 
     return toDelete.length;
   }
@@ -589,7 +610,7 @@ export class Collection {
     const result = await this.store.undo();
     if (result) {
       this.rebuildTextIndex();
-      this.onMutate();
+      this.emitChange("undo", []);
     }
     return result;
   }
@@ -629,7 +650,7 @@ export class Collection {
     if (this.textIdx) {
       for (const id of expired) this.textIdx.remove(id);
     }
-    this.onMutate();
+    this.emitChange("delete", expired);
     return expired.length;
   }
 
@@ -647,7 +668,7 @@ export class Collection {
     );
     if (count > 0) {
       this.rebuildTextIndex();
-      this.onMutate();
+      this.emitChange("delete", []);
     }
     return count;
   }
