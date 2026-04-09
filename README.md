@@ -110,8 +110,9 @@ npx agentdb
 ### Library usage
 
 ```typescript
-import { AgentDB, S3Backend } from "@backloghq/agentdb";
+import { AgentDB, loadS3Backend } from "@backloghq/agentdb";
 
+const { S3Backend } = await loadS3Backend(); // optional — requires @backloghq/opslog-s3
 const db = new AgentDB("mydb", {
   backend: new S3Backend({
     bucket: "my-bucket",

@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Predicate compilation cache** — compiled filter predicates cached in a 64-entry LRU keyed by JSON-serialized filter. Repeated queries with the same filter skip re-parsing and re-compilation.
 - **Incremental index rebuild** — `tail()`, `watch()`, `undo()`, `archive()` now re-index only affected records instead of full rebuild. Text index tokenization skipped for unaffected records. Full rebuild kept for `refresh()` and `batch()` (unknown scope).
 - **Direct _id fast path** — `update({ _id: key }, ...)` and `remove({ _id: key })` now short-circuit to O(1) Map lookup instead of linear scan. Eliminates the YCSB-A run-phase bottleneck where 10K-record scans dominated write latency.
+- **Partial sort** — `find()` with sort + small limit uses O(n log k) selection instead of O(n log n) full sort when result set >> limit.
+- **stripMeta dedup** — `updateBTreeIndexes()` strips meta once per old/new record, reused across all indexes (was per-index).
+- **search() early exit** — `search()` skips offset records and stops after limit instead of materializing all matches.
+- **getNestedValue fast path** — simple (non-dot) field names skip `path.split(".")` allocation.
+- **compare() cache** — `String()` conversions cached in B-tree comparator (was called 2x per value).
+- **findAll() single-pass** — replaced `.all().filter().map()` triple-allocation chain with single loop.
 - **Cleanup B-tree fix** — `cleanup()` now removes expired records from B-tree indexes (was previously missed).
 - **Eliminate double stripMeta** — filter predicates run on raw records (meta fields don't interfere). stripMeta only for output. Removes N object allocations per query.
 - **Epoch TTL** — `_expires` stored as epoch ms instead of ISO string. Avoids Date parsing in hot path.
@@ -55,6 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **MEDIUM**: Version string centralized from package.json
 - **MEDIUM**: `purgeCollection` uses prefix match instead of fuzzy `includes()`
 - **MEDIUM**: `PermissionManager` denies undefined agent when rules are configured
+- `authContext`/`getCurrentAuth` moved to `src/auth-context.ts` — breaks reverse dependency from tools→mcp
+- `S3Backend` now lazy-loaded via `loadS3Backend()` — `@backloghq/opslog-s3` is optional
+- `db_batch` deletes now truly atomic via `deleteById()` (was queuing behind serialize lock)
+- `dropCollection` cleans up event listeners and memory monitor entries (was leaking)
+- `db_delete` accepts compact string filters (aligned with `db_update`/`db_archive`)
+- Prototype pollution blocked — `__proto__`, `constructor`, `prototype` added to `PROTECTED_FIELDS`
+- Permission hierarchy — `admin` implies `write`, `write` implies `read`
+- `$regex` ReDoS check applied to `RegExp` objects (was string-only)
+- Multi-token auth uses `timingSafeEqual` iteration (was plain property lookup)
+- `$regex` ReDoS denylist catches alternation patterns like `(a|a)*`
+- HSTS header added to HTTP transport
+- Rate limiter periodically cleans up expired entries
+- Signal handlers use `process.once` (no stacking on repeated calls)
+- `removeById()` guard uses `.has()` instead of `!== undefined`
 - Security headers added: `X-Content-Type-Options`, `Cache-Control`, `X-Frame-Options`
 - Dynamic port allocation in auth tests (prevents EADDRINUSE)
 - `startHttp` returns actual port number for test use

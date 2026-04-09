@@ -92,6 +92,30 @@ describe("BTreeIndex", () => {
     expect(idx.eq(null)).toEqual(new Set(["a", "b"]));
   });
 
+  it("removeById removes entry without knowing the key", () => {
+    idx.add("active", "a");
+    idx.add("done", "b");
+    idx.add("active", "c");
+    idx.removeById("a");
+    expect(idx.eq("active")).toEqual(new Set(["c"]));
+    expect(idx.size).toBe(2);
+  });
+
+  it("removeById is no-op for unknown ID", () => {
+    idx.add("active", "a");
+    idx.removeById("nonexistent");
+    expect(idx.eq("active")).toEqual(new Set(["a"]));
+    expect(idx.size).toBe(1);
+  });
+
+  it("removeById works with null-keyed entries", () => {
+    idx.add(null, "a");
+    idx.add("active", "b");
+    idx.removeById("a");
+    expect(idx.eq(null)).toEqual(new Set());
+    expect(idx.size).toBe(1);
+  });
+
   describe("range comparison methods", () => {
     let numIdx: BTreeIndex;
 

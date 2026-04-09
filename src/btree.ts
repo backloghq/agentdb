@@ -17,7 +17,8 @@ function compare(a: unknown, b: unknown): number {
   if (a === null || a === undefined) return -1;
   if (b === null || b === undefined) return 1;
   if (typeof a === "number" && typeof b === "number") return a - b;
-  return String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
+  const sa = String(a), sb = String(b);
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
 }
 
 /**
@@ -67,8 +68,8 @@ export class BTreeIndex {
 
   /** Remove a record by ID without knowing its indexed value. */
   removeById(id: string): void {
-    const value = this.idToKey.get(id);
-    if (value !== undefined) this.remove(value, id);
+    if (!this.idToKey.has(id)) return;
+    this.remove(this.idToKey.get(id), id);
   }
 
   /** Find all record IDs where field equals value. */

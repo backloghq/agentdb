@@ -15,15 +15,14 @@ type FilterValue = unknown;
  * E.g., "metadata.tags" on { metadata: { tags: ["a"] } } returns ["a"].
  */
 export function getNestedValue(record: Record<string, unknown>, path: string): unknown {
+  // Fast path for simple (non-dot) keys — avoids split() allocation
+  if (!path.includes(".")) return record[path];
+
   const parts = path.split(".");
   let current: unknown = record;
   for (const part of parts) {
-    if (current === null || current === undefined) {
-      return undefined;
-    }
-    if (typeof current !== "object") {
-      return undefined;
-    }
+    if (current === null || current === undefined) return undefined;
+    if (typeof current !== "object") return undefined;
     current = (current as Record<string, unknown>)[part];
   }
   return current;
@@ -259,6 +258,16 @@ function compileOperator(fieldPath: string, op: string, opValue: unknown): Predi
     case "$regex": {
       let regex: RegExp;
       if (opValue instanceof RegExp) {
+        // Apply same ReDoS checks to RegExp objects
+        const src = opValue.source;
+        if (/(\+|\*|\{)\s*(\+|\*|\{)/.test(src) ||
+            /\([^)]*(\+|\*)\)[+*{]/.test(src) ||
+            /\([^)]*\|[^)]*\)[+*{]/.test(src)) {
+          throw new Error("$regex: pattern rejected — potential catastrophic backtracking");
+        }
+        if (src.length > 200) {
+          throw new Error("$regex: pattern too long (max 200 characters)");
+        }
         regex = opValue;
       } else if (typeof opValue === "string") {
         // Reject patterns that could cause catastrophic backtracking (ReDoS):

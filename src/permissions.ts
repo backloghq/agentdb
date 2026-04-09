@@ -35,7 +35,10 @@ export class PermissionManager {
     if (this.rules.size === 0) return true; // No rules = unrestricted
     if (!agent) return this.rules.size === 0; // No agent + rules configured = denied
     const perms = this.rules.get(agent) ?? DENY_ALL;
-    return perms[level];
+    // Permission hierarchy: admin implies write, write implies read
+    if (level === "read") return perms.read || perms.write || perms.admin;
+    if (level === "write") return perms.write || perms.admin;
+    return perms.admin;
   }
 
   /** Assert a permission, throw if denied. */

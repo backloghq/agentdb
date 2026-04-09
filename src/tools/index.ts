@@ -269,7 +269,7 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Permanently delete records matching a filter. Returns the number of deleted records. Use db_find first to preview matches. This cannot be undone except with db_undo (which only reverses the last mutation)." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        filter: z.record(z.unknown()).describe("Filter to match records to delete"),
+        filter: z.union([z.record(z.unknown()), z.string()]).describe("Filter to match records to delete (JSON object or compact string)"),
         ...mutationOpts,
       }),
       outputSchema: z.object({ deleted: z.number() }),
@@ -320,7 +320,7 @@ export function getTools(db: AgentDB): AgentTool[] {
               col.insert(operation.record, { agent: args.agent as string | undefined });
               opCount++;
             } else if (operation.op === "delete" && operation.id) {
-              col.remove({ _id: operation.id });
+              col.deleteById(operation.id);
               opCount++;
             }
           }

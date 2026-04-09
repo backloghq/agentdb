@@ -62,8 +62,8 @@ export async function startStdio(dataDir: string, dbOpts?: AgentDBOptions): Prom
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  process.on("SIGINT", async () => { await db.close(); process.exit(0); });
-  process.on("SIGTERM", async () => { await db.close(); process.exit(0); });
+  process.once("SIGINT", async () => { await db.close(); process.exit(0); });
+  process.once("SIGTERM", async () => { await db.close(); process.exit(0); });
 }
 
 /**
@@ -252,8 +252,8 @@ export async function startHttp(
     await db.close();
   };
 
-  process.on("SIGINT", async () => { await close(); process.exit(0); });
-  process.on("SIGTERM", async () => { await close(); process.exit(0); });
+  process.once("SIGINT", async () => { await close(); process.exit(0); });
+  process.once("SIGTERM", async () => { await close(); process.exit(0); });
 
   return { app, close, auditLog, port: actualPort };
 }

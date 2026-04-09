@@ -274,7 +274,7 @@ function summarize(record: Record<string, unknown>): Record<string, unknown> {
  * Apply update operators to a record, returning a new record.
  */
 /** Fields that cannot be modified via $set/$unset/$inc/$push. */
-const PROTECTED_FIELDS = new Set([META_AGENT, META_REASON, META_EXPIRES, META_EMBEDDING, META_VERSION, "_id"]);
+const PROTECTED_FIELDS = new Set([META_AGENT, META_REASON, META_EXPIRES, META_EMBEDDING, META_VERSION, "_id", "__proto__", "constructor", "prototype"]);
 
 function applyUpdate(record: StoredRecord, update: UpdateOps): StoredRecord {
   const result = { ...record };
@@ -389,26 +389,25 @@ export class Collection {
   /** Update B-tree indexes (single-field + composite) for a record change. */
   private updateBTreeIndexes(id: string, oldRecord: StoredRecord | undefined, newRecord: StoredRecord | undefined): void {
     if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0) return;
+    // Strip meta once per record, reuse across all indexes
+    const oldClean = oldRecord ? stripMeta(oldRecord) : undefined;
+    const newClean = newRecord && !isExpired(newRecord) ? stripMeta(newRecord) : undefined;
     for (const [field, idx] of this.btreeIndexes) {
-      if (oldRecord) {
-        const oldVal = getNestedValue(stripMeta(oldRecord), field);
+      if (oldClean) {
+        const oldVal = getNestedValue(oldClean, field);
         if (oldVal !== undefined) idx.remove(oldVal, id);
       }
-      if (newRecord && !isExpired(newRecord)) {
-        const newVal = getNestedValue(stripMeta(newRecord), field);
+      if (newClean) {
+        const newVal = getNestedValue(newClean, field);
         if (newVal !== undefined) idx.add(newVal, id);
       }
     }
     for (const [, { fields, idx }] of this.compositeIndexes) {
-      if (oldRecord) {
-        const oldClean = stripMeta(oldRecord);
-        const oldKey = compositeKey(fields.map((f) => getNestedValue(oldClean, f)));
-        idx.remove(oldKey, id);
+      if (oldClean) {
+        idx.remove(compositeKey(fields.map((f) => getNestedValue(oldClean, f))), id);
       }
-      if (newRecord && !isExpired(newRecord)) {
-        const newClean = stripMeta(newRecord);
-        const newKey = compositeKey(fields.map((f) => getNestedValue(newClean, f)));
-        idx.add(newKey, id);
+      if (newClean) {
+        idx.add(compositeKey(fields.map((f) => getNestedValue(newClean, f))), id);
       }
     }
   }
@@ -793,7 +792,11 @@ export class Collection {
    */
   /** Return all non-expired records (no limit, no pagination). For internal use (export, etc). */
   findAll(): Record<string, unknown>[] {
-    return this.store.all().filter((r) => !isExpired(r)).map(stripMeta);
+    const result: Record<string, unknown>[] = [];
+    for (const [, record] of this.store.entries()) {
+      if (!isExpired(record)) result.push(stripMeta(record));
+    }
+    return result;
   }
 
   find(opts?: FindOpts): FindResult {
@@ -825,20 +828,39 @@ export class Collection {
       records = this.store.filter((value) => !isExpired(value) && predicate(value));
     }
 
-    // Sort if requested. Full sort is O(m log m) — acceptable for typical result sets.
-    // A heap-based partial sort would help when m >> limit, but adds complexity.
+    // Sort if requested
     if (opts?.sort) {
       const desc = opts.sort.startsWith("-");
-      const field = desc ? opts.sort.slice(1) : opts.sort;
-      records.sort((a, b) => {
-        const va = getNestedValue(a, field);
-        const vb = getNestedValue(b, field);
+      const sortField = desc ? opts.sort.slice(1) : opts.sort;
+      const cmp = (a: StoredRecord, b: StoredRecord) => {
+        const va = getNestedValue(a, sortField);
+        const vb = getNestedValue(b, sortField);
         if (va === vb) return 0;
         if (va === undefined || va === null) return 1;
         if (vb === undefined || vb === null) return -1;
-        const cmp = va < vb ? -1 : va > vb ? 1 : 0;
-        return desc ? -cmp : cmp;
-      });
+        const c = va < vb ? -1 : va > vb ? 1 : 0;
+        return desc ? -c : c;
+      };
+      const k = offset + limit;
+      if (records.length > k * 10 && k < records.length) {
+        // Partial sort: keep sorted window of size k, single-pass the rest. O(n log k).
+        const top = records.slice(0, k).sort(cmp);
+        for (let i = k; i < records.length; i++) {
+          if (cmp(records[i], top[k - 1]) < 0) {
+            let lo = 0, hi = k;
+            while (lo < hi) {
+              const mid = (lo + hi) >>> 1;
+              if (cmp(top[mid], records[i]) <= 0) lo = mid + 1;
+              else hi = mid;
+            }
+            top.splice(lo, 0, records[i]);
+            top.pop();
+          }
+        }
+        records = top;
+      } else {
+        records.sort(cmp);
+      }
     }
 
     const total = records.length;
@@ -973,6 +995,21 @@ export class Collection {
     this.emitChange("update", updates.map((u) => u.id), opts?.agent);
 
     return updates.length;
+  }
+
+  /**
+   * Delete a single record by ID. Works synchronously inside batch().
+   * Unlike remove() which goes through the full filter pipeline,
+   * this is a direct store.delete() suitable for batch operations.
+   */
+  async deleteById(id: string, opts?: MutationOpts): Promise<boolean> {
+    const record = this.store.get(id);
+    if (!record || isExpired(record)) return false;
+    this.store.delete(id);
+    if (this.textIdx) this.textIdx.remove(id);
+    this.updateBTreeIndexes(id, record, undefined);
+    this.emitChange("delete", [id], opts?.agent);
+    return true;
   }
 
   /**
@@ -1225,19 +1262,23 @@ export class Collection {
     const useSummary = opts?.summary ?? false;
 
     const records: Record<string, unknown>[] = [];
+    let skipped = 0;
+    let total = 0;
     for (const id of matchIds) {
       const record = this.store.get(id);
       if (record && !isExpired(record)) {
-        let clean = stripMeta(record);
-        clean = this.applyComputed(clean, allAccessor);
-        records.push(useSummary ? summarize(clean) : clean);
+        total++;
+        if (skipped < offset) { skipped++; continue; }
+        if (records.length < limit) {
+          let clean = stripMeta(record);
+          clean = this.applyComputed(clean, allAccessor);
+          records.push(useSummary ? summarize(clean) : clean);
+        }
       }
     }
 
-    const total = records.length;
-    const sliced = records.slice(offset, offset + limit);
     return {
-      records: sliced,
+      records,
       total,
       truncated: total > offset + limit,
     };

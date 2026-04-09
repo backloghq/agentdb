@@ -215,9 +215,13 @@ export class AgentDB {
   async dropCollection(name: string): Promise<void> {
     this.ensureOpen();
 
-    // Close if open
+    // Close if open (clean up listener + memory tracking like evictLru does)
     const existing = this.open.get(name);
     if (existing) {
+      const listener = this.collectionListeners.get(name);
+      if (listener) existing.off("change", listener);
+      this.collectionListeners.delete(name);
+      this.memoryMonitor.updateEstimate(name, 0, 0);
       await existing.close();
       this.open.delete(name);
       this.removeLru(name);
