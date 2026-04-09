@@ -60,10 +60,15 @@ export interface UpdateOps {
   $push?: Record<string, unknown>;
 }
 
+/** Computed field function — receives the record and a lazy accessor for all records. */
+export type ComputedFn = (record: Record<string, unknown>, allRecords: () => Record<string, unknown>[]) => unknown;
+
 /** Options for configuring collection middleware. */
 export interface CollectionOptions {
   /** Validation function — called before every insert/update/upsert. Throw to reject. */
   validate?: (record: Record<string, unknown>) => void;
+  /** Computed fields — calculated on read, not stored. Keys are field names, values are compute functions. */
+  computed?: Record<string, ComputedFn>;
 }
 
 /** Reserved field prefix for internal metadata. */
@@ -176,6 +181,25 @@ export class Collection {
     }
   }
 
+  /** Apply computed fields to a clean record. Lazy-loads allRecords on first use. */
+  private applyComputed(record: Record<string, unknown>, allRecordsAccessor: () => Record<string, unknown>[]): Record<string, unknown> {
+    if (!this.opts.computed) return record;
+    const result = { ...record };
+    for (const [key, fn] of Object.entries(this.opts.computed)) {
+      result[key] = fn(record, allRecordsAccessor);
+    }
+    return result;
+  }
+
+  /** Create a lazy accessor for all clean records (computed NOT applied to avoid recursion). */
+  private allCleanRecords(): () => Record<string, unknown>[] {
+    let cached: Record<string, unknown>[] | null = null;
+    return () => {
+      if (!cached) cached = this.store.all().map(stripMeta);
+      return cached;
+    };
+  }
+
   /** Whether the underlying store is open. */
   get opened(): boolean {
     return this._opened;
@@ -238,7 +262,8 @@ export class Collection {
   findOne(id: string): Record<string, unknown> | undefined {
     const record = this.store.get(id);
     if (!record) return undefined;
-    return stripMeta(record);
+    const clean = stripMeta(record);
+    return this.applyComputed(clean, this.allCleanRecords());
   }
 
   /**
@@ -254,8 +279,10 @@ export class Collection {
 
     const total = records.length;
     const sliced = records.slice(offset, offset + limit);
+    const allAccessor = this.allCleanRecords();
     const mapped = sliced.map((r) => {
-      const clean = stripMeta(r);
+      let clean = stripMeta(r);
+      clean = this.applyComputed(clean, allAccessor);
       return useSummary ? summarize(clean) : clean;
     });
 
@@ -397,8 +424,9 @@ export class Collection {
     const samples = all.slice(0, sampleSize);
     const fieldMap = new Map<string, { types: Set<string>; example: unknown }>();
 
+    const allAccessor = this.allCleanRecords();
     for (const record of samples) {
-      const clean = stripMeta(record);
+      const clean = this.applyComputed(stripMeta(record), allAccessor);
       for (const [key, value] of Object.entries(clean)) {
         const existing = fieldMap.get(key);
         const type = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;

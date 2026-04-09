@@ -459,6 +459,81 @@ describe("Collection", () => {
     });
   });
 
+  describe("computed fields", () => {
+    let computed: Collection;
+
+    beforeEach(async () => {
+      const cDir = await mkdtemp(join(tmpdir(), "agentdb-comp-"));
+      const cStore = new Store<Record<string, unknown>>();
+      computed = new Collection("computed", cStore, {
+        computed: {
+          fullName: (record) => `${record.first} ${record.last}`,
+          isHighPriority: (record) => record.priority === "H",
+          depCount: (record, allRecords) => {
+            const deps = record.depends as string[] | undefined;
+            if (!deps?.length) return 0;
+            return deps.filter((id) => allRecords().some((r) => r._id === id)).length;
+          },
+        },
+      });
+      await computed.open(cDir, { checkpointThreshold: 1000 });
+      (computed as Record<string, unknown>)._testDir = cDir;
+    });
+
+    afterEach(async () => {
+      const cDir = (computed as Record<string, unknown>)._testDir as string;
+      try { await computed.close(); } catch { /* */ }
+      await rm(cDir, { recursive: true, force: true });
+    });
+
+    it("computed fields appear in findOne", async () => {
+      await computed.insert({ _id: "a", first: "Alice", last: "Smith", priority: "H" });
+      const record = computed.findOne("a");
+      expect(record?.fullName).toBe("Alice Smith");
+      expect(record?.isHighPriority).toBe(true);
+    });
+
+    it("computed fields appear in find results", async () => {
+      await computed.insert({ _id: "a", first: "Alice", last: "Smith", priority: "H" });
+      await computed.insert({ _id: "b", first: "Bob", last: "Jones", priority: "L" });
+      const result = computed.find();
+      const alice = result.records.find((r) => r._id === "a");
+      const bob = result.records.find((r) => r._id === "b");
+      expect(alice?.fullName).toBe("Alice Smith");
+      expect(alice?.isHighPriority).toBe(true);
+      expect(bob?.isHighPriority).toBe(false);
+    });
+
+    it("computed fields are NOT persisted", async () => {
+      await computed.insert({ _id: "a", first: "Alice", last: "Smith", priority: "H" });
+      // Check raw store — computed fields should not be there
+      const ops = computed.history("a");
+      expect(ops[0].data?.fullName).toBeUndefined();
+      expect(ops[0].data?.isHighPriority).toBeUndefined();
+    });
+
+    it("computed fields can reference other records", async () => {
+      await computed.insert({ _id: "a", first: "Alice", last: "Smith", priority: "H" });
+      await computed.insert({ _id: "b", first: "Bob", last: "Jones", priority: "L", depends: ["a"] });
+      const bob = computed.findOne("b");
+      expect(bob?.depCount).toBe(1);
+    });
+
+    it("computed fields appear in schema", async () => {
+      await computed.insert({ _id: "a", first: "Alice", last: "Smith", priority: "H" });
+      const s = computed.schema();
+      const fullNameField = s.fields.find((f) => f.name === "fullName");
+      expect(fullNameField).toBeDefined();
+      expect(fullNameField?.type).toBe("string");
+    });
+
+    it("no computed = backward compatible", () => {
+      // The default col has no computed fields — find should work normally
+      const result = col.find();
+      expect(result).toBeDefined();
+    });
+  });
+
   describe("validate hook", () => {
     let validated: Collection;
 
