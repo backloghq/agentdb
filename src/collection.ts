@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Store } from "@backloghq/opslog";
-import type { Operation } from "@backloghq/opslog";
+import type { Operation, StorageBackend } from "@backloghq/opslog";
 import { compileFilter } from "./filter.js";
 import { parseCompactFilter } from "./compact-filter.js";
 import { TextIndex } from "./text-index.js";
@@ -361,7 +361,7 @@ export class Collection {
   }
 
   /** Open the underlying opslog store at the given directory. */
-  async open(dir: string, options?: { checkpointThreshold?: number }): Promise<void> {
+  async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
     // Build text index from existing records

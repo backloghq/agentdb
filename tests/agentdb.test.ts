@@ -253,6 +253,33 @@ describe("AgentDB", () => {
     });
   });
 
+  describe("storage backend integration", () => {
+    it("accepts agentId option", async () => {
+      const agentDir = tmpDir + "-agent";
+      const agentDb = new AgentDB(agentDir, { agentId: "agent-1" });
+      await agentDb.init();
+
+      const col = await agentDb.collection("test");
+      await col.insert({ _id: "a", name: "Alice" });
+      expect(col.findOne("a")?.name).toBe("Alice");
+
+      await agentDb.close();
+      await rm(agentDir, { recursive: true, force: true });
+    });
+
+    it("re-exports StorageBackend types", async () => {
+      // Verify types are accessible
+      const { FsBackend, LamportClock } = await import("../src/index.js");
+      expect(FsBackend).toBeDefined();
+      expect(LamportClock).toBeDefined();
+
+      const clock = new LamportClock();
+      expect(clock.tick()).toBe(1);
+      expect(clock.tick()).toBe(2);
+      expect(clock.merge(10)).toBe(11);
+    });
+  });
+
   describe("stats", () => {
     it("reports correct totals", async () => {
       const users = await db.collection("users");

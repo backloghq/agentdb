@@ -20,6 +20,8 @@ export { TextIndex } from "./text-index.js";
 export type { ViewDefinition } from "./view.js";
 export { PermissionManager } from "./permissions.js";
 export type { AgentPermissions } from "./permissions.js";
+export { FsBackend, LamportClock } from "@backloghq/opslog";
+export type { StorageBackend, LockHandle } from "@backloghq/opslog";
 export { AgentDB } from "./agentdb.js";
 export { resolveProvider, OpenAIEmbeddingProvider, HttpEmbeddingProvider } from "./embeddings/index.js";
 export type { EmbeddingProvider, EmbeddingConfig } from "./embeddings/index.js";

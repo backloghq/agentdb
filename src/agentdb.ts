@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Store } from "@backloghq/opslog";
+import type { StorageBackend } from "@backloghq/opslog";
 import { Collection } from "./collection.js";
 import type { CollectionOptions } from "./collection.js";
 import type { EmbeddingConfig, EmbeddingProvider } from "./embeddings/index.js";
@@ -21,6 +22,10 @@ export interface AgentDBOptions {
   embeddings?: EmbeddingConfig;
   /** Per-agent permission rules. Keys are agent IDs. */
   permissions?: Record<string, Partial<AgentPermissions>>;
+  /** Custom storage backend for opslog (default: FsBackend — filesystem). */
+  backend?: StorageBackend;
+  /** Agent ID for multi-writer mode. Enables per-agent WAL streams. */
+  agentId?: string;
 }
 
 export interface CollectionInfo {
@@ -45,7 +50,7 @@ interface MetaManifest {
  */
 export class AgentDB {
   readonly dir: string;
-  private opts: Required<Omit<AgentDBOptions, "embeddings" | "permissions">> & Pick<AgentDBOptions, "embeddings" | "permissions">;
+  private opts: Required<Omit<AgentDBOptions, "embeddings" | "permissions" | "backend" | "agentId">> & Pick<AgentDBOptions, "embeddings" | "permissions" | "backend" | "agentId">;
   private open: Map<string, Collection> = new Map();
   private opening: Map<string, Promise<Collection>> = new Map();
   private collectionOpts: Map<string, CollectionOptions> = new Map();
@@ -132,7 +137,11 @@ export class AgentDB {
     if (this.embeddingProvider) {
       col.setEmbeddingProvider(this.embeddingProvider);
     }
-    await col.open(colDir, { checkpointThreshold: this.opts.checkpointThreshold });
+    await col.open(colDir, {
+      checkpointThreshold: this.opts.checkpointThreshold,
+      backend: this.opts.backend,
+      agentId: this.opts.agentId,
+    });
 
     this.open.set(name, col);
     this.touchLru(name);
