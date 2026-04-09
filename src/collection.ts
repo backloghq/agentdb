@@ -610,28 +610,10 @@ export class Collection {
 
       if (!eligible) continue;
 
-      if (trailingRange) {
-        // Range on trailing field: build composite key prefix, then range scan
-        const prefix = values; // leading field values
-        const hasGt = "$gt" in trailingRange;
-        const hasGte = "$gte" in trailingRange;
-        const hasLt = "$lt" in trailingRange;
-        const hasLte = "$lte" in trailingRange;
-
-        if ((hasGt || hasGte) && (hasLt || hasLte)) {
-          const lo = compositeKey([...prefix, hasGt ? trailingRange.$gt : trailingRange.$gte]);
-          const hi = compositeKey([...prefix, hasLt ? trailingRange.$lt : trailingRange.$lte]);
-          const candidates = idx.range(lo, hi);
-          if (hasGt) { for (const id of idx.eq(lo)) candidates.delete(id); }
-          if (hasLt) { for (const id of idx.eq(hi)) candidates.delete(id); }
-          return candidates;
-        }
-        if (hasGt) return idx.gt(compositeKey([...prefix, trailingRange.$gt]));
-        if (hasGte) return idx.gte(compositeKey([...prefix, trailingRange.$gte]));
-        if (hasLt) return idx.lt(compositeKey([...prefix, trailingRange.$lt]));
-        if (hasLte) return idx.lte(compositeKey([...prefix, trailingRange.$lte]));
-      } else {
-        // All fields are equality
+      // Only use composite index for all-equality filters.
+      // Mixed equality+range is faster via single-field index + predicate scan
+      // (avoids composite key serialization overhead on every comparison).
+      if (!trailingRange) {
         return idx.eq(compositeKey(values));
       }
     }
