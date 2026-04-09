@@ -14,6 +14,13 @@ import type { MemoryStats } from "./memory.js";
 const META_DIR = "meta";
 const COLLECTIONS_DIR = "collections";
 const DROPPED_PREFIX = "_dropped_";
+const VALID_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+
+function validateCollectionName(name: string): void {
+  if (!name || !VALID_NAME_RE.test(name) || name.includes("..")) {
+    throw new Error(`Invalid collection name '${name}'. Must be alphanumeric with hyphens/underscores, no path traversal.`);
+  }
+}
 
 export interface AgentDBOptions {
   /** Max number of collections open at once (default: 20). */
@@ -71,6 +78,8 @@ export class AgentDB {
       maxOpenCollections: opts?.maxOpenCollections ?? 20,
       checkpointThreshold: opts?.checkpointThreshold ?? 100,
       embeddings: opts?.embeddings,
+      backend: opts?.backend,
+      agentId: opts?.agentId,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -89,10 +98,11 @@ export class AgentDB {
     return this.memoryMonitor.stats();
   }
 
-  /** Update memory tracking for a collection. */
+  /** Update memory tracking for a collection (lightweight — uses record count estimate). */
   private trackMemory(name: string, col: Collection): void {
-    const records = col.find({ limit: Infinity }).records;
-    this.memoryMonitor.update(name, records);
+    const stats = col.stats();
+    // ~500 bytes per record average avoids full scan on every mutation
+    this.memoryMonitor.updateEstimate(name, stats.activeRecords, stats.activeRecords * 500);
   }
 
   /** Get the configured embedding provider, or null if none. */
@@ -115,6 +125,7 @@ export class AgentDB {
    */
   async collection(name: string, colOpts?: CollectionOptions): Promise<Collection> {
     this.ensureOpen();
+    validateCollectionName(name);
 
     // Store collection options for future reopens (LRU eviction + reopen)
     if (colOpts) this.collectionOpts.set(name, colOpts);

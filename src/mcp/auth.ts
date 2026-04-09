@@ -1,6 +1,7 @@
 /**
  * Authentication and authorization middleware for AgentDB HTTP transport.
  */
+import { timingSafeEqual } from "node:crypto";
 import type { Request, Response, NextFunction } from "express";
 
 /** Authenticated agent identity. */
@@ -51,7 +52,12 @@ export function createAuthMiddleware(opts: {
         if (opts.tokens) {
           identity = opts.tokens[token] ?? null;
         } else if (opts.token) {
-          identity = token === opts.token ? { agentId: "default" } : null;
+          // Timing-safe comparison to prevent timing attacks
+          const a = Buffer.from(token);
+          const b = Buffer.from(opts.token);
+          identity = a.length === b.length && timingSafeEqual(a, b)
+            ? { agentId: "default" }
+            : null;
         }
       }
 

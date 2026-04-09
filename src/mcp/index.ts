@@ -104,6 +104,14 @@ export async function startHttp(
   const app = express();
   app.use(express.json({ limit: opts?.maxBodySize ?? "10mb" }));
 
+  // Security headers
+  app.use((_req, res, next) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Frame-Options", "DENY");
+    next();
+  });
+
   // CORS
   if (opts?.corsOrigins && opts.corsOrigins.length > 0) {
     const allowed = new Set(opts.corsOrigins);
@@ -148,26 +156,52 @@ export async function startHttp(
     res.status(500).json({ error: "Internal server error" });
   });
 
-  // Session management: one transport per client session
+  // Session management with limits and idle timeout
+  const MAX_SESSIONS = 100;
+  const SESSION_IDLE_MS = 30 * 60 * 1000; // 30 minutes
   const transports = new Map<string, StreamableHTTPServerTransport>();
+  const sessionLastActive = new Map<string, number>();
+
+  // Periodic cleanup of idle sessions
+  const cleanupInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [sid, lastActive] of sessionLastActive) {
+      if (now - lastActive > SESSION_IDLE_MS) {
+        const transport = transports.get(sid);
+        if (transport) transport.close();
+        transports.delete(sid);
+        sessionLastActive.delete(sid);
+      }
+    }
+  }, 60000); // Check every minute
 
   app.post("/mcp", async (req, res) => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
     if (sessionId && transports.has(sessionId)) {
-      // Existing session
+      // Existing session — touch idle timer
+      sessionLastActive.set(sessionId, Date.now());
       const transport = transports.get(sessionId)!;
       await transport.handleRequest(req, res, req.body);
     } else if (!sessionId && isInitializeRequest(req.body)) {
+      // Check session limit
+      if (transports.size >= MAX_SESSIONS) {
+        res.status(503).json({ error: `Max sessions (${MAX_SESSIONS}) reached. Try again later.` });
+        return;
+      }
       // New session
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid) => {
           transports.set(sid, transport);
+          sessionLastActive.set(sid, Date.now());
         },
       });
       transport.onclose = () => {
-        if (transport.sessionId) transports.delete(transport.sessionId);
+        if (transport.sessionId) {
+          transports.delete(transport.sessionId);
+          sessionLastActive.delete(transport.sessionId);
+        }
       };
       const server = createMcpServer(db);
       await server.connect(transport);
@@ -203,10 +237,12 @@ export async function startHttp(
   const httpServer = app.listen(port, host);
 
   const close = async () => {
+    clearInterval(cleanupInterval);
     for (const transport of transports.values()) {
       await transport.close();
     }
     transports.clear();
+    sessionLastActive.clear();
     httpServer.close();
     await db.close();
   };

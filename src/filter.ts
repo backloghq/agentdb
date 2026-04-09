@@ -187,10 +187,13 @@ function compileOperator(fieldPath: string, op: string, opValue: unknown): Predi
       if (!Array.isArray(opValue)) {
         throw new Error(`$in requires an array value, got ${typeof opValue}`);
       }
-      const values = opValue;
+      // Use Set for O(1) primitive lookups, fall back to linear for objects
+      const primitiveSet = new Set(opValue.filter((v) => v === null || typeof v !== "object"));
+      const objectValues = opValue.filter((v) => v !== null && typeof v === "object");
       return (record) => {
         const fieldValue = getNestedValue(record, fieldPath);
-        return values.some((v) => isEqual(fieldValue, v));
+        if (primitiveSet.has(fieldValue as string | number | boolean | null)) return true;
+        return objectValues.some((v) => isEqual(fieldValue, v));
       };
     }
 
@@ -198,10 +201,12 @@ function compileOperator(fieldPath: string, op: string, opValue: unknown): Predi
       if (!Array.isArray(opValue)) {
         throw new Error(`$nin requires an array value, got ${typeof opValue}`);
       }
-      const values = opValue;
+      const primitiveSet = new Set(opValue.filter((v) => v === null || typeof v !== "object"));
+      const objectValues = opValue.filter((v) => v !== null && typeof v === "object");
       return (record) => {
         const fieldValue = getNestedValue(record, fieldPath);
-        return !values.some((v) => isEqual(fieldValue, v));
+        if (primitiveSet.has(fieldValue as string | number | boolean | null)) return false;
+        return !objectValues.some((v) => isEqual(fieldValue, v));
       };
     }
 
@@ -256,6 +261,13 @@ function compileOperator(fieldPath: string, op: string, opValue: unknown): Predi
       if (opValue instanceof RegExp) {
         regex = opValue;
       } else if (typeof opValue === "string") {
+        // Reject patterns with nested quantifiers that could cause catastrophic backtracking
+        if (/(\+|\*|\{)\s*(\+|\*|\{)/.test(opValue) || /\([^)]*(\+|\*)\)[+*]/.test(opValue)) {
+          throw new Error("$regex: pattern rejected — nested quantifiers can cause catastrophic backtracking");
+        }
+        if (opValue.length > 200) {
+          throw new Error("$regex: pattern too long (max 200 characters)");
+        }
         regex = new RegExp(opValue);
       } else {
         throw new Error(`$regex requires a string or RegExp value, got ${typeof opValue}`);

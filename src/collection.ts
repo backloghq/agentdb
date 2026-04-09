@@ -997,7 +997,7 @@ export class Collection {
    * Samples up to `sampleSize` records and returns field info.
    */
   schema(sampleSize = 50): { fields: FieldInfo[]; sampleCount: number } {
-    const all = this.store.all();
+    const all = this.store.all().filter((r) => !isExpired(r));
     const samples = all.slice(0, sampleSize);
     const fieldMap = new Map<string, { types: Set<string>; example: unknown }>();
 
@@ -1035,6 +1035,7 @@ export class Collection {
     const values: unknown[] = [];
 
     for (const record of this.store.all()) {
+      if (isExpired(record)) continue;
       const clean = stripMeta(record);
       const value = getNestedValue(clean, field);
       if (value === undefined) continue;

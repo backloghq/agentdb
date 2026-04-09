@@ -57,6 +57,11 @@ export class MemoryMonitor {
     this.collectionStats.set(name, { records: records.length, bytes });
   }
 
+  /** Update stats with a count and byte estimate (avoids full scan). */
+  updateEstimate(name: string, records: number, bytes: number): void {
+    this.collectionStats.set(name, { records, bytes });
+  }
+
   /** Remove a collection from tracking. */
   remove(name: string): void {
     this.collectionStats.delete(name);

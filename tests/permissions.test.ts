@@ -13,8 +13,13 @@ describe("PermissionManager", () => {
     expect(pm.check("anyone", "admin")).toBe(true);
   });
 
-  it("no agent identity = unrestricted (backward compat)", () => {
+  it("no agent identity = denied when rules are configured", () => {
     const pm = new PermissionManager({ reader: { read: true, write: false } });
+    expect(pm.check(undefined, "write")).toBe(false);
+  });
+
+  it("no agent identity = unrestricted when no rules", () => {
+    const pm = new PermissionManager();
     expect(pm.check(undefined, "write")).toBe(true);
   });
 
