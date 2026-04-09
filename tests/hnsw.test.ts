@@ -1,9 +1,16 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { HnswIndex } from "../src/hnsw.js";
 
+/** Simple seeded PRNG for deterministic tests. */
+let seed = 42;
+function seededRandom(): number {
+  seed = (seed * 1664525 + 1013904223) & 0x7fffffff;
+  return seed / 0x7fffffff;
+}
+
 /** Generate a random unit vector. */
 function randomVector(dim: number): number[] {
-  const vec = Array.from({ length: dim }, () => Math.random() * 2 - 1);
+  const vec = Array.from({ length: dim }, () => seededRandom() * 2 - 1);
   const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
   return vec.map((v) => v / norm);
 }
@@ -34,6 +41,7 @@ describe("HnswIndex", () => {
   let index: HnswIndex;
 
   beforeEach(() => {
+    seed = 42; // Reset seed for deterministic tests
     index = new HnswIndex({ dimensions: DIM, M: 8, efConstruction: 100, efSearch: 30 });
   });
 

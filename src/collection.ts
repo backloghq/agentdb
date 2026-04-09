@@ -43,6 +43,8 @@ export interface FindOpts {
   summary?: boolean;
   /** Approximate token budget — stop adding records when estimated tokens exceed this. */
   maxTokens?: number;
+  /** Sort by field. Prefix with "-" for descending. E.g. "name" or "-score". */
+  sort?: string;
 }
 
 /** Resolve a filter (string or object) into a compiled predicate, with optional virtual filter support. */
@@ -107,7 +109,26 @@ export interface FindResult {
 
 /** Approximate token count for a value (4 chars per token heuristic). */
 function estimateTokens(value: unknown): number {
-  return Math.ceil(JSON.stringify(value).length / 4);
+  return Math.ceil(estimateChars(value) / 4);
+}
+
+function estimateChars(value: unknown): number {
+  if (value === null || value === undefined) return 4;
+  if (typeof value === "string") return value.length + 2;
+  if (typeof value === "number" || typeof value === "boolean") return String(value).length;
+  if (Array.isArray(value)) {
+    let n = 2;
+    for (const item of value) n += estimateChars(item) + 1;
+    return n;
+  }
+  if (typeof value === "object") {
+    let n = 2;
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      n += k.length + 3 + estimateChars(v) + 1;
+    }
+    return n;
+  }
+  return 4;
 }
 
 /** Update operators. */
@@ -171,8 +192,10 @@ function stripMeta(record: StoredRecord): Record<string, unknown> {
 /** Check if a record has expired. */
 function isExpired(record: StoredRecord): boolean {
   const expires = record[META_EXPIRES];
-  if (!expires || typeof expires !== "string") return false;
-  return new Date(expires) < new Date();
+  if (!expires) return false;
+  // Support both epoch ms (number) and ISO string (backward compat)
+  const expiresMs = typeof expires === "number" ? expires : new Date(expires as string).getTime();
+  return expiresMs < Date.now();
 }
 
 /**
@@ -484,7 +507,7 @@ export class Collection {
     const stored: StoredRecord = { ...doc, _id: id };
     if (opts?.agent) stored[META_AGENT] = opts.agent;
     if (opts?.reason) stored[META_REASON] = opts.reason;
-    if (opts?.ttl) stored[META_EXPIRES] = new Date(Date.now() + opts.ttl * 1000).toISOString();
+    if (opts?.ttl) stored[META_EXPIRES] = Date.now() + opts.ttl * 1000;
     this.validateRecord(stored);
     this.stampVersion(stored, id);
     const oldRecord = this.store.get(id);
@@ -507,7 +530,7 @@ export class Collection {
       const stored: StoredRecord = { ...doc, _id: id };
       if (opts?.agent) stored[META_AGENT] = opts.agent;
       if (opts?.reason) stored[META_REASON] = opts.reason;
-      if (opts?.ttl) stored[META_EXPIRES] = new Date(Date.now() + opts.ttl * 1000).toISOString();
+      if (opts?.ttl) stored[META_EXPIRES] = Date.now() + opts.ttl * 1000;
       this.validateRecord(stored);
       this.stampVersion(stored, id);
       prepared.push({ id, stored });
@@ -542,7 +565,8 @@ export class Collection {
    * Find records matching a filter with pagination and summary mode.
    */
   find(opts?: FindOpts): FindResult {
-    const limit = opts?.limit ?? 50;
+    const MAX_LIMIT = 10000;
+    const limit = Math.min(opts?.limit ?? 50, MAX_LIMIT);
     const offset = opts?.offset ?? 0;
     const useSummary = opts?.summary ?? false;
     const maxTokens = opts?.maxTokens;
@@ -552,21 +576,36 @@ export class Collection {
 
     const predicate = this.resolve(opts?.filter);
 
-    // Try to use B-tree index for initial candidate narrowing
+    // Try to use B-tree index for initial candidate narrowing.
+    // Predicate runs on raw records (meta fields don't interfere with user filters).
+    // stripMeta only applied to output records below.
     const candidateIds = this.indexedCandidates(opts?.filter);
     let records: StoredRecord[];
     if (candidateIds) {
-      // Index hit: only check indexed candidates
       records = [];
       for (const id of candidateIds) {
         const value = this.store.get(id);
-        if (value && !isExpired(value) && predicate(stripMeta(value))) {
+        if (value && !isExpired(value) && predicate(value)) {
           records.push(value);
         }
       }
     } else {
-      // No index: full linear scan
-      records = this.store.filter((value) => !isExpired(value) && predicate(stripMeta(value)));
+      records = this.store.filter((value) => !isExpired(value) && predicate(value));
+    }
+
+    // Sort if requested
+    if (opts?.sort) {
+      const desc = opts.sort.startsWith("-");
+      const field = desc ? opts.sort.slice(1) : opts.sort;
+      records.sort((a, b) => {
+        const va = getNestedValue(a, field);
+        const vb = getNestedValue(b, field);
+        if (va === vb) return 0;
+        if (va === undefined || va === null) return 1;
+        if (vb === undefined || vb === null) return -1;
+        const cmp = va < vb ? -1 : va > vb ? 1 : 0;
+        return desc ? -cmp : cmp;
+      });
     }
 
     const total = records.length;
@@ -611,11 +650,11 @@ export class Collection {
       let n = 0;
       for (const id of candidateIds) {
         const value = this.store.get(id);
-        if (value && !isExpired(value) && predicate(stripMeta(value))) n++;
+        if (value && !isExpired(value) && predicate(value)) n++;
       }
       return n;
     }
-    return this.store.count((value) => !isExpired(value) && predicate(stripMeta(value)));
+    return this.store.count((value) => !isExpired(value) && predicate(value));
   }
 
   /**
@@ -625,7 +664,7 @@ export class Collection {
     const predicate = this.resolve(filter);
     const matches: [string, StoredRecord][] = [];
     for (const [id, value] of this.store.entries()) {
-      if (!isExpired(value) && predicate(stripMeta(value))) {
+      if (!isExpired(value) && predicate(value)) {
         matches.push([id, value]);
       }
     }
@@ -653,8 +692,15 @@ export class Collection {
         this.store.set(id, updated);
       }
     });
-    this.rebuildTextIndex();
-    this.rebuildBTreeIndexes();
+    // Incremental re-index for text and B-tree (only affected records)
+    if (this.textIdx) {
+      for (const { id, updated } of updates) {
+        this.textIdx.add(id, stripMeta(updated));
+      }
+    }
+    for (const { id, updated } of updates) {
+      this.updateBTreeIndexes(id, undefined, updated);
+    }
     this.emitChange("update", updates.map((u) => u.id), opts?.agent);
 
     return updates.length;
@@ -674,7 +720,7 @@ export class Collection {
     const stored: StoredRecord = { ...doc, _id: id };
     if (opts?.agent) stored[META_AGENT] = opts.agent;
     if (opts?.reason) stored[META_REASON] = opts.reason;
-    if (opts?.ttl) stored[META_EXPIRES] = new Date(Date.now() + opts.ttl * 1000).toISOString();
+    if (opts?.ttl) stored[META_EXPIRES] = Date.now() + opts.ttl * 1000;
     this.validateRecord(stored);
     this.stampVersion(stored, id);
     await this.store.set(id, stored);
@@ -690,25 +736,12 @@ export class Collection {
     const predicate = this.resolve(filter);
     const toDelete: string[] = [];
     for (const [id, value] of this.store.entries()) {
-      if (!isExpired(value) && predicate(stripMeta(value))) {
+      if (!isExpired(value) && predicate(value)) {
         toDelete.push(id);
       }
     }
 
     if (toDelete.length === 0) return 0;
-
-    // Set agent/reason on the last version before deleting
-    if (opts?.agent || opts?.reason) {
-      await this.store.batch(() => {
-        for (const id of toDelete) {
-          const record = this.store.get(id)!;
-          const tagged = { ...record };
-          if (opts?.agent) tagged[META_AGENT] = opts.agent;
-          if (opts?.reason) tagged[META_REASON] = opts.reason;
-          this.store.set(id, tagged);
-        }
-      });
-    }
 
     await this.store.batch(() => {
       for (const id of toDelete) {
@@ -848,7 +881,7 @@ export class Collection {
   async archive(filter: Filter, segment?: string): Promise<number> {
     const predicate = this.resolve(filter);
     const count = await this.store.archive(
-      (value) => predicate(stripMeta(value)),
+      (value) => predicate(value),
       segment,
     );
     if (count > 0) {

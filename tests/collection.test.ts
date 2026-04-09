@@ -565,13 +565,12 @@ describe("Collection", () => {
       expect(col.count()).toBe(3);
     });
 
-    it("tags agent on delete", async () => {
+    it("deletes without double write", async () => {
       await col.remove({ _id: "1" }, { agent: "cleanup-bot", reason: "deactivated" });
-      // The tag op is visible in ops history
       const ops = col.getOps();
-      // Last op is the delete, second-to-last is the tag
-      const tagOp = ops.find((op) => op.op === "set" && op.id === "1" && op.data?._agent === "cleanup-bot");
-      expect(tagOp).toBeDefined();
+      // Should be a single delete op, not a tag-then-delete pair
+      const deleteOps = ops.filter((op) => op.op === "delete" && op.id === "1");
+      expect(deleteOps).toHaveLength(1);
     });
   });
 
