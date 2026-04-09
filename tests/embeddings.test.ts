@@ -87,6 +87,120 @@ describe("Embedding Providers", () => {
     });
   });
 
+  describe("OpenAI provider (mocked)", () => {
+    it("calls the API and returns vectors", async () => {
+      // Mock global fetch
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        const embeddings = body.input.map((text: string, i: number) => ({
+          embedding: Array.from({ length: body.dimensions }, (_, j) => (i + j) * 0.01),
+          index: i,
+        }));
+        return new Response(JSON.stringify({ data: embeddings }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      try {
+        const provider = new OpenAIEmbeddingProvider({
+          apiKey: "test-key",
+          dimensions: 4,
+        });
+        const vectors = await provider.embed(["hello", "world"]);
+        expect(vectors).toHaveLength(2);
+        expect(vectors[0]).toHaveLength(4);
+        expect(vectors[1]).toHaveLength(4);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it("throws on API error", async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async () => new Response("Unauthorized", { status: 401 });
+
+      try {
+        const provider = new OpenAIEmbeddingProvider({ apiKey: "bad-key" });
+        await expect(provider.embed(["test"])).rejects.toThrow("401");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it("returns empty for empty input", async () => {
+      const provider = new OpenAIEmbeddingProvider({ apiKey: "test" });
+      const vectors = await provider.embed([]);
+      expect(vectors).toEqual([]);
+    });
+  });
+
+  describe("HTTP provider (mocked)", () => {
+    it("calls the endpoint and returns vectors", async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        const embeddings = body.texts.map(() => [0.1, 0.2, 0.3]);
+        return new Response(JSON.stringify({ embeddings }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      };
+
+      try {
+        const provider = new HttpEmbeddingProvider({
+          url: "http://localhost:9999/embed",
+          dimensions: 3,
+        });
+        const vectors = await provider.embed(["hello"]);
+        expect(vectors).toHaveLength(1);
+        expect(vectors[0]).toEqual([0.1, 0.2, 0.3]);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it("throws on API error", async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async () => new Response("Server Error", { status: 500 });
+
+      try {
+        const provider = new HttpEmbeddingProvider({
+          url: "http://localhost:9999/embed",
+          dimensions: 3,
+        });
+        await expect(provider.embed(["test"])).rejects.toThrow("500");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it("throws on malformed response", async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async () => new Response(JSON.stringify({ wrong: "format" }), { status: 200 });
+
+      try {
+        const provider = new HttpEmbeddingProvider({
+          url: "http://localhost:9999/embed",
+          dimensions: 3,
+        });
+        await expect(provider.embed(["test"])).rejects.toThrow("missing");
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it("returns empty for empty input", async () => {
+      const provider = new HttpEmbeddingProvider({
+        url: "http://localhost:9999/embed",
+        dimensions: 3,
+      });
+      const vectors = await provider.embed([]);
+      expect(vectors).toEqual([]);
+    });
+  });
+
   describe("AgentDB embedding config", () => {
     it("AgentDB accepts embedding config", async () => {
       const { AgentDB } = await import("../src/agentdb.js");
