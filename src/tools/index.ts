@@ -127,6 +127,7 @@ export function getTools(db: AgentDB): AgentTool[] {
         limit: z.number().optional().default(50).describe("Max records to return (default 50)"),
         offset: z.number().optional().default(0).describe("Skip N records"),
         summary: z.boolean().optional().default(false).describe("Return summary fields only (omit long text)"),
+        maxTokens: z.number().optional().describe("Approximate token budget — stop adding records when estimated tokens exceed this"),
       }),
       annotations: { readOnly: true },
       execute: safe(async (args) => {
@@ -136,6 +137,7 @@ export function getTools(db: AgentDB): AgentTool[] {
           limit: args.limit as number,
           offset: args.offset as number,
           summary: args.summary as boolean,
+          maxTokens: args.maxTokens as number | undefined,
         });
       }),
     },

@@ -28,6 +28,8 @@ export interface FindOpts {
   offset?: number;
   /** Return summary fields only (short-valued fields, omit long text). */
   summary?: boolean;
+  /** Approximate token budget — stop adding records when estimated tokens exceed this. */
+  maxTokens?: number;
 }
 
 /** Resolve a filter (string or object) into a compiled predicate, with optional virtual filter support. */
@@ -86,6 +88,13 @@ export interface FindResult {
   records: Record<string, unknown>[];
   total: number;
   truncated: boolean;
+  /** Approximate token count of the returned records (4 chars/token heuristic). */
+  estimatedTokens?: number;
+}
+
+/** Approximate token count for a value (4 chars per token heuristic). */
+function estimateTokens(value: unknown): number {
+  return Math.ceil(JSON.stringify(value).length / 4);
 }
 
 /** Update operators. */
@@ -331,6 +340,7 @@ export class Collection {
     const limit = opts?.limit ?? 50;
     const offset = opts?.offset ?? 0;
     const useSummary = opts?.summary ?? false;
+    const maxTokens = opts?.maxTokens;
 
     const predicate = this.resolve(opts?.filter);
     const records = this.store.filter((value) => predicate(stripMeta(value)));
@@ -338,16 +348,32 @@ export class Collection {
     const total = records.length;
     const sliced = records.slice(offset, offset + limit);
     const allAccessor = this.allCleanRecords();
-    const mapped = sliced.map((r) => {
+    const mapped: Record<string, unknown>[] = [];
+    let tokenCount = 0;
+    let tokenTruncated = false;
+
+    for (const r of sliced) {
       let clean = stripMeta(r);
       clean = this.applyComputed(clean, allAccessor);
-      return useSummary ? summarize(clean) : clean;
-    });
+      const result = useSummary ? summarize(clean) : clean;
+
+      if (maxTokens) {
+        const tokens = estimateTokens(result);
+        if (tokenCount + tokens > maxTokens && mapped.length > 0) {
+          tokenTruncated = true;
+          break;
+        }
+        tokenCount += tokens;
+      }
+
+      mapped.push(result);
+    }
 
     return {
       records: mapped,
       total,
-      truncated: total > offset + limit,
+      truncated: total > offset + limit || tokenTruncated,
+      estimatedTokens: maxTokens ? tokenCount : undefined,
     };
   }
 

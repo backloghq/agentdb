@@ -172,6 +172,52 @@ describe("Collection", () => {
     });
   });
 
+  describe("token budget", () => {
+    beforeEach(async () => {
+      await col.insertMany([
+        { _id: "1", name: "Alice", bio: "A".repeat(400) },
+        { _id: "2", name: "Bob", bio: "B".repeat(400) },
+        { _id: "3", name: "Charlie", bio: "C".repeat(400) },
+        { _id: "4", name: "Diana", bio: "D".repeat(400) },
+      ]);
+    });
+
+    it("returns all records when no maxTokens", () => {
+      const result = col.find();
+      expect(result.records).toHaveLength(4);
+      expect(result.estimatedTokens).toBeUndefined();
+    });
+
+    it("truncates when maxTokens exceeded", () => {
+      // Each record is ~120 tokens (400 char bio + fields). Budget for ~2 records.
+      const result = col.find({ maxTokens: 250 });
+      expect(result.records.length).toBeLessThan(4);
+      expect(result.truncated).toBe(true);
+      expect(result.estimatedTokens).toBeDefined();
+      expect(result.estimatedTokens!).toBeLessThanOrEqual(250);
+    });
+
+    it("always returns at least one record", () => {
+      const result = col.find({ maxTokens: 1 });
+      expect(result.records).toHaveLength(1);
+      expect(result.truncated).toBe(true);
+    });
+
+    it("returns estimatedTokens when maxTokens set", () => {
+      const result = col.find({ maxTokens: 10000 });
+      expect(result.estimatedTokens).toBeDefined();
+      expect(result.estimatedTokens!).toBeGreaterThan(0);
+      expect(result.records).toHaveLength(4);
+    });
+
+    it("works with summary mode to stay under budget", () => {
+      // Summary strips the long bio field, so more records fit
+      const withBio = col.find({ maxTokens: 250 });
+      const withSummary = col.find({ maxTokens: 250, summary: true });
+      expect(withSummary.records.length).toBeGreaterThanOrEqual(withBio.records.length);
+    });
+  });
+
   describe("string filters", () => {
     beforeEach(async () => {
       await col.insertMany([
