@@ -238,14 +238,12 @@ export class HnswIndex {
     candidates.push({ id: startId, distance: startDist });
     visited.add(startId);
 
-    // Priority queue (sorted array — simple for small ef)
     const queue: SearchCandidate[] = [{ id: startId, distance: startDist }];
 
     while (queue.length > 0) {
-      // Take the best unexplored candidate
       const current = queue.shift()!;
 
-      // If worst result is better than current, stop (for efficiency)
+      // If worst result is better than current, stop
       if (candidates.length >= ef) {
         const worstCandidate = candidates[candidates.length - 1];
         if (current.distance < worstCandidate.distance) break;
@@ -267,10 +265,9 @@ export class HnswIndex {
 
         if (candidates.length < ef || dist > candidates[candidates.length - 1].distance) {
           candidates.push(candidate);
-          candidates.sort((a, b) => b.distance - a.distance); // Best first
+          candidates.sort((a, b) => b.distance - a.distance);
           if (candidates.length > ef) candidates.pop();
 
-          // Add to exploration queue
           queue.push(candidate);
           queue.sort((a, b) => b.distance - a.distance);
         }

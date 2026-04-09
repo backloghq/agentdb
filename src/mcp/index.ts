@@ -94,7 +94,7 @@ export interface HttpOptions {
 export async function startHttp(
   dataDir: string,
   opts?: HttpOptions,
-): Promise<{ app: express.Express; close: () => Promise<void>; auditLog: AuditLogger }> {
+): Promise<{ app: express.Express; close: () => Promise<void>; auditLog: AuditLogger; port: number }> {
   const port = opts?.port ?? 3000;
   const host = opts?.host ?? "127.0.0.1";
 
@@ -234,7 +234,10 @@ export async function startHttp(
     }
   });
 
-  const httpServer = app.listen(port, host);
+  const httpServer = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+    const server = app.listen(port, host, () => resolve(server));
+  });
+  const actualPort = (httpServer.address() as { port: number })?.port ?? port;
 
   const close = async () => {
     clearInterval(cleanupInterval);
@@ -250,5 +253,5 @@ export async function startHttp(
   process.on("SIGINT", async () => { await close(); process.exit(0); });
   process.on("SIGTERM", async () => { await close(); process.exit(0); });
 
-  return { app, close, auditLog };
+  return { app, close, auditLog, port: actualPort };
 }
