@@ -338,6 +338,39 @@ export function getTools(db: AgentDB): AgentTool[] {
     },
 
     {
+      name: "db_semantic_search",
+      description: "Search records by meaning using embeddings. Requires an embedding provider. Supports hybrid queries with attribute filters.",
+      schema: z.object({
+        collection: collectionParam,
+        query: z.string().describe("Natural language search query"),
+        filter: filterParam,
+        limit: z.number().optional().default(10).describe("Max results (default 10)"),
+        summary: z.boolean().optional().default(false).describe("Return summary fields only"),
+      }),
+      annotations: { readOnly: true },
+      execute: safe(async (args) => {
+        const col = await db.collection(args.collection as string);
+        return col.semanticSearch(args.query as string, {
+          filter: args.filter as Record<string, unknown> | string | undefined,
+          limit: args.limit as number,
+          summary: args.summary as boolean,
+        });
+      }),
+    },
+
+    {
+      name: "db_embed",
+      description: "Manually trigger embedding for all unembedded records in a collection. Requires an embedding provider.",
+      schema: z.object({ collection: collectionParam }),
+      annotations: {},
+      execute: safe(async (args) => {
+        const col = await db.collection(args.collection as string);
+        const count = await col.embedUnembedded();
+        return { embedded: count };
+      }),
+    },
+
+    {
       name: "db_export",
       description: "Export all or named collections as a self-contained JSON backup.",
       schema: z.object({
