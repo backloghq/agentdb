@@ -542,6 +542,38 @@ export class Collection {
     return this.store.getOps(since);
   }
 
+  // --- Archive ---
+
+  /**
+   * Archive records matching a filter to cold storage.
+   * Archived records are removed from the active set.
+   */
+  async archive(filter: Filter, segment?: string): Promise<number> {
+    const predicate = this.resolve(filter);
+    const count = await this.store.archive(
+      (value) => predicate(stripMeta(value)),
+      segment,
+    );
+    if (count > 0) {
+      this.rebuildTextIndex();
+      this.onMutate();
+    }
+    return count;
+  }
+
+  /**
+   * Load archived records from a segment. Returns them as an array (read-only, not re-inserted).
+   */
+  async loadArchive(segment: string): Promise<Record<string, unknown>[]> {
+    const archived = await this.store.loadArchive(segment);
+    return Array.from(archived.values()).map(stripMeta);
+  }
+
+  /** List available archive segments. */
+  listArchiveSegments(): string[] {
+    return this.store.listArchiveSegments();
+  }
+
   /**
    * Full-text search across all string fields.
    * Requires textSearch: true in collection options.

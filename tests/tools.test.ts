@@ -36,8 +36,8 @@ describe("Tool Definitions", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns 16 tools", () => {
-    expect(tools).toHaveLength(16);
+  it("returns 19 tools", () => {
+    expect(tools).toHaveLength(19);
   });
 
   it("every tool has required fields", () => {

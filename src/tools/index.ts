@@ -293,6 +293,51 @@ export function getTools(db: AgentDB): AgentTool[] {
     },
 
     {
+      name: "db_archive",
+      description: "Archive records matching a filter to cold storage. Archived records are removed from the active set.",
+      schema: z.object({
+        collection: collectionParam,
+        filter: z.union([z.record(z.unknown()), z.string()]).describe("Filter: JSON object or compact string"),
+        segment: z.string().optional().describe("Archive segment name (defaults to current quarter, e.g. 2026-Q2)"),
+      }),
+      annotations: { destructive: true },
+      execute: safe(async (args) => {
+        const col = await db.collection(args.collection as string);
+        const archived = await col.archive(
+          args.filter as Record<string, unknown> | string,
+          args.segment as string | undefined,
+        );
+        return { archived };
+      }),
+    },
+
+    {
+      name: "db_archive_list",
+      description: "List available archive segments for a collection.",
+      schema: z.object({ collection: collectionParam }),
+      annotations: { readOnly: true },
+      execute: safe(async (args) => {
+        const col = await db.collection(args.collection as string);
+        return { segments: col.listArchiveSegments() };
+      }),
+    },
+
+    {
+      name: "db_archive_load",
+      description: "Load and view records from an archive segment. Read-only — records are not re-inserted.",
+      schema: z.object({
+        collection: collectionParam,
+        segment: z.string().describe("Archive segment name"),
+      }),
+      annotations: { readOnly: true },
+      execute: safe(async (args) => {
+        const col = await db.collection(args.collection as string);
+        const records = await col.loadArchive(args.segment as string);
+        return { records, count: records.length };
+      }),
+    },
+
+    {
       name: "db_stats",
       description: "Get database-level statistics: number of collections and total records.",
       schema: z.object({}),
