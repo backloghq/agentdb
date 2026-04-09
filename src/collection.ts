@@ -896,14 +896,36 @@ export class Collection {
   }
 
   /**
+   * Extract a direct _id from a filter like { _id: "abc" } for O(1) lookup.
+   * Returns the id string or null if the filter isn't a simple _id match.
+   */
+  private extractDirectId(filter: Filter): string | null {
+    if (!filter || typeof filter === "string") return null;
+    const keys = Object.keys(filter);
+    if (keys.length === 1 && keys[0] === "_id") {
+      const val = filter._id;
+      if (typeof val === "string") return val;
+    }
+    return null;
+  }
+
+  /**
    * Update records matching a filter. Returns number of modified records.
    */
   async update(filter: Filter, update: UpdateOps, opts?: MutationOpts): Promise<number> {
-    const predicate = this.resolve(filter);
+    // Fast path: { _id: value } → direct lookup instead of linear scan
+    const directId = this.extractDirectId(filter);
     const matches: [string, StoredRecord][] = [];
-    for (const [id, value] of this.store.entries()) {
-      if (!isExpired(value) && predicate(value)) {
-        matches.push([id, value]);
+
+    if (directId) {
+      const value = this.store.get(directId);
+      if (value && !isExpired(value)) matches.push([directId, value]);
+    } else {
+      const predicate = this.resolve(filter);
+      for (const [id, value] of this.store.entries()) {
+        if (!isExpired(value) && predicate(value)) {
+          matches.push([id, value]);
+        }
       }
     }
 
@@ -973,11 +995,19 @@ export class Collection {
    * Delete records matching a filter. Returns number of deleted records.
    */
   async remove(filter: Filter, opts?: MutationOpts): Promise<number> {
-    const predicate = this.resolve(filter);
+    // Fast path: { _id: value } → direct lookup
+    const directId = this.extractDirectId(filter);
     const toDelete: string[] = [];
-    for (const [id, value] of this.store.entries()) {
-      if (!isExpired(value) && predicate(value)) {
-        toDelete.push(id);
+
+    if (directId) {
+      const value = this.store.get(directId);
+      if (value && !isExpired(value)) toDelete.push(directId);
+    } else {
+      const predicate = this.resolve(filter);
+      for (const [id, value] of this.store.entries()) {
+        if (!isExpired(value) && predicate(value)) {
+          toDelete.push(id);
+        }
       }
     }
 
