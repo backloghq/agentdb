@@ -8,12 +8,17 @@ let mode = "stdio";
 let port = 3000;
 let host = "127.0.0.1";
 
-// S3 config from env or flags
+// S3 config
 let backend = process.env.AGENTDB_BACKEND ?? "fs";
 let s3Bucket = process.env.AGENTDB_S3_BUCKET ?? "";
 let s3Prefix = process.env.AGENTDB_S3_PREFIX ?? "";
 let s3Region = process.env.AWS_REGION ?? process.env.AGENTDB_S3_REGION ?? "";
 let agentId = process.env.AGENTDB_AGENT_ID ?? "";
+
+// Auth config
+let authToken = process.env.AGENTDB_AUTH_TOKEN ?? "";
+let rateLimit = parseInt(process.env.AGENTDB_RATE_LIMIT ?? "0", 10) || 0;
+let corsOrigins = process.env.AGENTDB_CORS_ORIGINS ?? "";
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -27,6 +32,9 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === "--prefix" && next) { s3Prefix = next; i++; }
   else if (arg === "--region" && next) { s3Region = next; i++; }
   else if (arg === "--agent-id" && next) { agentId = next; i++; }
+  else if (arg === "--auth-token" && next) { authToken = next; i++; }
+  else if (arg === "--rate-limit" && next) { rateLimit = parseInt(next, 10); i++; }
+  else if (arg === "--cors" && next) { corsOrigins = next; i++; }
 }
 
 async function resolveBackend(): Promise<AgentDBOptions> {
@@ -45,7 +53,6 @@ async function resolveBackend(): Promise<AgentDBOptions> {
       prefix: s3Prefix || undefined,
       region: s3Region || undefined,
     });
-    // For S3, dataDir becomes the logical prefix (used by opslog Store internally)
     if (!process.env.AGENTDB_PATH && dataDir === "./agentdb-data") {
       dataDir = s3Prefix || "agentdb";
     }
@@ -59,8 +66,17 @@ async function main(): Promise<void> {
   const dbOpts = await resolveBackend();
 
   if (mode === "http") {
-    await startHttp(dataDir, { port, host, dbOpts });
+    await startHttp(dataDir, {
+      port,
+      host,
+      dbOpts,
+      authToken: authToken || undefined,
+      rateLimit: rateLimit || undefined,
+      corsOrigins: corsOrigins ? corsOrigins.split(",").map((s) => s.trim()) : undefined,
+    });
     console.error(`AgentDB MCP server running on http://${host}:${port}/mcp`);
+    if (authToken) console.error("Authentication: bearer token required");
+    if (rateLimit) console.error(`Rate limit: ${rateLimit} requests/minute`);
   } else {
     await startStdio(dataDir, dbOpts);
   }
