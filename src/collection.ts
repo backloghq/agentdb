@@ -4,6 +4,8 @@ import type { Operation } from "@backloghq/opslog";
 import { compileFilter } from "./filter.js";
 import { parseCompactFilter } from "./compact-filter.js";
 import { TextIndex } from "./text-index.js";
+import { ViewManager } from "./view.js";
+import type { ViewDefinition } from "./view.js";
 
 // Internal record type — what's stored in opslog
 type StoredRecord = Record<string, unknown>;
@@ -225,12 +227,18 @@ export class Collection {
   private _opened = false;
   private opts: CollectionOptions;
   private textIdx: TextIndex | null = null;
+  private views = new ViewManager();
 
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
     this.store = store;
     this.opts = opts ?? {};
     if (this.opts.textSearch) this.textIdx = new TextIndex();
+  }
+
+  /** Called after any mutation to invalidate caches. */
+  private onMutate(): void {
+    this.views.invalidate();
   }
 
   /** Rebuild the full text index from current store contents. */
@@ -316,6 +324,7 @@ export class Collection {
     this.validateRecord(stored);
     await this.store.set(id, stored);
     if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+    this.onMutate();
     return id;
   }
 
@@ -345,6 +354,7 @@ export class Collection {
         this.textIdx.add(id, stripMeta(stored));
       }
     }
+    this.onMutate();
     return prepared.map((p) => p.id);
   }
 
@@ -441,6 +451,7 @@ export class Collection {
       }
     });
     this.rebuildTextIndex();
+    this.onMutate();
 
     return updates.length;
   }
@@ -461,6 +472,7 @@ export class Collection {
     this.validateRecord(stored);
     await this.store.set(id, stored);
     if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+    this.onMutate();
     return { id, action: existing ? "updated" : "inserted" };
   }
 
@@ -499,6 +511,7 @@ export class Collection {
     if (this.textIdx) {
       for (const id of toDelete) this.textIdx.remove(id);
     }
+    this.onMutate();
 
     return toDelete.length;
   }
@@ -508,7 +521,10 @@ export class Collection {
    */
   async undo(): Promise<boolean> {
     const result = await this.store.undo();
-    if (result) this.rebuildTextIndex();
+    if (result) {
+      this.rebuildTextIndex();
+      this.onMutate();
+    }
     return result;
   }
 
@@ -558,6 +574,38 @@ export class Collection {
       total,
       truncated: total > offset + limit,
     };
+  }
+
+  // --- Named views ---
+
+  /** Define a named query view. Results are cached until the collection is mutated. */
+  defineView(def: ViewDefinition): void {
+    this.views.define(def);
+  }
+
+  /** Remove a named view. */
+  removeView(name: string): boolean {
+    return this.views.remove(name);
+  }
+
+  /** List registered view names. */
+  listViews(): string[] {
+    return this.views.list();
+  }
+
+  /** Execute a named view. Returns cached results if available. */
+  queryView(name: string, overrides?: Omit<FindOpts, "filter">): FindResult {
+    const def = this.views.get(name);
+    if (!def) throw new Error(`View '${name}' not found`);
+
+    // Check cache
+    const cached = this.views.getCached(name);
+    if (cached && !overrides) return cached;
+
+    // Execute query
+    const result = this.find({ filter: def.filter, ...def.opts, ...overrides });
+    if (!overrides) this.views.setCache(name, result);
+    return result;
   }
 
   /** Get collection stats. */

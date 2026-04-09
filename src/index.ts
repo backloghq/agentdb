@@ -17,6 +17,7 @@ export type {
 } from "./collection.js";
 
 export { TextIndex } from "./text-index.js";
+export type { ViewDefinition } from "./view.js";
 export { AgentDB } from "./agentdb.js";
 export type {
   AgentDBOptions,

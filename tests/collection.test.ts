@@ -505,6 +505,72 @@ describe("Collection", () => {
     });
   });
 
+  describe("named views", () => {
+    beforeEach(async () => {
+      await col.insertMany([
+        { _id: "1", name: "Alice", role: "admin", active: true },
+        { _id: "2", name: "Bob", role: "user", active: false },
+        { _id: "3", name: "Charlie", role: "admin", active: true },
+        { _id: "4", name: "Diana", role: "user", active: true },
+      ]);
+    });
+
+    it("defines and queries a view", () => {
+      col.defineView({ name: "admins", filter: { role: "admin" } });
+      const result = col.queryView("admins");
+      expect(result.total).toBe(2);
+      expect(result.records.every((r) => r.role === "admin")).toBe(true);
+    });
+
+    it("caches view results", () => {
+      col.defineView({ name: "admins", filter: { role: "admin" } });
+      const r1 = col.queryView("admins");
+      const r2 = col.queryView("admins");
+      // Same object reference = cached
+      expect(r1).toBe(r2);
+    });
+
+    it("invalidates cache on mutation", async () => {
+      col.defineView({ name: "active", filter: { active: true } });
+      const r1 = col.queryView("active");
+      expect(r1.total).toBe(3);
+
+      await col.update({ _id: "2" }, { $set: { active: true } });
+      const r2 = col.queryView("active");
+      expect(r2.total).toBe(4);
+      expect(r1).not.toBe(r2); // Different object = re-queried
+    });
+
+    it("supports overrides on queryView", () => {
+      col.defineView({ name: "all", filter: {} });
+      const result = col.queryView("all", { limit: 2 });
+      expect(result.records).toHaveLength(2);
+      expect(result.truncated).toBe(true);
+    });
+
+    it("view with default opts", () => {
+      col.defineView({ name: "admins-summary", filter: { role: "admin" }, opts: { summary: true } });
+      const result = col.queryView("admins-summary");
+      expect(result.total).toBe(2);
+    });
+
+    it("throws on unknown view", () => {
+      expect(() => col.queryView("nonexistent")).toThrow("not found");
+    });
+
+    it("lists views", () => {
+      col.defineView({ name: "v1", filter: {} });
+      col.defineView({ name: "v2", filter: {} });
+      expect(col.listViews().sort()).toEqual(["v1", "v2"]);
+    });
+
+    it("removes a view", () => {
+      col.defineView({ name: "temp", filter: {} });
+      expect(col.removeView("temp")).toBe(true);
+      expect(col.listViews()).not.toContain("temp");
+    });
+  });
+
   describe("full-text search", () => {
     let searchCol: Collection;
 
