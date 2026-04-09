@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [0.1.0] - 2026-04-09
 
+### Security
+- Bearer token authentication — `--auth-token` / `AGENTDB_AUTH_TOKEN` for HTTP transport
+- Multi-agent token map — different tokens for different agent identities + permissions
+- JWT validation via `jose` library — JWKS endpoints, shared secrets, audience/issuer validation
+- Pluggable auth middleware — `authFn` interface for custom OAuth/SAML/etc.
+- Rate limiting — per-agent token bucket, configurable max/window
+- CORS lockdown — configurable allowed origins, default reject cross-origin
+- Request size limits via `express.json({ limit })`
+- Audit logging — agent identity, method, tool, timestamp per request
+- `/health` endpoint bypasses auth for monitoring
+- Error handler strips stack traces
+
+### Infrastructure
+- Dockerfile (Node 25 Alpine) for containerized deployment
+
 ### Added
 
 **Core library:**

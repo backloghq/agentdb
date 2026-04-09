@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** All phases complete. 468 tests, 24 tools, 94.5% coverage.
+**Status:** All phases complete. 488+ tests, 24 tools. Auth layer (bearer token, JWT, rate limiting, CORS, audit).
 
 ## Commands
 
@@ -57,6 +57,8 @@ src/
     index.ts            # Provider factory
   tools/index.ts        # 24 tool definitions with zod schemas + safe() wrapper
   mcp/index.ts          # MCP server (stdio + HTTP/Streamable transport)
+  mcp/auth.ts           # Auth middleware (bearer token, rate limiter, audit logger)
+  mcp/jwt.ts            # JWT validation with jose
   mcp/cli.ts            # CLI: npx agentdb --path ./data [--backend s3 --bucket ...]
 ```
 
@@ -70,3 +72,5 @@ src/
 - Optimistic locking via _version tracking
 - S3 backend via @backloghq/opslog-s3, dynamically imported only when configured
 - Semantic search requires external embedding provider (OpenAI, HTTP, or custom)
+- Auth: bearer token (default), multi-token, JWT via jose, pluggable authFn
+- Rate limiting, CORS, audit logging on HTTP transport

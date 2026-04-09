@@ -280,6 +280,23 @@ describe("Tool Definitions", () => {
     });
   });
 
+  describe("db_batch", () => {
+    it("executes multiple insert operations atomically", async () => {
+      const result = await exec("db_batch", {
+        collection: "batch-test",
+        operations: [
+          { op: "insert", record: { _id: "b1", name: "One" } },
+          { op: "insert", record: { _id: "b2", name: "Two" } },
+          { op: "insert", record: { _id: "b3", name: "Three" } },
+        ],
+      });
+      expect(result.operations).toBeGreaterThanOrEqual(3);
+
+      const count = await exec("db_count", { collection: "batch-test" });
+      expect(count.count).toBe(3);
+    });
+  });
+
   describe("db_export / db_import", () => {
     it("round-trips data", async () => {
       await exec("db_insert", { collection: "items", records: [

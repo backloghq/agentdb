@@ -247,6 +247,76 @@ col.history(id);
 // → [{ type: "set", key: "...", value: { ..., _agent: "triage-bot", _reason: "..." }, ... }]
 ```
 
+## Authentication
+
+### Bearer token (simplest)
+
+```bash
+npx agentdb --http --auth-token my-secret-token
+
+# Agents send: Authorization: Bearer my-secret-token
+```
+
+Or via environment variable:
+
+```bash
+AGENTDB_AUTH_TOKEN=my-secret-token npx agentdb --http
+```
+
+No token configured = open access (backward compatible). Health check at `/health` always works.
+
+### Multi-agent tokens
+
+Map different tokens to different agent identities and permissions:
+
+```typescript
+startHttp(dir, {
+  authTokens: {
+    "token-reader": { agentId: "reader", permissions: { read: true, write: false, admin: false } },
+    "token-writer": { agentId: "writer", permissions: { read: true, write: true, admin: false } },
+  },
+});
+```
+
+### JWT (production)
+
+Validate JWTs from any OAuth provider (Auth0, WorkOS, etc.):
+
+```typescript
+import { startHttp, createJwtAuth } from "@backloghq/agentdb/mcp";
+
+startHttp(dir, {
+  authFn: createJwtAuth({
+    jwksUrl: "https://your-domain.auth0.com/.well-known/jwks.json",
+    audience: "agentdb",
+    issuer: "https://your-domain.auth0.com",
+  }),
+});
+```
+
+### Rate limiting and CORS
+
+```bash
+npx agentdb --http --auth-token secret --rate-limit 100 --cors https://app.example.com
+```
+
+## Docker
+
+```bash
+docker build -t agentdb .
+docker run -p 3000:3000 -v ./data:/data agentdb --path /data --http --host 0.0.0.0
+
+# With auth:
+docker run -p 3000:3000 -e AGENTDB_AUTH_TOKEN=secret -v ./data:/data agentdb --path /data --http --host 0.0.0.0
+
+# With S3:
+docker run -p 3000:3000 \
+  -e AGENTDB_BACKEND=s3 \
+  -e AGENTDB_S3_BUCKET=my-bucket \
+  -e AWS_REGION=us-east-1 \
+  agentdb --http --host 0.0.0.0
+```
+
 ## Progressive Disclosure
 
 Use `summary: true` on find to get compact results. Omits long text fields (>200 chars), nested objects, and large arrays (>10 items). Useful for agents scanning many records before drilling into one.
