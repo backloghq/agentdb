@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [0.1.0] - 2026-04-09
 
+### Improved (MCP tool quality — backlog patterns adopted)
+- Every tool has `title` for human-readable display names
+- Every tool has `outputSchema` — typed zod response schemas for structured output
+- All 4 MCP annotation hints on every tool: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`
+- Responses include `structuredContent` (typed object) alongside text fallback
+- Enriched descriptions: explain behavior, cross-reference related tools, document constraints
+- Standard annotation constants: `READ`, `WRITE`, `WRITE_IDEMPOTENT`, `DESTRUCTIVE`
+- Permission enforcement automatic via `makeSafe()` — derives level from annotations
+- `API_NOTE` appended to all descriptions
+
 ### Fixed (from security + architecture review)
 - **CRITICAL**: Permission enforcement wired into all 24 tool handlers (was configured but never checked)
 - **CRITICAL**: Agent identity now from auth token, not self-reported request body

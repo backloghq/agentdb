@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** All phases complete. 488+ tests, 24 tools. Auth layer (bearer token, JWT, rate limiting, CORS, audit).
+**Status:** All phases complete. 491 tests, 24 tools. Auth + security hardened. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints.
 
 ## Commands
 
