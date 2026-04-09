@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { join } from "node:path";
 import { Store } from "@backloghq/opslog";
 import { Collection } from "./collection.js";
+import type { CollectionOptions } from "./collection.js";
 
 const META_DIR = "meta";
 const COLLECTIONS_DIR = "collections";
@@ -33,6 +34,7 @@ export class AgentDB {
   private opts: Required<AgentDBOptions>;
   private open: Map<string, Collection> = new Map();
   private opening: Map<string, Promise<Collection>> = new Map();
+  private collectionOpts: Map<string, CollectionOptions> = new Map();
   private lru: string[] = []; // Most recently used at end
   private meta: MetaManifest = { collections: [], dropped: [] };
   private _opened = false;
@@ -58,8 +60,11 @@ export class AgentDB {
    * Lazy-opens the underlying opslog store on first access.
    * Evicts least-recently-used collections when the limit is reached.
    */
-  async collection(name: string): Promise<Collection> {
+  async collection(name: string, colOpts?: CollectionOptions): Promise<Collection> {
     this.ensureOpen();
+
+    // Store collection options for future reopens (LRU eviction + reopen)
+    if (colOpts) this.collectionOpts.set(name, colOpts);
 
     // Return cached + touch LRU
     const existing = this.open.get(name);
@@ -92,7 +97,7 @@ export class AgentDB {
     await mkdir(colDir, { recursive: true });
 
     const store = new Store<Record<string, unknown>>();
-    const col = new Collection(name, store);
+    const col = new Collection(name, store, this.collectionOpts.get(name));
     await col.open(colDir, { checkpointThreshold: this.opts.checkpointThreshold });
 
     this.open.set(name, col);

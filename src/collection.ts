@@ -60,6 +60,12 @@ export interface UpdateOps {
   $push?: Record<string, unknown>;
 }
 
+/** Options for configuring collection middleware. */
+export interface CollectionOptions {
+  /** Validation function — called before every insert/update/upsert. Throw to reject. */
+  validate?: (record: Record<string, unknown>) => void;
+}
+
 /** Reserved field prefix for internal metadata. */
 const META_AGENT = "_agent";
 const META_REASON = "_reason";
@@ -155,10 +161,19 @@ export class Collection {
   readonly name: string;
   private store: Store<StoredRecord>;
   private _opened = false;
+  private opts: CollectionOptions;
 
-  constructor(name: string, store: Store<StoredRecord>) {
+  constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
     this.store = store;
+    this.opts = opts ?? {};
+  }
+
+  /** Run the validate hook on a clean record (meta stripped). Throws on invalid. */
+  private validateRecord(record: Record<string, unknown>): void {
+    if (this.opts.validate) {
+      this.opts.validate(stripMeta(record));
+    }
   }
 
   /** Whether the underlying store is open. */
@@ -187,6 +202,7 @@ export class Collection {
     const stored: StoredRecord = { ...doc, _id: id };
     if (opts?.agent) stored[META_AGENT] = opts.agent;
     if (opts?.reason) stored[META_REASON] = opts.reason;
+    this.validateRecord(stored);
     await this.store.set(id, stored);
     return id;
   }
@@ -196,18 +212,23 @@ export class Collection {
    * Returns array of _ids.
    */
   async insertMany(docs: Record<string, unknown>[], opts?: MutationOpts): Promise<string[]> {
-    const ids: string[] = [];
+    // Validate all records before writing any
+    const prepared: { id: string; stored: StoredRecord }[] = [];
+    for (const doc of docs) {
+      const id = (doc._id as string) || randomUUID();
+      const stored: StoredRecord = { ...doc, _id: id };
+      if (opts?.agent) stored[META_AGENT] = opts.agent;
+      if (opts?.reason) stored[META_REASON] = opts.reason;
+      this.validateRecord(stored);
+      prepared.push({ id, stored });
+    }
+
     await this.store.batch(() => {
-      for (const doc of docs) {
-        const id = (doc._id as string) || randomUUID();
-        ids.push(id);
-        const stored: StoredRecord = { ...doc, _id: id };
-        if (opts?.agent) stored[META_AGENT] = opts.agent;
-        if (opts?.reason) stored[META_REASON] = opts.reason;
+      for (const { id, stored } of prepared) {
         this.store.set(id, stored);
       }
     });
-    return ids;
+    return prepared.map((p) => p.id);
   }
 
   /**
@@ -267,16 +288,23 @@ export class Collection {
 
     if (matches.length === 0) return 0;
 
+    // Apply updates and validate results before writing
+    const updates: { id: string; updated: StoredRecord }[] = [];
+    for (const [id, record] of matches) {
+      const updated = applyUpdate(record, update);
+      if (opts?.agent) updated[META_AGENT] = opts.agent;
+      if (opts?.reason) updated[META_REASON] = opts.reason;
+      this.validateRecord(updated);
+      updates.push({ id, updated });
+    }
+
     await this.store.batch(() => {
-      for (const [id, record] of matches) {
-        const updated = applyUpdate(record, update);
-        if (opts?.agent) updated[META_AGENT] = opts.agent;
-        if (opts?.reason) updated[META_REASON] = opts.reason;
+      for (const { id, updated } of updates) {
         this.store.set(id, updated);
       }
     });
 
-    return matches.length;
+    return updates.length;
   }
 
   /**
@@ -292,6 +320,7 @@ export class Collection {
     const stored: StoredRecord = { ...doc, _id: id };
     if (opts?.agent) stored[META_AGENT] = opts.agent;
     if (opts?.reason) stored[META_REASON] = opts.reason;
+    this.validateRecord(stored);
     await this.store.set(id, stored);
     return { id, action: existing ? "updated" : "inserted" };
   }

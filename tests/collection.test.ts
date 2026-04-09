@@ -459,6 +459,87 @@ describe("Collection", () => {
     });
   });
 
+  describe("validate hook", () => {
+    let validated: Collection;
+
+    beforeEach(async () => {
+      const vDir = await mkdtemp(join(tmpdir(), "agentdb-val-"));
+      const vStore = new Store<Record<string, unknown>>();
+      validated = new Collection("validated", vStore, {
+        validate: (record) => {
+          if (!record.name || typeof record.name !== "string") {
+            throw new Error("name is required and must be a string");
+          }
+          if (typeof record.name === "string" && record.name.length > 50) {
+            throw new Error("name must be 50 chars or less");
+          }
+        },
+      });
+      await validated.open(vDir, { checkpointThreshold: 1000 });
+      // Store vDir for cleanup
+      (validated as Record<string, unknown>)._testDir = vDir;
+    });
+
+    afterEach(async () => {
+      const vDir = (validated as Record<string, unknown>)._testDir as string;
+      try { await validated.close(); } catch { /* */ }
+      await rm(vDir, { recursive: true, force: true });
+    });
+
+    it("allows valid insert", async () => {
+      const id = await validated.insert({ name: "Alice" });
+      expect(validated.findOne(id)?.name).toBe("Alice");
+    });
+
+    it("rejects invalid insert", async () => {
+      await expect(validated.insert({ role: "admin" })).rejects.toThrow("name is required");
+    });
+
+    it("rejects insert with name too long", async () => {
+      await expect(validated.insert({ name: "x".repeat(51) })).rejects.toThrow("50 chars or less");
+    });
+
+    it("rejects invalid insertMany — no records written", async () => {
+      await expect(validated.insertMany([
+        { name: "Alice" },
+        { role: "admin" }, // invalid — no name
+      ])).rejects.toThrow("name is required");
+      expect(validated.count()).toBe(0); // nothing persisted
+    });
+
+    it("validates update result, not operators", async () => {
+      await validated.insert({ _id: "a", name: "Alice", score: 10 });
+      // $unset name should fail validation (name becomes missing)
+      await expect(
+        validated.update({ _id: "a" }, { $unset: { name: true } }),
+      ).rejects.toThrow("name is required");
+      // Original record unchanged
+      expect(validated.findOne("a")?.name).toBe("Alice");
+    });
+
+    it("allows valid update", async () => {
+      await validated.insert({ _id: "a", name: "Alice" });
+      await validated.update({ _id: "a" }, { $set: { name: "Bob" } });
+      expect(validated.findOne("a")?.name).toBe("Bob");
+    });
+
+    it("rejects invalid upsert", async () => {
+      await expect(validated.upsert("a", { role: "admin" })).rejects.toThrow("name is required");
+      expect(validated.findOne("a")).toBeUndefined();
+    });
+
+    it("allows valid upsert", async () => {
+      await validated.upsert("a", { name: "Alice" });
+      expect(validated.findOne("a")?.name).toBe("Alice");
+    });
+
+    it("no validate = no-op (backward compatible)", async () => {
+      // The default col fixture has no validate hook
+      await col.insert({ anything: "goes" });
+      expect(col.count()).toBe(1);
+    });
+  });
+
   describe("persistence", () => {
     it("data survives close and reopen", async () => {
       await col.insert({ _id: "a", name: "Alice" });
