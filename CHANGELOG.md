@@ -5,30 +5,89 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-04-09
 
 ### Added
 
-- Project scaffold with triple entry points (`agentdb`, `agentdb/tools`, `agentdb/mcp`)
-- TypeScript build configuration matching opslog conventions
-- ESLint configuration with typescript-eslint
-- Vitest test runner setup with coverage
-- Generic JSON filter compiler (`compileFilter`) with 14 operators: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$contains`, `$startsWith`, `$endsWith`, `$exists`, `$regex`, `$not`, `$and`, `$or`
-- Dot-notation nested field access in filters
-- `Collection` class wrapping opslog Store: insert, insertMany, findOne, find, count, update, upsert, remove
-- Update operators: `$set`, `$unset`, `$inc`, `$push`
-- Agent identity on mutations (`agent` + `reason` fields, visible in operation history)
-- Progressive disclosure on `find` (summary mode omits long text fields)
-- Pagination on `find` (limit/offset with truncated flag and total count)
-- Per-collection undo and record history
-- `schema()` — sample records and report field names, types, examples
-- `distinct()` — unique values for a field with dot-notation support
+**Core library:**
 - `AgentDB` class with collection manager: lazy loading, LRU eviction, configurable limits
-- Collection soft-delete (`dropCollection`) and permanent purge (`purgeCollection`)
-- Meta-manifest for collection registry, persisted across restarts
-- 16 framework-agnostic tool definitions (`agentdb/tools`): db_collections, db_create, db_drop, db_purge, db_insert, db_find, db_find_one, db_update, db_upsert, db_delete, db_count, db_undo, db_history, db_schema, db_distinct, db_stats
-- `getTools(db)` returns `{ name, description, schema, annotations, execute }` objects consumable by any agent framework
-- `safe()` error wrapper — tools return `{ isError: true }` on failure, never throw
-- MCP adapter (`agentdb/mcp`): `createMcpServer(db)` wraps tool definitions as MCP tools
-- CLI entry point: `npx agentdb --path ./data` starts MCP server on stdio
-- Compact string filter parser (`parseCompactFilter`): `role:admin`, `age.gt:18`, `(role:admin or role:mod)`, 20+ modifier aliases
+- `Collection` class: insert, insertMany, findOne, find, count, update, upsert, remove
+- Update operators: `$set`, `$unset`, `$inc`, `$push`
+- Generic JSON filter compiler (`compileFilter`) with 14 operators
+- Compact string filter parser (`parseCompactFilter`) with 20+ modifier aliases
+- Filter accepts `string | object` across all query methods
+- Agent identity on mutations (`agent` + `reason`, visible in history, stripped from reads)
+- Optimistic locking (`_version` tracking, `expectedVersion` on mutations)
+- Progressive disclosure (summary mode on find)
+- Pagination (limit/offset with truncated flag and total count)
+- Token budget on find queries (`maxTokens` param, 4 chars/token heuristic)
+- TTL / automatic expiry (`ttl` on insert, expired records excluded, `cleanup()`)
+- Per-collection undo, history, getOps
+- Discovery: `schema()`, `distinct()`, `stats()`
+- Collection soft-delete (`dropCollection`) and permanent purge
+- Export / import for backup and restore (`db_export`, `db_import`)
+- Archive tools (`db_archive`, `db_archive_list`, `db_archive_load`)
+
+**Collection middleware:**
+- `validate` hook — reject bad data before it hits opslog
+- `computed` fields — calculated on read, not stored
+- `virtualFilters` — domain-specific query predicates (`+OVERDUE`, `+BLOCKED`, etc.)
+
+**Indexes:**
+- Full-text search via inverted index (`textSearch: true`, `Collection.search()`)
+- HNSW index for semantic nearest-neighbor search (pure TypeScript)
+- B-tree index for attribute matching (`createIndex`, `dropIndex`, `listIndexes`)
+- Bloom filter for probabilistic existence checks (`createBloomFilter`, `mightHave`)
+- Query frequency tracker for index suggestions (`suggestIndexes`)
+
+**Semantic search:**
+- Embedding provider abstraction (OpenAI, HTTP, custom)
+- Int8 quantization (4x smaller than float32)
+- `Collection.semanticSearch()` with lazy embedding and hybrid queries
+- Auto re-embed when text fields change on update
+
+**Multi-agent:**
+- Per-agent permissions (read/write/admin enforcement)
+- Change notifications (event emitter on Collection)
+- Optimistic locking with conflict detection
+- WAL tailing (`tail()`, `watch()`, `unwatch()`) for live cross-process updates
+
+**Named views:**
+- Define views via filter expressions with cached results
+- Automatic invalidation on mutation
+
+**Memory monitoring:**
+- `MemoryMonitor` with per-collection budgets wired into AgentDB
+
+**Tools (24 total):**
+- CRUD: db_insert, db_find, db_find_one, db_update, db_upsert, db_delete, db_count, db_batch
+- Collections: db_collections, db_create, db_drop, db_purge
+- History: db_undo, db_history
+- Discovery: db_schema, db_distinct, db_stats
+- Archive: db_archive, db_archive_list, db_archive_load
+- Semantic: db_semantic_search, db_embed
+- Backup: db_export, db_import
+
+**MCP adapter:**
+- stdio transport (single client)
+- HTTP/Streamable transport (multiple concurrent clients, session management)
+- CLI: `npx agentdb --path ./data [--http] [--port 3000]`
+
+**S3 backend:**
+- CLI flags: `--backend s3 --bucket <name> --region <region> [--prefix <path>]`
+- Environment variables: `AGENTDB_BACKEND`, `AGENTDB_S3_BUCKET`, `AWS_REGION`
+- Library: `import { S3Backend } from "agentdb"` + pass to `AgentDB` constructor
+- Dynamic import — AWS SDK only loaded when S3 configured
+
+**Storage engine (opslog v0.4.0):**
+- Pluggable StorageBackend interface (FsBackend default, S3Backend optional)
+- Multi-writer with per-agent WAL streams and Lamport clocks
+- WAL tailing for live cross-process updates
+- Delta encoding (automatic, JSON diffs when smaller than full prev)
+- Async mutation serializer, ftruncate undo, advisory directory lock, readOnly mode
+
+**Testing:**
+- 468 tests across 15 test files
+- 25 e2e tests (MCP server over JSON-RPC, 21 of 24 tools tested)
+- 15 performance benchmarks
+- 94.5% line coverage
