@@ -162,8 +162,8 @@ export class AgentDB {
   }
 
   private async _openCollection(name: string): Promise<Collection> {
-    // Evict if at limit
-    if (this.open.size >= this.opts.maxOpenCollections) {
+    // Evict until under limit (loop handles concurrent opens that may overshoot)
+    while (this.open.size >= this.opts.maxOpenCollections && this.lru.length > 0) {
       await this.evictLru();
     }
 

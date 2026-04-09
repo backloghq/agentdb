@@ -10,7 +10,9 @@ const DENY_ALL: AgentPermissions = { read: false, write: false, admin: false };
 
 /**
  * Permission manager for per-agent access control.
- * Honor-system: agents self-report identity via the `agent` field.
+ * In HTTP mode: agent identity comes from authenticated auth token (secure).
+ * In stdio mode: agent identity falls back to self-reported `agent` field (honor-system).
+ * When permissions are configured without HTTP auth, enforcement relies on caller honesty.
  */
 export class PermissionManager {
   private rules: Map<string, AgentPermissions>;

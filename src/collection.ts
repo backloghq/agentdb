@@ -825,7 +825,8 @@ export class Collection {
       records = this.store.filter((value) => !isExpired(value) && predicate(value));
     }
 
-    // Sort if requested
+    // Sort if requested. Full sort is O(m log m) — acceptable for typical result sets.
+    // A heap-based partial sort would help when m >> limit, but adds complexity.
     if (opts?.sort) {
       const desc = opts.sort.startsWith("-");
       const field = desc ? opts.sort.slice(1) : opts.sort;

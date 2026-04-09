@@ -572,6 +572,40 @@ describe("Collection", () => {
       const deleteOps = ops.filter((op) => op.op === "delete" && op.id === "1");
       expect(deleteOps).toHaveLength(1);
     });
+
+    it("_id fast path: update by _id without full scan", async () => {
+      const updated = await col.update({ _id: "1" }, { $set: { role: "superadmin" } });
+      expect(updated).toBe(1);
+      expect(col.findOne("1")?.role).toBe("superadmin");
+    });
+
+    it("_id fast path: remove by _id without full scan", async () => {
+      const deleted = await col.remove({ _id: "2" });
+      expect(deleted).toBe(1);
+      expect(col.findOne("2")).toBeUndefined();
+      expect(col.count()).toBe(2);
+    });
+
+    it("_id fast path: update non-existent _id returns 0", async () => {
+      const updated = await col.update({ _id: "nonexistent" }, { $set: { x: 1 } });
+      expect(updated).toBe(0);
+    });
+
+    it("indexed update: uses index for non-_id filter", async () => {
+      col.createIndex("role");
+      const updated = await col.update({ role: "admin" }, { $set: { verified: true } });
+      expect(updated).toBe(2);
+      expect(col.findOne("1")?.verified).toBe(true);
+      expect(col.findOne("3")?.verified).toBe(true);
+    });
+
+    it("predicate cache: repeated identical filters reuse compiled predicate", () => {
+      // Run the same filter multiple times — should not error and should return consistent results
+      for (let i = 0; i < 10; i++) {
+        const result = col.find({ filter: { role: "admin" } });
+        expect(result.records).toHaveLength(2);
+      }
+    });
   });
 
   describe("undo", () => {
