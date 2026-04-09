@@ -46,12 +46,14 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@backloghq/opslog": "^0.5.0",
-    "@backloghq/opslog-s3": "^0.1.1",
+    "@backloghq/opslog": "^0.5.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "express": "^5.2.1",
     "jose": "^6.2.2",
     "zod": "^3.25.0"
+  },
+  "optionalDependencies": {
+    "@backloghq/opslog-s3": "^0.1.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.0",

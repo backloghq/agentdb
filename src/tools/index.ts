@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AgentDB } from "../agentdb.js";
-import { getCurrentAuth } from "../mcp/auth.js";
+import { getCurrentAuth } from "../auth-context.js";
 
 /** A framework-agnostic tool definition. */
 export interface AgentTool {
@@ -287,7 +287,7 @@ export function getTools(db: AgentDB): AgentTool[] {
     {
       name: "db_batch",
       title: "Batch Operations",
-      description: "Execute multiple insert and delete operations atomically within a collection (single disk write). Inserts and deletes are atomic; updates run sequentially after. For bulk data loading, this is much faster than individual inserts." + API_NOTE,
+      description: "Execute multiple operations within a collection. Inserts and deletes run atomically in a single batch (one disk write). Updates run sequentially after the batch (not atomic with inserts/deletes). For bulk data loading, this is much faster than individual inserts." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
         operations: z.array(z.object({

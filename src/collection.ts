@@ -449,17 +449,32 @@ export class Collection {
    * B-tree indexes are fully rebuilt (cheap — just field lookups, no tokenization).
    */
   private incrementalIndexUpdate(affectedIds: string[]): void {
-    if (this.textIdx) {
-      for (const id of affectedIds) {
-        const record = this.store.get(id);
+    for (const id of affectedIds) {
+      const record = this.store.get(id);
+      if (this.textIdx) {
         if (record && !isExpired(record)) {
           this.textIdx.add(id, stripMeta(record));
         } else {
           this.textIdx.remove(id);
         }
       }
+      // B-tree + composite: remove old entry by ID (reverse map), add new entry
+      for (const [field, idx] of this.btreeIndexes) {
+        idx.removeById(id);
+        if (record && !isExpired(record)) {
+          const value = getNestedValue(stripMeta(record), field);
+          if (value !== undefined) idx.add(value, id);
+        }
+      }
+      for (const [, { fields, idx }] of this.compositeIndexes) {
+        idx.removeById(id);
+        if (record && !isExpired(record)) {
+          const clean = stripMeta(record);
+          const key = compositeKey(fields.map((f) => getNestedValue(clean, f)));
+          idx.add(key, id);
+        }
+      }
     }
-    this.rebuildBTreeIndexes();
   }
 
   /** Run the validate hook on a clean record (meta stripped). Throws on invalid. */
@@ -479,11 +494,16 @@ export class Collection {
     return result;
   }
 
-  /** Create a lazy accessor for all active (non-expired) clean records. */
+  /** Create a lazy accessor for all active (non-expired) clean records. Single-pass. */
   private allCleanRecords(): () => Record<string, unknown>[] {
     let cached: Record<string, unknown>[] | null = null;
     return () => {
-      if (!cached) cached = this.store.all().filter((r) => !isExpired(r)).map(stripMeta);
+      if (!cached) {
+        cached = [];
+        for (const [, record] of this.store.entries()) {
+          if (!isExpired(record)) cached.push(stripMeta(record));
+        }
+      }
       return cached;
     };
   }
@@ -765,7 +785,7 @@ export class Collection {
     const record = this.store.get(id);
     if (!record || isExpired(record)) return undefined;
     const clean = stripMeta(record);
-    return this.applyComputed(clean, this.allCleanRecords());
+    return this.opts.computed ? this.applyComputed(clean, this.allCleanRecords()) : clean;
   }
 
   /**
@@ -903,10 +923,16 @@ export class Collection {
       const value = this.store.get(directId);
       if (value && !isExpired(value)) matches.push([directId, value]);
     } else {
+      const candidateIds = this.indexedCandidates(filter);
       const predicate = this.resolve(filter);
-      for (const [id, value] of this.store.entries()) {
-        if (!isExpired(value) && predicate(value)) {
-          matches.push([id, value]);
+      if (candidateIds) {
+        for (const id of candidateIds) {
+          const value = this.store.get(id);
+          if (value && !isExpired(value) && predicate(value)) matches.push([id, value]);
+        }
+      } else {
+        for (const [id, value] of this.store.entries()) {
+          if (!isExpired(value) && predicate(value)) matches.push([id, value]);
         }
       }
     }
@@ -985,10 +1011,16 @@ export class Collection {
       const value = this.store.get(directId);
       if (value && !isExpired(value)) toDelete.push(directId);
     } else {
+      const candidateIds = this.indexedCandidates(filter);
       const predicate = this.resolve(filter);
-      for (const [id, value] of this.store.entries()) {
-        if (!isExpired(value) && predicate(value)) {
-          toDelete.push(id);
+      if (candidateIds) {
+        for (const id of candidateIds) {
+          const value = this.store.get(id);
+          if (value && !isExpired(value) && predicate(value)) toDelete.push(id);
+        }
+      } else {
+        for (const [id, value] of this.store.entries()) {
+          if (!isExpired(value) && predicate(value)) toDelete.push(id);
         }
       }
     }
@@ -1455,10 +1487,17 @@ export class Collection {
    * Get unique values for a field across all records.
    */
   distinct(field: string): { field: string; values: unknown[]; count: number } {
+    // Fast path: use B-tree index if available (O(k) instead of O(n))
+    const idx = this.btreeIndexes.get(field);
+    if (idx && !this._hasTTL) {
+      const values = idx.allValues();
+      return { field, values, count: values.length };
+    }
+
     const seen = new Set<string>();
     const values: unknown[] = [];
 
-    for (const record of this.store.all()) {
+    for (const [, record] of this.store.entries()) {
       if (isExpired(record)) continue;
       const clean = stripMeta(record);
       const value = getNestedValue(clean, field);

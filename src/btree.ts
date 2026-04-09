@@ -20,11 +20,16 @@ function compare(a: unknown, b: unknown): number {
   return String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
 }
 
-/** Sorted index on a single field. Binary search for O(log n) lookups. */
+/**
+ * Sorted index on a single field. Binary search for O(log n) lookups.
+ * Note: add()/remove() use Array.splice() which is O(n) per operation.
+ * At AgentDB's target scale (≤100K unique keys), this is <0.5ms — acceptable.
+ */
 export class BTreeIndex {
   readonly field: string;
   private entries: IndexEntry[] = [];
   private _size = 0;
+  private idToKey = new Map<string, unknown>(); // Reverse map: record ID → indexed key value
 
   constructor(field: string) {
     this.field = field;
@@ -43,6 +48,7 @@ export class BTreeIndex {
     } else {
       this.entries.splice(idx, 0, { key: value, ids: new Set([id]) });
     }
+    this.idToKey.set(id, value);
     this._size++;
   }
 
@@ -52,10 +58,17 @@ export class BTreeIndex {
     if (idx < this.entries.length && compare(this.entries[idx].key, value) === 0) {
       this.entries[idx].ids.delete(id);
       this._size--;
+      this.idToKey.delete(id);
       if (this.entries[idx].ids.size === 0) {
         this.entries.splice(idx, 1);
       }
     }
+  }
+
+  /** Remove a record by ID without knowing its indexed value. */
+  removeById(id: string): void {
+    const value = this.idToKey.get(id);
+    if (value !== undefined) this.remove(value, id);
   }
 
   /** Find all record IDs where field equals value. */
@@ -131,6 +144,7 @@ export class BTreeIndex {
   clear(): void {
     this.entries = [];
     this._size = 0;
+    this.idToKey.clear();
   }
 
   // --- Internal ---

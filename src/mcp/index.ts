@@ -108,6 +108,7 @@ export async function startHttp(
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
     next();
   });
 

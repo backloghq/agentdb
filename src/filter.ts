@@ -261,9 +261,15 @@ function compileOperator(fieldPath: string, op: string, opValue: unknown): Predi
       if (opValue instanceof RegExp) {
         regex = opValue;
       } else if (typeof opValue === "string") {
-        // Reject patterns with nested quantifiers that could cause catastrophic backtracking
-        if (/(\+|\*|\{)\s*(\+|\*|\{)/.test(opValue) || /\([^)]*(\+|\*)\)[+*]/.test(opValue)) {
-          throw new Error("$regex: pattern rejected — nested quantifiers can cause catastrophic backtracking");
+        // Reject patterns that could cause catastrophic backtracking (ReDoS):
+        // 1. Adjacent quantifiers: a**  a*+  a{2}*
+        // 2. Quantified groups with quantifiers inside: (a+)+  (a*)*
+        // 3. Quantified groups with alternation: (a|a)*  (a|b|a)+
+        // 4. Length limit
+        if (/(\+|\*|\{)\s*(\+|\*|\{)/.test(opValue) ||
+            /\([^)]*(\+|\*)\)[+*{]/.test(opValue) ||
+            /\([^)]*\|[^)]*\)[+*{]/.test(opValue)) {
+          throw new Error("$regex: pattern rejected — potential catastrophic backtracking");
         }
         if (opValue.length > 200) {
           throw new Error("$regex: pattern too long (max 200 characters)");

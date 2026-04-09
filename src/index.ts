@@ -25,8 +25,11 @@ export { PermissionManager } from "./permissions.js";
 export type { AgentPermissions } from "./permissions.js";
 export { FsBackend, LamportClock } from "@backloghq/opslog";
 export type { StorageBackend, LockHandle } from "@backloghq/opslog";
-export { S3Backend } from "@backloghq/opslog-s3";
-export type { S3BackendOptions } from "@backloghq/opslog-s3";
+// S3Backend is optional — dynamically imported to avoid hard dependency on @backloghq/opslog-s3
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function loadS3Backend(): Promise<any> {
+  return import("@backloghq/opslog-s3");
+}
 export { AgentDB } from "./agentdb.js";
 export { resolveProvider, OpenAIEmbeddingProvider, HttpEmbeddingProvider } from "./embeddings/index.js";
 export type { EmbeddingProvider, EmbeddingConfig } from "./embeddings/index.js";

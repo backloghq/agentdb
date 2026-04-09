@@ -2,22 +2,12 @@
  * Authentication and authorization middleware for AgentDB HTTP transport.
  */
 import { timingSafeEqual } from "node:crypto";
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { Request, Response, NextFunction } from "express";
+import { authContext } from "../auth-context.js";
+import type { AuthIdentity } from "../auth-context.js";
 
-/** AsyncLocalStorage for propagating auth identity to tool handlers. */
-export const authContext = new AsyncLocalStorage<AuthIdentity>();
-
-/** Get the current request's authenticated identity (if any). */
-export function getCurrentAuth(): AuthIdentity | undefined {
-  return authContext.getStore();
-}
-
-/** Authenticated agent identity. */
-export interface AuthIdentity {
-  agentId: string;
-  permissions?: { read?: boolean; write?: boolean; admin?: boolean };
-}
+export { authContext, getCurrentAuth } from "../auth-context.js";
+export type { AuthIdentity } from "../auth-context.js";
 
 /** Token-to-identity mapping for multi-agent auth. */
 export type TokenMap = Record<string, AuthIdentity>;
@@ -59,7 +49,15 @@ export function createAuthMiddleware(opts: {
         const token = header.slice(7);
 
         if (opts.tokens) {
-          identity = opts.tokens[token] ?? null;
+          // Timing-safe: iterate all tokens with constant-time comparison
+          const tokenBuf = Buffer.from(token);
+          for (const [knownToken, id] of Object.entries(opts.tokens)) {
+            const knownBuf = Buffer.from(knownToken);
+            if (tokenBuf.length === knownBuf.length && timingSafeEqual(tokenBuf, knownBuf)) {
+              identity = id;
+              break;
+            }
+          }
         } else if (opts.token) {
           // Timing-safe comparison to prevent timing attacks
           const a = Buffer.from(token);
@@ -100,9 +98,20 @@ export class RateLimiter {
     this.windowMs = windowMs;
   }
 
+  private lastCleanup = Date.now();
+
   /** Check if a request is allowed. Returns true if allowed, false if rate-limited. */
   check(key: string): boolean {
     const now = Date.now();
+
+    // Periodic cleanup of expired entries (every 5 windows)
+    if (now - this.lastCleanup > this.windowMs * 5) {
+      for (const [k, v] of this.counts) {
+        if (now > v.resetAt) this.counts.delete(k);
+      }
+      this.lastCleanup = now;
+    }
+
     const entry = this.counts.get(key);
 
     if (!entry || now > entry.resetAt) {
