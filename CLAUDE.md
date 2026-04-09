@@ -75,4 +75,4 @@ src/
 - Semantic search requires external embedding provider (OpenAI, HTTP, or custom)
 - Auth: bearer token (default), multi-token, JWT via jose, pluggable authFn
 - Rate limiting, CORS, audit logging on HTTP transport
-- Group commit (writeMode: "group") for ~12x faster writes — single-writer only, auto-disabled for multi-writer
+- Write modes: "immediate" (default, crash-safe), "group" (~12x faster), "async" (~50x faster, lossy on crash). Single-writer only for group/async.

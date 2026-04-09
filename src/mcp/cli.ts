@@ -46,7 +46,7 @@ async function resolveBackend(): Promise<AgentDBOptions> {
   const opts: AgentDBOptions = {};
 
   if (agentId) opts.agentId = agentId;
-  if (writeMode === "group") opts.writeMode = "group";
+  if (writeMode === "group" || writeMode === "async") opts.writeMode = writeMode;
 
   if (backend === "s3") {
     if (!s3Bucket) {

@@ -37,8 +37,8 @@ export interface AgentDBOptions {
   agentId?: string;
   /** Memory budget in bytes. Warns when collections exceed this total. 0 = unlimited. */
   memoryBudget?: number;
-  /** Write mode: "immediate" (default, safe for multi-writer) or "group" (~12x faster, single-writer only). */
-  writeMode?: "immediate" | "group";
+  /** Write mode: "immediate" (default, safe for multi-writer), "group" (~12x faster), or "async" (~50x faster, data lost on crash). Single-writer only for group/async. */
+  writeMode?: "immediate" | "group" | "async";
   /** Group commit: flush after N ops (default: 50). */
   groupCommitSize?: number;
   /** Group commit: flush after N ms (default: 100). */

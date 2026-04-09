@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ## [0.1.0] - 2026-04-09
 
 ### Performance
-- **Group commit** — `writeMode: "group"` buffers writes, ~12x faster. CLI: `--group-commit`. Env: `AGENTDB_WRITE_MODE=group`. Auto-disabled for multi-writer (agentId). Opslog v0.5.0.
+- **Group commit** — `writeMode: "group"` buffers writes, ~12x faster. CLI: `--group-commit`. Env: `AGENTDB_WRITE_MODE=group`. Auto-disabled for multi-writer (agentId).
+- **Async write mode** — `writeMode: "async"` resolves writes immediately, ~50x faster. Data lost on crash. CLI: `--write-mode async`. Env: `AGENTDB_WRITE_MODE=async`. Requires opslog v0.5.1.
 - **Sorted-array index** — replaced B-tree tree structure with flat sorted array + binary search. Same O(log n) lookups, simpler code, no unbounded leaf growth. `find()` and `count()` use indexes for equality filters.
 - **Indexed range queries** — `$gt`, `$gte`, `$lt`, `$lte` operators now use sorted-array index when an index exists on the filtered field. Combined bounds (e.g., `{ $gte: 10, $lte: 90 }`) also use the index. Expected 5-10x speedup on range filters.
 - **Count-from-index fast path** — `count()` with a single indexed equality/range field on TTL-free collections returns the index size directly, bypassing per-record fetch and predicate evaluation. O(1) for equality, O(log n) for range.
