@@ -177,6 +177,93 @@ describe("Authentication", () => {
   });
 });
 
+describe("JWT Auth", () => {
+  it("validates JWT with shared secret", async () => {
+    const { SignJWT } = await import("jose");
+    const { createJwtAuth } = await import("../src/mcp/jwt.js");
+
+    const secret = "super-secret-key-for-testing-only";
+    const authFn = createJwtAuth({
+      secret,
+      audience: "agentdb",
+      issuer: "test",
+    });
+
+    // Create a valid JWT
+    const jwt = await new SignJWT({ sub: "agent-1", permissions: { read: true, write: true } })
+      .setProtectedHeader({ alg: "HS256" })
+      .setAudience("agentdb")
+      .setIssuer("test")
+      .setExpirationTime("1h")
+      .sign(new TextEncoder().encode(secret));
+
+    // Simulate request
+    const mockReq = { headers: { authorization: `Bearer ${jwt}` } } as unknown as import("express").Request;
+    const identity = await authFn(mockReq);
+    expect(identity).not.toBeNull();
+    expect(identity!.agentId).toBe("agent-1");
+    expect(identity!.permissions?.write).toBe(true);
+  });
+
+  it("rejects expired JWT", async () => {
+    const { SignJWT } = await import("jose");
+    const { createJwtAuth } = await import("../src/mcp/jwt.js");
+
+    const secret = "test-secret";
+    const authFn = createJwtAuth({ secret });
+
+    const jwt = await new SignJWT({ sub: "agent-1" })
+      .setProtectedHeader({ alg: "HS256" })
+      .setExpirationTime("-1h") // already expired
+      .sign(new TextEncoder().encode(secret));
+
+    const mockReq = { headers: { authorization: `Bearer ${jwt}` } } as unknown as import("express").Request;
+    const identity = await authFn(mockReq);
+    expect(identity).toBeNull();
+  });
+
+  it("rejects JWT with wrong audience", async () => {
+    const { SignJWT } = await import("jose");
+    const { createJwtAuth } = await import("../src/mcp/jwt.js");
+
+    const secret = "test-secret";
+    const authFn = createJwtAuth({ secret, audience: "agentdb" });
+
+    const jwt = await new SignJWT({ sub: "agent-1" })
+      .setProtectedHeader({ alg: "HS256" })
+      .setAudience("wrong-audience")
+      .setExpirationTime("1h")
+      .sign(new TextEncoder().encode(secret));
+
+    const mockReq = { headers: { authorization: `Bearer ${jwt}` } } as unknown as import("express").Request;
+    const identity = await authFn(mockReq);
+    expect(identity).toBeNull();
+  });
+
+  it("rejects invalid JWT", async () => {
+    const { createJwtAuth } = await import("../src/mcp/jwt.js");
+
+    const authFn = createJwtAuth({ secret: "test-secret" });
+    const mockReq = { headers: { authorization: "Bearer not-a-valid-jwt" } } as unknown as import("express").Request;
+    const identity = await authFn(mockReq);
+    expect(identity).toBeNull();
+  });
+
+  it("returns null for missing auth header", async () => {
+    const { createJwtAuth } = await import("../src/mcp/jwt.js");
+
+    const authFn = createJwtAuth({ secret: "test-secret" });
+    const mockReq = { headers: {} } as unknown as import("express").Request;
+    const identity = await authFn(mockReq);
+    expect(identity).toBeNull();
+  });
+
+  it("throws if no secret or jwksUrl provided", async () => {
+    const { createJwtAuth } = await import("../src/mcp/jwt.js");
+    expect(() => createJwtAuth({})).toThrow("requires either");
+  });
+});
+
 describe("Rate Limiter", () => {
   it("allows requests under limit", async () => {
     const { RateLimiter } = await import("../src/mcp/auth.js");

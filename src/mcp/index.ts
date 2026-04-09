@@ -13,6 +13,8 @@ import type { TokenMap, AuthFn } from "./auth.js";
 
 export { createAuthMiddleware, RateLimiter, AuditLogger };
 export type { TokenMap, AuthFn, AuthIdentity, AuthenticatedRequest, AuditEntry } from "./auth.js";
+export { createJwtAuth } from "./jwt.js";
+export type { JwtAuthOptions } from "./jwt.js";
 
 export { McpServer, StdioServerTransport, StreamableHTTPServerTransport };
 
