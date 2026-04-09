@@ -35,13 +35,11 @@ export function createMcpServer(db: AgentDB): McpServer {
     server.registerTool(
       tool.name,
       {
+        title: tool.title,
         description: tool.description,
         inputSchema: tool.schema as z.ZodObject<z.ZodRawShape>,
-        annotations: {
-          readOnlyHint: tool.annotations.readOnly,
-          destructiveHint: tool.annotations.destructive,
-          idempotentHint: tool.annotations.idempotent,
-        },
+        outputSchema: tool.outputSchema as z.ZodObject<z.ZodRawShape> | undefined,
+        annotations: tool.annotations,
       },
       async (args) => {
         const result = await tool.execute(args);

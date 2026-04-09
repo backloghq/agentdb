@@ -4,30 +4,37 @@ import type { AgentDB } from "../agentdb.js";
 /** A framework-agnostic tool definition. */
 export interface AgentTool {
   name: string;
+  title: string;
   description: string;
   schema: z.ZodType;
+  outputSchema?: z.ZodType;
   annotations: {
-    readOnly?: boolean;
-    destructive?: boolean;
-    idempotent?: boolean;
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
+    idempotentHint: boolean;
+    openWorldHint: boolean;
   };
   execute: (args: unknown) => Promise<ToolResult>;
 }
 
 export interface ToolResult {
   content: Array<{ type: "text"; text: string }>;
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }
 
+/** Shared note appended to descriptions. */
+const API_NOTE = " Permissions enforced based on agent identity.";
+
 /** Derive permission level from tool annotations. */
-function permLevelFromAnnotations(annotations: { readOnly?: boolean; destructive?: boolean }): "read" | "write" | "admin" {
-  if (annotations.destructive) return "admin";
-  if (annotations.readOnly) return "read";
+function permLevelFromAnnotations(annotations: { readOnlyHint?: boolean; destructiveHint?: boolean }): "read" | "write" | "admin" {
+  if (annotations.destructiveHint) return "admin";
+  if (annotations.readOnlyHint) return "read";
   return "write";
 }
 
-/** Wrap a handler in error handling and automatic permission checking based on annotations. */
-function makeSafe(db: AgentDB, toolName: string, annotations: { readOnly?: boolean; destructive?: boolean }) {
+/** Wrap a handler in error handling, permission checking, and structured output. */
+function makeSafe(db: AgentDB, toolName: string, annotations: { readOnlyHint?: boolean; destructiveHint?: boolean }) {
   const level = permLevelFromAnnotations(annotations);
   return (fn: (args: Record<string, unknown>) => Promise<unknown>): (args: unknown) => Promise<ToolResult> => {
     return async (args) => {
@@ -35,7 +42,11 @@ function makeSafe(db: AgentDB, toolName: string, annotations: { readOnly?: boole
         const agent = (args as Record<string, unknown>).agent as string | undefined;
         db.getPermissions().require(agent, level, toolName);
         const result = await fn(args as Record<string, unknown>);
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        const structured = result as Record<string, unknown>;
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(structured, null, 2) }],
+          structuredContent: structured,
+        };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { isError: true, content: [{ type: "text" as const, text: message }] };
@@ -61,28 +72,36 @@ const mutationOpts = {
 // --- Tool definitions ---
 
 export function getTools(db: AgentDB): AgentTool[] {
-  // Helper: creates a permission-checked safe wrapper for each tool
-  function safe(name: string, annotations: { readOnly?: boolean; destructive?: boolean; idempotent?: boolean }) {
+  function safe(name: string, annotations: { readOnlyHint?: boolean; destructiveHint?: boolean }) {
     return makeSafe(db, name, annotations);
   }
+
+  /** Standard annotation sets. */
+  const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+  const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+  const WRITE_IDEMPOTENT = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+  const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
 
   return [
     {
       name: "db_collections",
-      description: "List all collections with record counts.",
+      title: "List Collections",
+      description: "List all collections with record counts. Use this first to discover what data is available." + API_NOTE,
       schema: z.object({}),
-      annotations: { readOnly: true },
-      execute: safe("db_collections", { readOnly: true })(async () => {
+      outputSchema: z.object({ collections: z.array(z.object({ name: z.string(), recordCount: z.number() })) }),
+      annotations: READ,
+      execute: safe("db_collections", READ)(async () => {
         return { collections: await db.listCollections() };
       }),
     },
 
     {
       name: "db_create",
+      title: "Create Collection",
       description: "Create a collection. Idempotent — safe to call if it already exists.",
       schema: z.object({ collection: collectionParam }),
-      annotations: { idempotent: true },
-      execute: safe("db_create", { idempotent: true })(async (args) => {
+      annotations: WRITE_IDEMPOTENT,
+      execute: safe("db_create", WRITE_IDEMPOTENT)(async (args) => {
         await db.createCollection(args.collection as string);
         return { created: args.collection };
       }),
@@ -90,10 +109,11 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_drop",
+      title: "Drop Collection",
       description: "Soft-delete a collection. Can be recovered with db_purge. Use db_purge to permanently delete.",
       schema: z.object({ collection: collectionParam }),
-      annotations: { destructive: true },
-      execute: safe("db_drop", { destructive: true })(async (args) => {
+      annotations: DESTRUCTIVE,
+      execute: safe("db_drop", DESTRUCTIVE)(async (args) => {
         await db.dropCollection(args.collection as string);
         return { dropped: args.collection, recoverable: true };
       }),
@@ -101,12 +121,13 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_purge",
+      title: "Purge Dropped Collection",
       description: "Permanently delete a soft-dropped collection. This cannot be undone.",
       schema: z.object({
         name: z.string().describe("Name of the dropped collection to purge"),
       }),
-      annotations: { destructive: true },
-      execute: safe("db_purge", { destructive: true })(async (args) => {
+      annotations: DESTRUCTIVE,
+      execute: safe("db_purge", DESTRUCTIVE)(async (args) => {
         await db.purgeCollection(args.name as string);
         return { purged: args.name };
       }),
@@ -114,6 +135,7 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_insert",
+      title: "Insert Records",
       description: "Insert one or more records into a collection. Auto-generates _id if not provided.",
       schema: z.object({
         collection: collectionParam,
@@ -121,8 +143,8 @@ export function getTools(db: AgentDB): AgentTool[] {
         records: z.array(z.record(z.unknown())).optional().describe("Multiple records to insert"),
         ...mutationOpts,
       }),
-      annotations: {},
-      execute: safe("db_insert", {})(async (args) => {
+      annotations: WRITE,
+      execute: safe("db_insert", WRITE)(async (args) => {
         const col = await db.collection(args.collection as string);
         const opts = { agent: args.agent as string | undefined, reason: args.reason as string | undefined };
         if (args.records && Array.isArray(args.records)) {
@@ -137,6 +159,7 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_find",
+      title: "Find Records",
       description: "Query records with filter, pagination, and optional summary mode. Returns matching records.",
       schema: z.object({
         collection: collectionParam,
@@ -146,8 +169,8 @@ export function getTools(db: AgentDB): AgentTool[] {
         summary: z.boolean().optional().default(false).describe("Return summary fields only (omit long text)"),
         maxTokens: z.number().optional().describe("Approximate token budget — stop adding records when estimated tokens exceed this"),
       }),
-      annotations: { readOnly: true },
-      execute: safe("db_find", { readOnly: true })(async (args) => {
+      annotations: READ,
+      execute: safe("db_find", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         return col.find({
           filter: args.filter as Record<string, unknown> | undefined,
@@ -161,13 +184,14 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_find_one",
+      title: "Find One Record",
       description: "Get a single record by its _id. Returns the full record.",
       schema: z.object({
         collection: collectionParam,
         id: z.string().describe("Record _id"),
       }),
-      annotations: { readOnly: true },
-      execute: safe("db_find_one", { readOnly: true })(async (args) => {
+      annotations: READ,
+      execute: safe("db_find_one", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         const record = col.findOne(args.id as string);
         if (!record) return { record: null, message: "Record not found" };
@@ -177,6 +201,7 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_update",
+      title: "Update Records",
       description: "Update records matching a filter. Supports $set, $unset, $inc, $push operators.",
       schema: z.object({
         collection: collectionParam,
@@ -189,8 +214,8 @@ export function getTools(db: AgentDB): AgentTool[] {
         }).describe("Update operators"),
         ...mutationOpts,
       }),
-      annotations: {},
-      execute: safe("db_update", { readOnly: true })(async (args) => {
+      annotations: WRITE,
+      execute: safe("db_update", WRITE)(async (args) => {
         const col = await db.collection(args.collection as string);
         const update = args.update as { $set?: Record<string, unknown>; $unset?: Record<string, unknown>; $inc?: Record<string, number>; $push?: Record<string, unknown> };
         const modified = await col.update(
@@ -204,6 +229,7 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_upsert",
+      title: "Upsert Record",
       description: "Insert or update a record by ID. If the ID exists, updates it; otherwise inserts.",
       schema: z.object({
         collection: collectionParam,
@@ -211,8 +237,8 @@ export function getTools(db: AgentDB): AgentTool[] {
         record: z.record(z.unknown()).describe("Record data"),
         ...mutationOpts,
       }),
-      annotations: { idempotent: true },
-      execute: safe("db_upsert", { idempotent: true })(async (args) => {
+      annotations: WRITE_IDEMPOTENT,
+      execute: safe("db_upsert", WRITE_IDEMPOTENT)(async (args) => {
         const col = await db.collection(args.collection as string);
         return col.upsert(
           args.id as string,
@@ -224,14 +250,15 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_delete",
+      title: "Delete Records",
       description: "Delete records matching a filter. Returns the number of deleted records.",
       schema: z.object({
         collection: collectionParam,
         filter: z.record(z.unknown()).describe("Filter to match records to delete"),
         ...mutationOpts,
       }),
-      annotations: { destructive: true },
-      execute: safe("db_delete", { destructive: true })(async (args) => {
+      annotations: DESTRUCTIVE,
+      execute: safe("db_delete", DESTRUCTIVE)(async (args) => {
         const col = await db.collection(args.collection as string);
         const deleted = await col.remove(
           args.filter as Record<string, unknown>,
@@ -243,6 +270,7 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_batch",
+      title: "Batch Operations",
       description: "Execute multiple insert and delete operations atomically within a collection (single disk write). Updates run sequentially after the batch.",
       schema: z.object({
         collection: collectionParam,
@@ -260,8 +288,8 @@ export function getTools(db: AgentDB): AgentTool[] {
         })).describe("Array of operations to execute atomically"),
         ...mutationOpts,
       }),
-      annotations: {},
-      execute: safe("db_batch", { destructive: true })(async (args) => {
+      annotations: WRITE,
+      execute: safe("db_batch", WRITE)(async (args) => {
         const col = await db.collection(args.collection as string);
         const ops = args.operations as Array<{
           op: string; id?: string; record?: Record<string, unknown>;
@@ -293,13 +321,14 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_count",
+      title: "Count Records",
       description: "Count records matching a filter. Returns total count.",
       schema: z.object({
         collection: collectionParam,
         filter: filterParam,
       }),
-      annotations: { readOnly: true },
-      execute: safe("db_count", { readOnly: true })(async (args) => {
+      annotations: READ,
+      execute: safe("db_count", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         return { count: col.count(args.filter as Record<string, unknown> | undefined) };
       }),
@@ -307,10 +336,11 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_undo",
+      title: "Undo Last Mutation",
       description: "Undo the last mutation in a collection.",
       schema: z.object({ collection: collectionParam }),
-      annotations: {},
-      execute: safe("db_undo", { readOnly: true })(async (args) => {
+      annotations: WRITE,
+      execute: safe("db_undo", WRITE)(async (args) => {
         const col = await db.collection(args.collection as string);
         const undone = await col.undo();
         return { undone, collection: args.collection };
@@ -319,13 +349,14 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_history",
+      title: "Record History",
       description: "Get mutation history for a specific record. Shows all operations with before/after state.",
       schema: z.object({
         collection: collectionParam,
         id: z.string().describe("Record _id"),
       }),
-      annotations: { readOnly: true },
-      execute: safe("db_history", { readOnly: true })(async (args) => {
+      annotations: READ,
+      execute: safe("db_history", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         return { operations: col.history(args.id as string) };
       }),
@@ -333,13 +364,14 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_schema",
+      title: "Inspect Schema",
       description: "Inspect the shape of records in a collection. Samples records and reports field names, types, and examples.",
       schema: z.object({
         collection: collectionParam,
         sampleSize: z.number().optional().default(50).describe("Number of records to sample"),
       }),
-      annotations: { readOnly: true },
-      execute: safe("db_schema", { readOnly: true })(async (args) => {
+      annotations: READ,
+      execute: safe("db_schema", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         return col.schema(args.sampleSize as number);
       }),
@@ -347,13 +379,14 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_distinct",
+      title: "Distinct Values",
       description: "Get unique values for a field across all records in a collection.",
       schema: z.object({
         collection: collectionParam,
         field: z.string().describe("Field name (supports dot notation for nested fields)"),
       }),
-      annotations: { readOnly: true },
-      execute: safe("db_distinct", { readOnly: true })(async (args) => {
+      annotations: READ,
+      execute: safe("db_distinct", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         return col.distinct(args.field as string);
       }),
@@ -361,14 +394,15 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_archive",
+      title: "Archive Records",
       description: "Archive records matching a filter to cold storage. Archived records are removed from the active set.",
       schema: z.object({
         collection: collectionParam,
         filter: z.union([z.record(z.unknown()), z.string()]).describe("Filter: JSON object or compact string"),
         segment: z.string().optional().describe("Archive segment name (defaults to current quarter, e.g. 2026-Q2)"),
       }),
-      annotations: { destructive: true },
-      execute: safe("db_archive", { destructive: true })(async (args) => {
+      annotations: DESTRUCTIVE,
+      execute: safe("db_archive", DESTRUCTIVE)(async (args) => {
         const col = await db.collection(args.collection as string);
         const archived = await col.archive(
           args.filter as Record<string, unknown> | string,
@@ -380,10 +414,11 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_archive_list",
+      title: "List Archive Segments",
       description: "List available archive segments for a collection.",
       schema: z.object({ collection: collectionParam }),
-      annotations: { readOnly: true },
-      execute: safe("db_archive_list", { readOnly: true })(async (args) => {
+      annotations: READ,
+      execute: safe("db_archive_list", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         return { segments: col.listArchiveSegments() };
       }),
@@ -391,13 +426,14 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_archive_load",
+      title: "Load Archived Records",
       description: "Load and view records from an archive segment. Read-only — records are not re-inserted.",
       schema: z.object({
         collection: collectionParam,
         segment: z.string().describe("Archive segment name"),
       }),
-      annotations: { readOnly: true },
-      execute: safe("db_archive_load", { readOnly: true })(async (args) => {
+      annotations: READ,
+      execute: safe("db_archive_load", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         const records = await col.loadArchive(args.segment as string);
         return { records, count: records.length };
@@ -406,6 +442,7 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_semantic_search",
+      title: "Semantic Search",
       description: "Search records by meaning using embeddings. Requires an embedding provider. Supports hybrid queries with attribute filters.",
       schema: z.object({
         collection: collectionParam,
@@ -414,8 +451,8 @@ export function getTools(db: AgentDB): AgentTool[] {
         limit: z.number().optional().default(10).describe("Max results (default 10)"),
         summary: z.boolean().optional().default(false).describe("Return summary fields only"),
       }),
-      annotations: { readOnly: true },
-      execute: safe("db_semantic_search", { readOnly: true })(async (args) => {
+      annotations: READ,
+      execute: safe("db_semantic_search", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         return col.semanticSearch(args.query as string, {
           filter: args.filter as Record<string, unknown> | string | undefined,
@@ -427,10 +464,11 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_embed",
+      title: "Embed Records",
       description: "Manually trigger embedding for all unembedded records in a collection. Requires an embedding provider.",
       schema: z.object({ collection: collectionParam }),
-      annotations: {},
-      execute: safe("db_embed", { readOnly: true })(async (args) => {
+      annotations: WRITE,
+      execute: safe("db_embed", WRITE)(async (args) => {
         const col = await db.collection(args.collection as string);
         const count = await col.embedUnembedded();
         return { embedded: count };
@@ -439,18 +477,20 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_export",
+      title: "Export Collections",
       description: "Export all or named collections as a self-contained JSON backup.",
       schema: z.object({
         collections: z.array(z.string()).optional().describe("Collection names to export (default: all)"),
       }),
-      annotations: { readOnly: true },
-      execute: safe("db_export", { readOnly: true })(async (args) => {
+      annotations: READ,
+      execute: safe("db_export", READ)(async (args) => {
         return db.export(args.collections as string[] | undefined);
       }),
     },
 
     {
       name: "db_import",
+      title: "Import Collections",
       description: "Import collections from a previously exported JSON backup.",
       schema: z.object({
         data: z.object({
@@ -460,8 +500,8 @@ export function getTools(db: AgentDB): AgentTool[] {
         }).describe("Export data from db_export"),
         overwrite: z.boolean().optional().default(false).describe("Overwrite existing records (default: skip)"),
       }),
-      annotations: {},
-      execute: safe("db_import", { readOnly: true })(async (args) => {
+      annotations: DESTRUCTIVE,
+      execute: safe("db_import", DESTRUCTIVE)(async (args) => {
         const data = args.data as { version: number; exportedAt: string; collections: Record<string, { records: Record<string, unknown>[] }> };
         return db.import(data, { overwrite: args.overwrite as boolean });
       }),
@@ -469,10 +509,11 @@ export function getTools(db: AgentDB): AgentTool[] {
 
     {
       name: "db_stats",
+      title: "Database Stats",
       description: "Get database-level statistics: number of collections and total records.",
       schema: z.object({}),
-      annotations: { readOnly: true },
-      execute: safe("db_stats", { readOnly: true })(async () => {
+      annotations: READ,
+      execute: safe("db_stats", READ)(async () => {
         return db.stats();
       }),
     },
