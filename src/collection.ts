@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Store } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
-import { compileFilter } from "./filter.js";
+import { compileFilter, getNestedValue } from "./filter.js";
 import { parseCompactFilter } from "./compact-filter.js";
 import { TextIndex } from "./text-index.js";
 import { ViewManager } from "./view.js";
@@ -1054,21 +1054,6 @@ export interface FieldInfo {
   name: string;
   type: string;
   example: unknown;
-}
-
-/**
- * Get a nested value from a record using dot-notation path.
- */
-function getNestedValue(record: Record<string, unknown>, path: string): unknown {
-  const parts = path.split(".");
-  let current: unknown = record;
-  for (const part of parts) {
-    if (current === null || current === undefined || typeof current !== "object") {
-      return undefined;
-    }
-    current = (current as Record<string, unknown>)[part];
-  }
-  return current;
 }
 
 /** Extract all text from a record for embedding (concatenate string fields). */

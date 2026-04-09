@@ -6,6 +6,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import express from "express";
 import { AgentDB } from "../agentdb.js";
+import { VERSION } from "../index.js";
 import { getTools } from "../tools/index.js";
 import type { AgentDBOptions } from "../agentdb.js";
 import { createAuthMiddleware, RateLimiter, AuditLogger } from "./auth.js";
@@ -24,7 +25,7 @@ export { McpServer, StdioServerTransport, StreamableHTTPServerTransport };
  */
 export function createMcpServer(db: AgentDB): McpServer {
   const server = new McpServer(
-    { name: "agentdb", version: "0.1.0" },
+    { name: "agentdb", version: VERSION },
     { instructions: "AgentDB — AI-first embedded database. Use db_collections to discover data, db_find with filters to query, db_schema to inspect record shapes." },
   );
 
@@ -147,7 +148,7 @@ export async function startHttp(
 
   // Health check (no auth required)
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", version: "0.1.0" });
+    res.json({ status: "ok", version: VERSION });
   });
 
   // Strip stack traces in production

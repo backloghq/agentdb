@@ -14,7 +14,7 @@ type FilterValue = unknown;
  * Get a nested value from a record using dot-notation path.
  * E.g., "metadata.tags" on { metadata: { tags: ["a"] } } returns ["a"].
  */
-function getNestedValue(record: Record<string, unknown>, path: string): unknown {
+export function getNestedValue(record: Record<string, unknown>, path: string): unknown {
   const parts = path.split(".");
   let current: unknown = record;
   for (const part of parts) {

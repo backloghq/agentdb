@@ -229,7 +229,8 @@ export class AgentDB {
   /** Permanently delete a soft-dropped collection. */
   async purgeCollection(droppedName: string): Promise<void> {
     this.ensureOpen();
-    const match = this.meta.dropped.find((d) => d === droppedName || d.includes(droppedName));
+    // Exact match on full dropped name, or match by original collection name prefix
+    const match = this.meta.dropped.find((d) => d === droppedName || d.startsWith(`${DROPPED_PREFIX}${droppedName}_`));
     if (!match) {
       throw new Error(`Dropped collection '${droppedName}' not found`);
     }
