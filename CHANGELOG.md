@@ -75,6 +75,13 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - Rate limiter periodically cleans up expired entries
 - Signal handlers use `process.once` (no stacking on repeated calls)
 - `removeById()` guard uses `.has()` instead of `!== undefined`
+- `AgentDB.close()` now cleans up listeners and memory monitor (was leaking like `dropCollection` before fix)
+- MCP servers properly disconnected on session cleanup (was only closing transport)
+- Archive segment names validated against strict regex (prevents path traversal)
+- `incrementalIndexUpdate` strips meta once per record (was per-index)
+- `rebuildBTreeIndexes` single-pass all indexes (was one store iteration per index)
+- AuditLogger uses O(1) ring buffer (was O(n) `shift()` at 10K entries)
+- Agent identity redacted from permission error messages
 - Security headers added: `X-Content-Type-Options`, `Cache-Control`, `X-Frame-Options`
 - Dynamic port allocation in auth tests (prevents EADDRINUSE)
 - `startHttp` returns actual port number for test use

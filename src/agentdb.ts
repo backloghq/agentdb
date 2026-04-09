@@ -331,10 +331,13 @@ export class AgentDB {
 
   /** Close all open collections and write metadata. */
   async close(): Promise<void> {
-    for (const col of this.open.values()) {
+    for (const [name, col] of this.open) {
+      const listener = this.collectionListeners.get(name);
+      if (listener) col.off("change", listener);
       await col.close();
     }
     this.open.clear();
+    this.collectionListeners.clear();
     this.lru = [];
     this._opened = false;
   }

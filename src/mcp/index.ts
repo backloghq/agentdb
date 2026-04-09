@@ -158,6 +158,9 @@ export async function startHttp(
   const transports = new Map<string, StreamableHTTPServerTransport>();
   const sessionLastActive = new Map<string, number>();
 
+  // Track MCP servers for cleanup
+  const mcpServers = new Map<string, McpServer>();
+
   // Periodic cleanup of idle sessions
   const cleanupInterval = setInterval(() => {
     const now = Date.now();
@@ -165,7 +168,10 @@ export async function startHttp(
       if (now - lastActive > SESSION_IDLE_MS) {
         const transport = transports.get(sid);
         if (transport) transport.close();
+        const server = mcpServers.get(sid);
+        if (server) server.close();
         transports.delete(sid);
+        mcpServers.delete(sid);
         sessionLastActive.delete(sid);
       }
     }
@@ -186,20 +192,22 @@ export async function startHttp(
         return;
       }
       // New session
+      const server = createMcpServer(db);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid) => {
           transports.set(sid, transport);
+          mcpServers.set(sid, server);
           sessionLastActive.set(sid, Date.now());
         },
       });
       transport.onclose = () => {
         if (transport.sessionId) {
           transports.delete(transport.sessionId);
+          mcpServers.delete(transport.sessionId);
           sessionLastActive.delete(transport.sessionId);
         }
       };
-      const server = createMcpServer(db);
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } else {
@@ -225,6 +233,8 @@ export async function startHttp(
       const transport = transports.get(sessionId)!;
       await transport.handleRequest(req, res);
       transports.delete(sessionId);
+      const server = mcpServers.get(sessionId);
+      if (server) { await server.close(); mcpServers.delete(sessionId); }
     } else {
       res.status(400).json({ error: "Invalid session" });
     }
@@ -246,7 +256,11 @@ export async function startHttp(
     for (const transport of transports.values()) {
       await transport.close();
     }
+    for (const server of mcpServers.values()) {
+      await server.close();
+    }
     transports.clear();
+    mcpServers.clear();
     sessionLastActive.clear();
     httpServer.close();
     await db.close();

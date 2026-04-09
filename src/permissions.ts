@@ -44,7 +44,7 @@ export class PermissionManager {
   /** Assert a permission, throw if denied. */
   require(agent: string | undefined, level: "read" | "write" | "admin", operation: string): void {
     if (!this.check(agent, level)) {
-      throw new Error(`Permission denied: agent '${agent}' does not have '${level}' access for ${operation}`);
+      throw new Error(`Permission denied: '${level}' access required for ${operation}`);
     }
   }
 

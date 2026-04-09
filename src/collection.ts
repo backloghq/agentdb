@@ -421,23 +421,20 @@ export class Collection {
     }
   }
 
-  /** Rebuild all B-tree indexes (single-field + composite) from current store contents. */
+  /** Rebuild all B-tree indexes (single-field + composite) from current store contents. Single pass. */
   private rebuildBTreeIndexes(): void {
-    for (const [field, idx] of this.btreeIndexes) {
-      idx.clear();
-      for (const [id, record] of this.store.entries()) {
-        if (isExpired(record)) continue;
-        const value = getNestedValue(stripMeta(record), field);
+    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0) return;
+    for (const [, idx] of this.btreeIndexes) idx.clear();
+    for (const [, { idx }] of this.compositeIndexes) idx.clear();
+    for (const [id, record] of this.store.entries()) {
+      if (isExpired(record)) continue;
+      const clean = stripMeta(record);
+      for (const [field, idx] of this.btreeIndexes) {
+        const value = getNestedValue(clean, field);
         if (value !== undefined) idx.add(value, id);
       }
-    }
-    for (const [, { fields, idx }] of this.compositeIndexes) {
-      idx.clear();
-      for (const [id, record] of this.store.entries()) {
-        if (isExpired(record)) continue;
-        const clean = stripMeta(record);
-        const key = compositeKey(fields.map((f) => getNestedValue(clean, f)));
-        idx.add(key, id);
+      for (const [, { fields, idx }] of this.compositeIndexes) {
+        idx.add(compositeKey(fields.map((f) => getNestedValue(clean, f))), id);
       }
     }
   }
@@ -450,27 +447,24 @@ export class Collection {
   private incrementalIndexUpdate(affectedIds: string[]): void {
     for (const id of affectedIds) {
       const record = this.store.get(id);
+      const active = record && !isExpired(record);
+      const clean = active ? stripMeta(record) : undefined; // strip once per record
+
       if (this.textIdx) {
-        if (record && !isExpired(record)) {
-          this.textIdx.add(id, stripMeta(record));
-        } else {
-          this.textIdx.remove(id);
-        }
+        if (clean) this.textIdx.add(id, clean);
+        else this.textIdx.remove(id);
       }
-      // B-tree + composite: remove old entry by ID (reverse map), add new entry
       for (const [field, idx] of this.btreeIndexes) {
         idx.removeById(id);
-        if (record && !isExpired(record)) {
-          const value = getNestedValue(stripMeta(record), field);
+        if (clean) {
+          const value = getNestedValue(clean, field);
           if (value !== undefined) idx.add(value, id);
         }
       }
       for (const [, { fields, idx }] of this.compositeIndexes) {
         idx.removeById(id);
-        if (record && !isExpired(record)) {
-          const clean = stripMeta(record);
-          const key = compositeKey(fields.map((f) => getNestedValue(clean, f)));
-          idx.add(key, id);
+        if (clean) {
+          idx.add(compositeKey(fields.map((f) => getNestedValue(clean, f))), id);
         }
       }
     }
@@ -1216,6 +1210,10 @@ export class Collection {
    * Archived records are removed from the active set.
    */
   async archive(filter: Filter, segment?: string): Promise<number> {
+    // Validate segment name to prevent path traversal
+    if (segment && (!/^[a-zA-Z0-9_-]+$/.test(segment) || segment.includes(".."))) {
+      throw new Error(`Invalid archive segment name '${segment}'. Must be alphanumeric with hyphens/underscores.`);
+    }
     const predicate = this.resolve(filter);
     // Capture affected IDs before archiving for incremental re-index
     const affectedIds: string[] = [];

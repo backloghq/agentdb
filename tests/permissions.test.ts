@@ -46,7 +46,7 @@ describe("PermissionManager", () => {
   it("require throws on denied", () => {
     const pm = new PermissionManager({ reader: { read: true, write: false } });
     expect(() => pm.require("reader", "write", "db_insert")).toThrow("Permission denied");
-    expect(() => pm.require("reader", "write", "db_insert")).toThrow("reader");
+    expect(() => pm.require("reader", "write", "db_insert")).toThrow("db_insert");
   });
 
   it("require passes on allowed", () => {

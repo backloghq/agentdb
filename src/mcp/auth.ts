@@ -150,23 +150,31 @@ export interface AuditEntry {
 }
 
 export class AuditLogger {
-  private entries: AuditEntry[] = [];
+  private entries: AuditEntry[];
   private maxEntries: number;
+  private head = 0;
+  private count = 0;
 
   constructor(maxEntries = 10000) {
     this.maxEntries = maxEntries;
+    this.entries = new Array(maxEntries);
   }
 
   log(entry: AuditEntry): void {
-    this.entries.push(entry);
-    if (this.entries.length > this.maxEntries) {
-      this.entries.shift();
-    }
+    this.entries[this.head] = entry;
+    this.head = (this.head + 1) % this.maxEntries;
+    if (this.count < this.maxEntries) this.count++;
   }
 
   /** Get recent entries. */
   recent(limit = 100): AuditEntry[] {
-    return this.entries.slice(-limit);
+    const n = Math.min(limit, this.count);
+    const result: AuditEntry[] = [];
+    for (let i = 0; i < n; i++) {
+      const idx = (this.head - n + i + this.maxEntries) % this.maxEntries;
+      result.push(this.entries[idx]);
+    }
+    return result;
   }
 
   /** Create Express middleware that logs requests. */
