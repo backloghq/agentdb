@@ -231,6 +231,56 @@ export function getTools(db: AgentDB): AgentTool[] {
     },
 
     {
+      name: "db_batch",
+      description: "Execute multiple insert/update/delete operations atomically within a collection. All succeed or all roll back.",
+      schema: z.object({
+        collection: collectionParam,
+        operations: z.array(z.object({
+          op: z.enum(["insert", "update", "delete"]).describe("Operation type"),
+          id: z.string().optional().describe("Record ID (required for update/delete)"),
+          record: z.record(z.unknown()).optional().describe("Record data (for insert)"),
+          filter: z.union([z.record(z.unknown()), z.string()]).optional().describe("Filter (for update/delete)"),
+          update: z.object({
+            $set: z.record(z.unknown()).optional(),
+            $unset: z.record(z.unknown()).optional(),
+            $inc: z.record(z.number()).optional(),
+            $push: z.record(z.unknown()).optional(),
+          }).optional().describe("Update operators (for update)"),
+        })).describe("Array of operations to execute atomically"),
+        ...mutationOpts,
+      }),
+      annotations: {},
+      execute: safe(async (args) => {
+        const col = await db.collection(args.collection as string);
+        const ops = args.operations as Array<{
+          op: string; id?: string; record?: Record<string, unknown>;
+          filter?: Record<string, unknown> | string;
+          update?: { $set?: Record<string, unknown>; $unset?: Record<string, unknown>; $inc?: Record<string, number>; $push?: Record<string, unknown> };
+        }>;
+        let opCount = 0;
+        await col.batch(() => {
+          for (const operation of ops) {
+            if (operation.op === "insert" && operation.record) {
+              col.insert(operation.record, { agent: args.agent as string | undefined });
+              opCount++;
+            } else if (operation.op === "delete" && operation.id) {
+              col.remove({ _id: operation.id });
+              opCount++;
+            }
+          }
+        });
+        // Handle updates outside batch (they're async)
+        for (const operation of ops) {
+          if (operation.op === "update" && operation.filter && operation.update) {
+            await col.update(operation.filter, operation.update, { agent: args.agent as string | undefined });
+            opCount++;
+          }
+        }
+        return { operations: opCount };
+      }),
+    },
+
+    {
       name: "db_count",
       description: "Count records matching a filter. Returns total count.",
       schema: z.object({

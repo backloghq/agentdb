@@ -8,6 +8,8 @@ import { ViewManager } from "./view.js";
 import type { ViewDefinition } from "./view.js";
 import { EventEmitter } from "node:events";
 import { HnswIndex } from "./hnsw.js";
+import { BTreeIndex, QueryFrequencyTracker } from "./btree.js";
+import { BloomFilter } from "./bloom.js";
 import type { EmbeddingProvider } from "./embeddings/types.js";
 import { quantize, serializeQuantized, deserializeQuantized } from "./embeddings/quantize.js";
 
@@ -257,6 +259,9 @@ export class Collection {
   private hnswIdx: HnswIndex | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
   private emitter = new EventEmitter();
+  private btreeIndexes = new Map<string, BTreeIndex>();
+  private bloomFilters = new Map<string, BloomFilter>();
+  private queryTracker = new QueryFrequencyTracker();
 
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
@@ -342,6 +347,29 @@ export class Collection {
       const record = this.store.get(id);
       return record ? stripMeta(record) : undefined;
     };
+  }
+
+  /** Check if text fields changed between old and new record (for embedding invalidation). */
+  private hasTextChanged(oldRecord: StoredRecord, newRecord: StoredRecord): boolean {
+    const oldText = extractTextFromRecord(stripMeta(oldRecord));
+    const newText = extractTextFromRecord(stripMeta(newRecord));
+    return oldText !== newText;
+  }
+
+  /** Track which fields are queried for index suggestions. */
+  private trackQueryFields(filter: Filter): void {
+    if (!filter) return;
+    let obj: Record<string, unknown>;
+    if (typeof filter === "string") {
+      try { obj = parseCompactFilter(filter); } catch { return; }
+    } else {
+      obj = filter;
+    }
+    for (const key of Object.keys(obj)) {
+      if (!key.startsWith("$") && !key.startsWith("+")) {
+        this.queryTracker.track(key);
+      }
+    }
   }
 
   /** Resolve a filter with virtual filter support. */
@@ -460,6 +488,9 @@ export class Collection {
     const useSummary = opts?.summary ?? false;
     const maxTokens = opts?.maxTokens;
 
+    // Track queried fields for index suggestions
+    this.trackQueryFields(opts?.filter);
+
     const predicate = this.resolve(opts?.filter);
     const records = this.store.filter((value) => !isExpired(value) && predicate(stripMeta(value)));
 
@@ -524,6 +555,10 @@ export class Collection {
       const updated = applyUpdate(record, update);
       if (opts?.agent) updated[META_AGENT] = opts.agent;
       if (opts?.reason) updated[META_REASON] = opts.reason;
+      // Invalidate embedding if text fields changed
+      if (updated[META_EMBEDDING] && this.hasTextChanged(record, updated)) {
+        delete updated[META_EMBEDDING];
+      }
       this.validateRecord(updated);
       this.stampVersion(updated, id);
       updates.push({ id, updated });
@@ -627,6 +662,18 @@ export class Collection {
    */
   getOps(since?: string): Operation<StoredRecord>[] {
     return this.store.getOps(since);
+  }
+
+  // --- Batch ---
+
+  /**
+   * Execute multiple mutations atomically within this collection.
+   * All operations succeed or all are rolled back.
+   */
+  async batch(fn: () => void): Promise<void> {
+    await this.store.batch(fn);
+    this.rebuildTextIndex();
+    this.emitChange("update", []);
   }
 
   // --- WAL tailing ---
@@ -788,6 +835,60 @@ export class Collection {
   }
 
   // --- Semantic search ---
+
+  // --- Indexes ---
+
+  /**
+   * Create a B-tree index on a field for fast equality and range lookups.
+   * Builds immediately from existing records.
+   */
+  createIndex(field: string): void {
+    if (this.btreeIndexes.has(field)) return;
+    const idx = new BTreeIndex(field);
+    for (const [id, record] of this.store.entries()) {
+      if (isExpired(record)) continue;
+      const clean = stripMeta(record);
+      const value = getNestedValue(clean, field);
+      if (value !== undefined) idx.add(value, id);
+    }
+    this.btreeIndexes.set(field, idx);
+  }
+
+  /** Remove a B-tree index. */
+  dropIndex(field: string): boolean {
+    return this.btreeIndexes.delete(field);
+  }
+
+  /** List indexed fields. */
+  listIndexes(): string[] {
+    return [...this.btreeIndexes.keys()];
+  }
+
+  /**
+   * Create a bloom filter for a field for fast existence checks.
+   */
+  createBloomFilter(field: string, expectedItems = 10000): void {
+    const bf = new BloomFilter(expectedItems);
+    for (const [, record] of this.store.entries()) {
+      if (isExpired(record)) continue;
+      const clean = stripMeta(record);
+      const value = getNestedValue(clean, field);
+      if (value !== undefined) bf.add(String(value));
+    }
+    this.bloomFilters.set(field, bf);
+  }
+
+  /** Fast probabilistic check: might any record have field=value? */
+  mightHave(field: string, value: string): boolean {
+    const bf = this.bloomFilters.get(field);
+    if (!bf) return true; // No bloom filter = can't say no
+    return bf.has(value);
+  }
+
+  /** Get query frequency suggestions for index creation. */
+  suggestIndexes(threshold = 100): Array<{ field: string; count: number }> {
+    return this.queryTracker.suggest(threshold);
+  }
 
   /**
    * Semantic search — find records similar to the query text.

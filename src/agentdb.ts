@@ -8,6 +8,8 @@ import type { EmbeddingConfig, EmbeddingProvider } from "./embeddings/index.js";
 import { resolveProvider } from "./embeddings/index.js";
 import { PermissionManager } from "./permissions.js";
 import type { AgentPermissions } from "./permissions.js";
+import { MemoryMonitor } from "./memory.js";
+import type { MemoryStats } from "./memory.js";
 
 const META_DIR = "meta";
 const COLLECTIONS_DIR = "collections";
@@ -26,6 +28,8 @@ export interface AgentDBOptions {
   backend?: StorageBackend;
   /** Agent ID for multi-writer mode. Enables per-agent WAL streams. */
   agentId?: string;
+  /** Memory budget in bytes. Warns when collections exceed this total. 0 = unlimited. */
+  memoryBudget?: number;
 }
 
 export interface CollectionInfo {
@@ -50,12 +54,13 @@ interface MetaManifest {
  */
 export class AgentDB {
   readonly dir: string;
-  private opts: Required<Omit<AgentDBOptions, "embeddings" | "permissions" | "backend" | "agentId">> & Pick<AgentDBOptions, "embeddings" | "permissions" | "backend" | "agentId">;
+  private opts: Required<Pick<AgentDBOptions, "maxOpenCollections" | "checkpointThreshold">> & Partial<AgentDBOptions>;
   private open: Map<string, Collection> = new Map();
   private opening: Map<string, Promise<Collection>> = new Map();
   private collectionOpts: Map<string, CollectionOptions> = new Map();
   private embeddingProvider: EmbeddingProvider | null = null;
   private permissions: PermissionManager;
+  private memoryMonitor: MemoryMonitor;
   private lru: string[] = []; // Most recently used at end
   private meta: MetaManifest = { collections: [], dropped: [] };
   private _opened = false;
@@ -71,11 +76,23 @@ export class AgentDB {
       this.embeddingProvider = resolveProvider(opts.embeddings);
     }
     this.permissions = new PermissionManager(opts?.permissions);
+    this.memoryMonitor = new MemoryMonitor(opts?.memoryBudget ?? 0);
   }
 
   /** Get the permission manager. Used by tools to enforce access control. */
   getPermissions(): PermissionManager {
     return this.permissions;
+  }
+
+  /** Get memory usage stats across all open collections. */
+  memoryStats(): MemoryStats {
+    return this.memoryMonitor.stats();
+  }
+
+  /** Update memory tracking for a collection. */
+  private trackMemory(name: string, col: Collection): void {
+    const records = col.find({ limit: Infinity }).records;
+    this.memoryMonitor.update(name, records);
   }
 
   /** Get the configured embedding provider, or null if none. */
@@ -145,6 +162,10 @@ export class AgentDB {
 
     this.open.set(name, col);
     this.touchLru(name);
+
+    // Track memory usage
+    this.trackMemory(name, col);
+    col.on("change", () => this.trackMemory(name, col));
 
     // Track in meta if new
     if (!this.meta.collections.includes(name)) {

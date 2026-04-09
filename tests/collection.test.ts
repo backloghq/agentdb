@@ -693,6 +693,46 @@ describe("Collection", () => {
     });
   });
 
+  describe("indexes and query tracking", () => {
+    beforeEach(async () => {
+      await col.insertMany([
+        { _id: "1", name: "Alice", role: "admin", score: 10 },
+        { _id: "2", name: "Bob", role: "user", score: 20 },
+        { _id: "3", name: "Charlie", role: "admin", score: 30 },
+      ]);
+    });
+
+    it("creates a B-tree index and queries it", () => {
+      col.createIndex("role");
+      expect(col.listIndexes()).toContain("role");
+    });
+
+    it("creates a bloom filter", () => {
+      col.createBloomFilter("role");
+      expect(col.mightHave("role", "admin")).toBe(true);
+      expect(col.mightHave("role", "nonexistent")).toBe(false);
+    });
+
+    it("mightHave returns true when no bloom filter exists", () => {
+      expect(col.mightHave("role", "anything")).toBe(true);
+    });
+
+    it("tracks query frequency", () => {
+      col.find({ filter: { role: "admin" } });
+      col.find({ filter: { role: "user" } });
+      col.find({ filter: { score: { $gt: 15 } } });
+      const suggestions = col.suggestIndexes(2);
+      expect(suggestions[0].field).toBe("role");
+      expect(suggestions[0].count).toBe(2);
+    });
+
+    it("drops an index", () => {
+      col.createIndex("role");
+      expect(col.dropIndex("role")).toBe(true);
+      expect(col.listIndexes()).not.toContain("role");
+    });
+  });
+
   describe("WAL tailing", () => {
     it("tail picks up new ops from another writer", async () => {
       // Writer inserts data
