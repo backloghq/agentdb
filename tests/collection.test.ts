@@ -706,6 +706,98 @@ describe("Collection", () => {
     });
   });
 
+  describe("semantic search", () => {
+    let semCol: Collection;
+    let mockProvider: { embed: (texts: string[]) => Promise<number[][]>; dimensions: number };
+
+    beforeEach(async () => {
+      // Mock provider: deterministic embeddings based on text content
+      mockProvider = {
+        dimensions: 4,
+        embed: async (texts: string[]) => {
+          return texts.map((text) => {
+            const lower = text.toLowerCase();
+            // Generate vectors that cluster by topic
+            if (lower.includes("deploy") || lower.includes("production")) return [0.9, 0.1, 0.0, 0.0];
+            if (lower.includes("api") || lower.includes("endpoint")) return [0.1, 0.9, 0.0, 0.0];
+            if (lower.includes("css") || lower.includes("frontend")) return [0.0, 0.1, 0.9, 0.0];
+            if (lower.includes("test") || lower.includes("bug")) return [0.0, 0.0, 0.1, 0.9];
+            return [0.25, 0.25, 0.25, 0.25]; // generic
+          });
+        },
+      };
+
+      const sDir = await mkdtemp(join(tmpdir(), "agentdb-sem-"));
+      const sStore = new Store<Record<string, unknown>>();
+      semCol = new Collection("semantic", sStore);
+      semCol.setEmbeddingProvider(mockProvider);
+      await semCol.open(sDir, { checkpointThreshold: 1000 });
+      (semCol as Record<string, unknown>)._testDir = sDir;
+
+      await semCol.insertMany([
+        { _id: "1", title: "Deploy to production", category: "devops" },
+        { _id: "2", title: "Build API endpoint", category: "backend" },
+        { _id: "3", title: "Fix CSS layout", category: "frontend" },
+        { _id: "4", title: "Write unit tests", category: "testing" },
+        { _id: "5", title: "Deploy staging server", category: "devops" },
+      ]);
+    });
+
+    afterEach(async () => {
+      const sDir = (semCol as Record<string, unknown>)._testDir as string;
+      try { await semCol.close(); } catch { /* */ }
+      await rm(sDir, { recursive: true, force: true });
+    });
+
+    it("finds semantically similar records", async () => {
+      const result = await semCol.semanticSearch("deployment to production");
+      expect(result.records.length).toBeGreaterThan(0);
+      // Deploy records should rank highest
+      const titles = result.records.map((r) => r.title);
+      expect(titles[0]).toContain("Deploy");
+    });
+
+    it("returns scores", async () => {
+      const result = await semCol.semanticSearch("deployment");
+      expect(result.scores.length).toBe(result.records.length);
+      // Scores should be descending
+      for (let i = 1; i < result.scores.length; i++) {
+        expect(result.scores[i - 1]).toBeGreaterThanOrEqual(result.scores[i]);
+      }
+    });
+
+    it("respects limit", async () => {
+      const result = await semCol.semanticSearch("anything", { limit: 2 });
+      expect(result.records.length).toBeLessThanOrEqual(2);
+    });
+
+    it("filters with attribute filter (hybrid query)", async () => {
+      const result = await semCol.semanticSearch("deploy", { filter: { category: "devops" } });
+      expect(result.records.every((r) => r.category === "devops")).toBe(true);
+    });
+
+    it("throws when no embedding provider", async () => {
+      // col has no provider
+      await expect(col.semanticSearch("test")).rejects.toThrow("not available");
+    });
+
+    it("_embedding is stripped from output", async () => {
+      const result = await semCol.semanticSearch("deploy");
+      for (const record of result.records) {
+        expect(record._embedding).toBeUndefined();
+      }
+    });
+
+    it("embedUnembedded returns count", async () => {
+      // Trigger initial embedding of all 5 records
+      await semCol.semanticSearch("anything");
+      // Now insert a new one
+      await semCol.insert({ _id: "6", title: "New API feature" });
+      const count = await semCol.embedUnembedded();
+      expect(count).toBe(1); // Only the new one
+    });
+  });
+
   describe("virtual filters", () => {
     let vfCol: Collection;
 

@@ -6,6 +6,9 @@ import { parseCompactFilter } from "./compact-filter.js";
 import { TextIndex } from "./text-index.js";
 import { ViewManager } from "./view.js";
 import type { ViewDefinition } from "./view.js";
+import { HnswIndex } from "./hnsw.js";
+import type { EmbeddingProvider } from "./embeddings/types.js";
+import { quantize, serializeQuantized, deserializeQuantized } from "./embeddings/quantize.js";
 
 // Internal record type — what's stored in opslog
 type StoredRecord = Record<string, unknown>;
@@ -136,6 +139,7 @@ export interface CollectionOptions {
 const META_AGENT = "_agent";
 const META_REASON = "_reason";
 const META_EXPIRES = "_expires";
+const META_EMBEDDING = "_embedding";
 
 /**
  * Strip internal metadata fields from a stored record for public consumption.
@@ -143,7 +147,7 @@ const META_EXPIRES = "_expires";
 function stripMeta(record: StoredRecord): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    if (key !== META_AGENT && key !== META_REASON && key !== META_EXPIRES) {
+    if (key !== META_AGENT && key !== META_REASON && key !== META_EXPIRES && key !== META_EMBEDDING) {
       result[key] = value;
     }
   }
@@ -238,6 +242,8 @@ export class Collection {
   private opts: CollectionOptions;
   private textIdx: TextIndex | null = null;
   private views = new ViewManager();
+  private hnswIdx: HnswIndex | null = null;
+  private embeddingProvider: EmbeddingProvider | null = null;
 
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
@@ -304,6 +310,12 @@ export class Collection {
     return this._opened;
   }
 
+  /** Set the embedding provider for semantic search. Called by AgentDB. */
+  setEmbeddingProvider(provider: EmbeddingProvider): void {
+    this.embeddingProvider = provider;
+    this.hnswIdx = new HnswIndex({ dimensions: provider.dimensions });
+  }
+
   /** Open the underlying opslog store at the given directory. */
   async open(dir: string, options?: { checkpointThreshold?: number }): Promise<void> {
     await this.store.open(dir, options);
@@ -312,6 +324,18 @@ export class Collection {
     if (this.textIdx) {
       for (const [id, record] of this.store.entries()) {
         this.textIdx.add(id, stripMeta(record));
+      }
+    }
+    // Load existing embeddings into HNSW index
+    if (this.hnswIdx) {
+      for (const [id, record] of this.store.entries()) {
+        if (isExpired(record)) continue;
+        const stored = record[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
+        if (stored) {
+          const q = deserializeQuantized(stored);
+          const vec = Array.from(q.data).map((v) => v / q.scale); // dequantize
+          this.hnswIdx.add(id, vec);
+        }
       }
     }
   }
@@ -678,6 +702,91 @@ export class Collection {
     return result;
   }
 
+  // --- Semantic search ---
+
+  /**
+   * Semantic search — find records similar to the query text.
+   * Requires an embedding provider to be configured.
+   * Lazily embeds records that don't have embeddings yet.
+   */
+  async semanticSearch(
+    query: string,
+    opts?: { filter?: Filter; limit?: number; summary?: boolean },
+  ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
+    if (!this.embeddingProvider || !this.hnswIdx) {
+      throw new Error("Semantic search not available. Configure an embedding provider on AgentDB.");
+    }
+
+    // Ensure all records are embedded
+    await this.embedUnembedded();
+
+    // Embed the query
+    const [queryVec] = await this.embeddingProvider.embed([query]);
+
+    // Search HNSW
+    const limit = opts?.limit ?? 10;
+    const candidates = this.hnswIdx.search(queryVec, limit * 3); // over-fetch for post-filter
+
+    // Apply attribute filter if provided
+    const predicate = opts?.filter ? this.resolve(opts.filter) : () => true;
+    const allAccessor = this.allCleanRecords();
+
+    const records: Record<string, unknown>[] = [];
+    const scores: number[] = [];
+    for (const { id, score } of candidates) {
+      if (records.length >= limit) break;
+      const record = this.store.get(id);
+      if (!record || isExpired(record)) continue;
+      const clean = stripMeta(record);
+      if (!predicate(clean)) continue;
+      const withComputed = this.applyComputed(clean, allAccessor);
+      records.push(opts?.summary ? summarize(withComputed) : withComputed);
+      scores.push(score);
+    }
+
+    return { records, scores };
+  }
+
+  /**
+   * Embed all records that don't have embeddings yet.
+   * Called lazily on first semantic search.
+   */
+  async embedUnembedded(): Promise<number> {
+    if (!this.embeddingProvider || !this.hnswIdx) return 0;
+
+    const toEmbed: { id: string; text: string; record: StoredRecord }[] = [];
+    for (const [id, record] of this.store.entries()) {
+      if (isExpired(record)) continue;
+      if (record[META_EMBEDDING]) continue; // already embedded
+      const clean = stripMeta(record);
+      const text = extractTextFromRecord(clean);
+      if (text) toEmbed.push({ id, text, record });
+    }
+
+    if (toEmbed.length === 0) return 0;
+
+    // Batch embed
+    const texts = toEmbed.map((t) => t.text);
+    const vectors = await this.embeddingProvider.embed(texts);
+
+    // Store embeddings and index
+    await this.store.batch(() => {
+      for (let i = 0; i < toEmbed.length; i++) {
+        const { id, record } = toEmbed[i];
+        const q = quantize(vectors[i]);
+        const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
+        this.store.set(id, updated);
+      }
+    });
+
+    // Add to HNSW index
+    for (let i = 0; i < toEmbed.length; i++) {
+      this.hnswIdx.add(toEmbed[i].id, vectors[i]);
+    }
+
+    return toEmbed.length;
+  }
+
   /** Get collection stats. */
   stats(): { activeRecords: number; opsCount: number } {
     const s = this.store.stats();
@@ -760,6 +869,21 @@ function getNestedValue(record: Record<string, unknown>, path: string): unknown 
     current = (current as Record<string, unknown>)[part];
   }
   return current;
+}
+
+/** Extract all text from a record for embedding (concatenate string fields). */
+function extractTextFromRecord(record: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const value of Object.values(record)) {
+    if (typeof value === "string" && value.length > 0) {
+      parts.push(value);
+    } else if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === "string") parts.push(item);
+      }
+    }
+  }
+  return parts.join(" ");
 }
 
 /** Truncate a value for display in schema examples. */

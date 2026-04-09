@@ -118,6 +118,9 @@ export class AgentDB {
 
     const store = new Store<Record<string, unknown>>();
     const col = new Collection(name, store, this.collectionOpts.get(name));
+    if (this.embeddingProvider) {
+      col.setEmbeddingProvider(this.embeddingProvider);
+    }
     await col.open(colDir, { checkpointThreshold: this.opts.checkpointThreshold });
 
     this.open.set(name, col);
