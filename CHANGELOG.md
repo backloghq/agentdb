@@ -9,8 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Performance
 - **Group commit** — `writeMode: "group"` buffers writes, ~12x faster. CLI: `--group-commit`. Env: `AGENTDB_WRITE_MODE=group`. Auto-disabled for multi-writer (agentId). Opslog v0.5.0.
-- **B-tree indexed queries** — `find()` and `count()` use B-tree indexes for equality filters. 3.4x speedup on 10K records with indexed fields.
-- B-tree indexes kept in sync on all mutations (insert, update, delete, undo).
+- **B-tree indexed queries** — `find()` and `count()` use B-tree indexes for equality filters. 3.4x speedup on 10K records with indexed fields. Indexes kept in sync on all mutations.
+- **Eliminate double stripMeta** — filter predicates run on raw records (meta fields don't interfere). stripMeta only for output. Removes N object allocations per query.
+- **Epoch TTL** — `_expires` stored as epoch ms instead of ISO string. Avoids Date parsing in hot path.
+- **Incremental text index** — update only re-indexes affected records instead of full rebuild.
+- **estimateTokens without JSON.stringify** — recursive char counting heuristic, no serialization overhead.
+- **Remove double batch write on delete** — agent-tagged deletes no longer write a tagged version before deleting.
+
+### Added
+- **Sort on find** — `sort: "name"` (ascending) or `sort: "-score"` (descending). Supports dot notation for nested fields.
+- **Max query limit** — `find()` enforces max 10,000 records per query to prevent memory exhaustion.
+- **Error sanitization** — filesystem paths stripped from error messages returned to clients.
 
 ### Improved (MCP tool quality — backlog patterns adopted)
 - Every tool has `title` for human-readable display names

@@ -1242,6 +1242,86 @@ describe("Collection", () => {
     });
   });
 
+  describe("combined middleware", () => {
+    it("validate + computed + virtualFilters work together", async () => {
+      const cDir = await mkdtemp(join(tmpdir(), "agentdb-combo-"));
+      const cStore = new Store<Record<string, unknown>>();
+      const combo = new Collection("combo", cStore, {
+        validate: (record) => {
+          if (!record.title) throw new Error("title required");
+        },
+        computed: {
+          titleLen: (record) => (record.title as string)?.length ?? 0,
+        },
+        virtualFilters: {
+          "+LONG": (record) => (record.title as string)?.length > 10,
+        },
+      });
+      await combo.open(cDir, { checkpointThreshold: 1000 });
+
+      // Validation works
+      await expect(combo.insert({})).rejects.toThrow("title required");
+
+      // Insert valid record
+      await combo.insert({ _id: "a", title: "Short" });
+      await combo.insert({ _id: "b", title: "This is a long title" });
+
+      // Computed field works
+      expect(combo.findOne("a")?.titleLen).toBe(5);
+
+      // Virtual filter works
+      const long = combo.find({ filter: { "+LONG": true } });
+      expect(long.total).toBe(1);
+      expect(long.records[0]._id).toBe("b");
+
+      await combo.close();
+      await rm(cDir, { recursive: true, force: true });
+    });
+  });
+
+  describe("metadata injection prevention", () => {
+    it("user-supplied _agent does not override system agent", async () => {
+      const id = await col.insert(
+        { _id: "inject", name: "Alice", _agent: "spoofed" },
+        { agent: "real-agent" },
+      );
+      const ops = col.history(id);
+      // System agent should be "real-agent", not "spoofed"
+      expect(ops[0].data?._agent).toBe("real-agent");
+    });
+  });
+
+  describe("concurrent mutations", () => {
+    it("parallel inserts all succeed", async () => {
+      const promises = [];
+      for (let i = 0; i < 20; i++) {
+        promises.push(col.insert({ name: `User ${i}` }));
+      }
+      await Promise.all(promises);
+      expect(col.count()).toBe(20);
+    });
+  });
+
+  describe("sort", () => {
+    beforeEach(async () => {
+      await col.insertMany([
+        { _id: "1", name: "Charlie", score: 30 },
+        { _id: "2", name: "Alice", score: 10 },
+        { _id: "3", name: "Bob", score: 20 },
+      ]);
+    });
+
+    it("sorts ascending by field", () => {
+      const result = col.find({ sort: "name" });
+      expect(result.records.map((r) => r.name)).toEqual(["Alice", "Bob", "Charlie"]);
+    });
+
+    it("sorts descending with - prefix", () => {
+      const result = col.find({ sort: "-score" });
+      expect(result.records.map((r) => r.score)).toEqual([30, 20, 10]);
+    });
+  });
+
   describe("persistence", () => {
     it("data survives close and reopen", async () => {
       await col.insert({ _id: "a", name: "Alice" });

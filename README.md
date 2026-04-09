@@ -178,7 +178,7 @@ const ids = await col.insertMany(docs, opts?);
 
 // Read
 const record = col.findOne(id);
-const result = col.find({ filter?, limit?, offset?, summary? });
+const result = col.find({ filter?, limit?, offset?, summary?, sort?, maxTokens? });
 const n = col.count(filter?);
 
 // Update
@@ -332,6 +332,14 @@ docker run -p 3000:3000 \
   -e AGENTDB_S3_BUCKET=my-bucket \
   -e AWS_REGION=us-east-1 \
   agentdb --http --host 0.0.0.0
+```
+
+## Sorting
+
+```typescript
+col.find({ filter: { status: "active" }, sort: "name" });     // ascending
+col.find({ filter: { status: "active" }, sort: "-score" });    // descending
+col.find({ sort: "-metadata.priority" });                       // nested field
 ```
 
 ## Progressive Disclosure
