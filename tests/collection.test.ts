@@ -172,6 +172,66 @@ describe("Collection", () => {
     });
   });
 
+  describe("optimistic locking", () => {
+    it("records have _version starting at 1", async () => {
+      const id = await col.insert({ _id: "a", name: "Alice" });
+      const record = col.findOne(id);
+      expect(record?._version).toBe(1);
+    });
+
+    it("_version increments on update", async () => {
+      await col.insert({ _id: "a", name: "Alice" });
+      await col.update({ _id: "a" }, { $set: { name: "Updated" } });
+      expect(col.findOne("a")?._version).toBe(2);
+    });
+
+    it("_version increments on upsert", async () => {
+      await col.insert({ _id: "a", name: "Alice" });
+      await col.upsert("a", { name: "Upserted" });
+      expect(col.findOne("a")?._version).toBe(2);
+    });
+
+    it("update with matching expectedVersion succeeds", async () => {
+      await col.insert({ _id: "a", name: "Alice" });
+      await col.update({ _id: "a" }, { $set: { name: "Updated" } }, { expectedVersion: 1 });
+      expect(col.findOne("a")?._version).toBe(2);
+      expect(col.findOne("a")?.name).toBe("Updated");
+    });
+
+    it("update with mismatched expectedVersion throws conflict", async () => {
+      await col.insert({ _id: "a", name: "Alice" });
+      await col.update({ _id: "a" }, { $set: { name: "V2" } }); // version now 2
+      await expect(
+        col.update({ _id: "a" }, { $set: { name: "V3" } }, { expectedVersion: 1 }),
+      ).rejects.toThrow("Conflict");
+      expect(col.findOne("a")?.name).toBe("V2"); // unchanged
+    });
+
+    it("upsert with mismatched expectedVersion throws conflict", async () => {
+      await col.insert({ _id: "a", name: "Alice" });
+      await expect(
+        col.upsert("a", { name: "New" }, { expectedVersion: 99 }),
+      ).rejects.toThrow("Conflict");
+      expect(col.findOne("a")?.name).toBe("Alice");
+    });
+
+    it("no expectedVersion = no check (backward compatible)", async () => {
+      await col.insert({ _id: "a", name: "Alice" });
+      await col.update({ _id: "a" }, { $set: { name: "V2" } });
+      await col.update({ _id: "a" }, { $set: { name: "V3" } }); // no expectedVersion
+      expect(col.findOne("a")?.name).toBe("V3");
+    });
+
+    it("_version visible in find results", async () => {
+      await col.insertMany([
+        { _id: "a", name: "Alice" },
+        { _id: "b", name: "Bob" },
+      ]);
+      const result = col.find();
+      expect(result.records.every((r) => r._version === 1)).toBe(true);
+    });
+  });
+
   describe("TTL / expiry", () => {
     // Helper to insert an already-expired record via the raw opslog store
     async function insertExpired(c: Collection, id: string, fields: Record<string, unknown>): Promise<void> {

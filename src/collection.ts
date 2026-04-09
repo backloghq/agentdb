@@ -21,6 +21,8 @@ export interface MutationOpts {
   reason?: string;
   /** Time-to-live in seconds. Record expires after this duration. */
   ttl?: number;
+  /** Optimistic lock — fail if record has been modified past this version. */
+  expectedVersion?: number;
 }
 
 /** Filter can be a JSON object or a compact string. */
@@ -140,6 +142,7 @@ const META_AGENT = "_agent";
 const META_REASON = "_reason";
 const META_EXPIRES = "_expires";
 const META_EMBEDDING = "_embedding";
+const META_VERSION = "_version";
 
 /**
  * Strip internal metadata fields from a stored record for public consumption.
@@ -252,6 +255,26 @@ export class Collection {
     if (this.opts.textSearch) this.textIdx = new TextIndex();
   }
 
+  /** Check optimistic lock and throw on version mismatch. */
+  private checkVersion(id: string, expectedVersion: number | undefined): void {
+    if (expectedVersion === undefined) return;
+    const record = this.store.get(id);
+    if (!record) return; // New record, no version to check
+    const currentVersion = (record[META_VERSION] as number) ?? 0;
+    if (currentVersion !== expectedVersion) {
+      throw new Error(
+        `Conflict: record '${id}' is at version ${currentVersion}, expected ${expectedVersion}`,
+      );
+    }
+  }
+
+  /** Set version on a stored record (increment existing or start at 1). */
+  private stampVersion(stored: StoredRecord, id: string): void {
+    const existing = this.store.get(id);
+    const currentVersion = existing ? ((existing[META_VERSION] as number) ?? 0) : 0;
+    stored[META_VERSION] = currentVersion + 1;
+  }
+
   /** Called after any mutation to invalidate caches. */
   private onMutate(): void {
     this.views.invalidate();
@@ -357,6 +380,7 @@ export class Collection {
     if (opts?.reason) stored[META_REASON] = opts.reason;
     if (opts?.ttl) stored[META_EXPIRES] = new Date(Date.now() + opts.ttl * 1000).toISOString();
     this.validateRecord(stored);
+    this.stampVersion(stored, id);
     await this.store.set(id, stored);
     if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
     this.onMutate();
@@ -377,6 +401,7 @@ export class Collection {
       if (opts?.reason) stored[META_REASON] = opts.reason;
       if (opts?.ttl) stored[META_EXPIRES] = new Date(Date.now() + opts.ttl * 1000).toISOString();
       this.validateRecord(stored);
+      this.stampVersion(stored, id);
       prepared.push({ id, stored });
     }
 
@@ -471,13 +496,15 @@ export class Collection {
 
     if (matches.length === 0) return 0;
 
-    // Apply updates and validate results before writing
+    // Check optimistic locks, apply updates, validate, stamp versions
     const updates: { id: string; updated: StoredRecord }[] = [];
     for (const [id, record] of matches) {
+      this.checkVersion(id, opts?.expectedVersion);
       const updated = applyUpdate(record, update);
       if (opts?.agent) updated[META_AGENT] = opts.agent;
       if (opts?.reason) updated[META_REASON] = opts.reason;
       this.validateRecord(updated);
+      this.stampVersion(updated, id);
       updates.push({ id, updated });
     }
 
@@ -502,11 +529,13 @@ export class Collection {
     opts?: MutationOpts,
   ): Promise<{ id: string; action: "inserted" | "updated" }> {
     const existing = this.store.has(id);
+    this.checkVersion(id, opts?.expectedVersion);
     const stored: StoredRecord = { ...doc, _id: id };
     if (opts?.agent) stored[META_AGENT] = opts.agent;
     if (opts?.reason) stored[META_REASON] = opts.reason;
     if (opts?.ttl) stored[META_EXPIRES] = new Date(Date.now() + opts.ttl * 1000).toISOString();
     this.validateRecord(stored);
+    this.stampVersion(stored, id);
     await this.store.set(id, stored);
     if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
     this.onMutate();
