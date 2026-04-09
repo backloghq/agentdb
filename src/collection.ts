@@ -679,9 +679,22 @@ export class Collection {
   // --- WAL tailing ---
 
   /**
+   * Refresh state from the backend. Picks up writes from other agents/processes.
+   * In multi-writer mode: re-reads manifest, snapshot, and all agent WAL files.
+   * In single-writer/readOnly: re-reads the active ops file for new entries.
+   * Call this before querying if you need to see other agents' latest writes.
+   */
+  async refresh(): Promise<void> {
+    await this.store.refresh();
+    this.rebuildTextIndex();
+    this.emitChange("update", []);
+  }
+
+  /**
    * Read new operations from the WAL since the last known position.
-   * Applies them to the in-memory state. Returns the new operations.
-   * Useful for readOnly stores watching a writer for live updates.
+   * In multi-writer mode, reads ALL agent WAL files.
+   * In single-writer/readOnly, reads the active ops file.
+   * Returns the newly applied operations.
    */
   async tail(): Promise<Operation<StoredRecord>[]> {
     const newOps = await this.store.tail();
