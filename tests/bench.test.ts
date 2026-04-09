@@ -3,15 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "@backloghq/opslog";
-import { AgentDB } from "../src/agentdb.js";
 import { Collection } from "../src/collection.js";
 import { compileFilter } from "../src/filter.js";
 import { parseCompactFilter } from "../src/compact-filter.js";
 import { HnswIndex } from "../src/hnsw.js";
 import { BloomFilter } from "../src/bloom.js";
 import { BTreeIndex } from "../src/btree.js";
-import { TextIndex } from "../src/text-index.js";
-import type { EmbeddingProvider } from "../src/embeddings/types.js";
 
 function randomString(len: number): string {
   const chars = "abcdefghijklmnopqrstuvwxyz ";

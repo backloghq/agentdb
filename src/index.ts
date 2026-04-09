@@ -22,6 +22,8 @@ export { PermissionManager } from "./permissions.js";
 export type { AgentPermissions } from "./permissions.js";
 export { FsBackend, LamportClock } from "@backloghq/opslog";
 export type { StorageBackend, LockHandle } from "@backloghq/opslog";
+export { S3Backend } from "@backloghq/opslog-s3";
+export type { S3BackendOptions } from "@backloghq/opslog-s3";
 export { AgentDB } from "./agentdb.js";
 export { resolveProvider, OpenAIEmbeddingProvider, HttpEmbeddingProvider } from "./embeddings/index.js";
 export type { EmbeddingProvider, EmbeddingConfig } from "./embeddings/index.js";
