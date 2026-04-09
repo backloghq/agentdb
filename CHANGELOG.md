@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [0.1.0] - 2026-04-09
 
+### Fixed (from security + architecture review)
+- **CRITICAL**: Permission enforcement wired into all 24 tool handlers (was configured but never checked)
+- **CRITICAL**: Agent identity now from auth token, not self-reported request body
+- **CRITICAL**: Constructor no longer drops `backend` and `agentId` options (S3 + multi-writer were silently broken)
+- **CRITICAL**: `db_batch` description fixed — updates are not atomic with inserts/deletes
+- **HIGH**: Collection names validated — path traversal (`../`) rejected
+- **HIGH**: Bearer token uses `crypto.timingSafeEqual` (prevents timing attacks)
+- **HIGH**: `$regex` operator rejects nested quantifiers and patterns >200 chars (prevents ReDoS)
+- **HIGH**: HTTP transport enforces max 100 sessions + 30-minute idle timeout
+- **MEDIUM**: `distinct()` and `schema()` now filter expired records
+- **MEDIUM**: `$in`/`$nin` operators use `Set` for O(1) primitive lookups
+- **MEDIUM**: `trackMemory` uses lightweight estimate instead of full collection scan
+- **MEDIUM**: `getNestedValue` deduplicated (shared between filter.ts and collection.ts)
+- **MEDIUM**: Version string centralized from package.json
+- **MEDIUM**: `purgeCollection` uses prefix match instead of fuzzy `includes()`
+- **MEDIUM**: `PermissionManager` denies undefined agent when rules are configured
+- Security headers added: `X-Content-Type-Options`, `Cache-Control`, `X-Frame-Options`
+- Dynamic port allocation in auth tests (prevents EADDRINUSE)
+- `startHttp` returns actual port number for test use
+
 ### Security
 - Bearer token authentication — `--auth-token` / `AGENTDB_AUTH_TOKEN` for HTTP transport
 - Multi-agent token map — different tokens for different agent identities + permissions
