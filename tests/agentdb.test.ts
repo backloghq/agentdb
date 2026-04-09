@@ -179,6 +179,80 @@ describe("AgentDB", () => {
     });
   });
 
+  describe("export and import", () => {
+    it("exports all collections", async () => {
+      const users = await db.collection("users");
+      const tasks = await db.collection("tasks");
+      await users.insert({ _id: "a", name: "Alice" });
+      await tasks.insert({ _id: "t1", title: "Task 1" });
+
+      const data = await db.export();
+      expect(data.version).toBe(1);
+      expect(data.exportedAt).toBeTruthy();
+      expect(Object.keys(data.collections)).toHaveLength(2);
+      expect(data.collections.users.records).toHaveLength(1);
+      expect(data.collections.tasks.records).toHaveLength(1);
+    });
+
+    it("exports named collections", async () => {
+      await (await db.collection("users")).insert({ _id: "a", name: "Alice" });
+      await (await db.collection("tasks")).insert({ _id: "t1", title: "Task 1" });
+
+      const data = await db.export(["users"]);
+      expect(Object.keys(data.collections)).toHaveLength(1);
+      expect(data.collections.users).toBeDefined();
+      expect(data.collections.tasks).toBeUndefined();
+    });
+
+    it("round-trip: export then import into fresh db", async () => {
+      const users = await db.collection("users");
+      await users.insert({ _id: "a", name: "Alice" });
+      await users.insert({ _id: "b", name: "Bob" });
+      const data = await db.export();
+      await db.close();
+
+      // Import into fresh db
+      const freshDir = tmpDir + "-fresh";
+      const db2 = new AgentDB(freshDir);
+      await db2.init();
+      const result = await db2.import(data);
+      expect(result.collections).toBe(1);
+      expect(result.records).toBe(2);
+
+      const users2 = await db2.collection("users");
+      expect(users2.findOne("a")?.name).toBe("Alice");
+      expect(users2.findOne("b")?.name).toBe("Bob");
+      await db2.close();
+      await rm(freshDir, { recursive: true, force: true });
+    });
+
+    it("import skips existing records by default", async () => {
+      const users = await db.collection("users");
+      await users.insert({ _id: "a", name: "Original" });
+
+      const data = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        collections: { users: { records: [{ _id: "a", name: "Imported" }] } },
+      };
+      await db.import(data);
+      expect(users.findOne("a")?.name).toBe("Original"); // not overwritten
+    });
+
+    it("import with overwrite replaces existing records", async () => {
+      const users = await db.collection("users");
+      await users.insert({ _id: "a", name: "Original" });
+
+      const data = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        collections: { users: { records: [{ _id: "a", name: "Imported" }] } },
+      };
+      await db.import(data, { overwrite: true });
+      expect(users.findOne("a")?.name).toBe("Imported");
+    });
+  });
+
   describe("stats", () => {
     it("reports correct totals", async () => {
       const users = await db.collection("users");

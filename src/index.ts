@@ -22,4 +22,5 @@ export { AgentDB } from "./agentdb.js";
 export type {
   AgentDBOptions,
   CollectionInfo,
+  ExportData,
 } from "./agentdb.js";

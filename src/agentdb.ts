@@ -20,6 +20,12 @@ export interface CollectionInfo {
   recordCount: number;
 }
 
+export interface ExportData {
+  version: number;
+  exportedAt: string;
+  collections: Record<string, { records: Record<string, unknown>[] }>;
+}
+
 interface MetaManifest {
   collections: string[];
   dropped: string[];
@@ -190,6 +196,49 @@ export class AgentDB {
       totalRecords += col.count();
     }
     return { collections: this.meta.collections.length, totalRecords };
+  }
+
+  // --- Export / Import ---
+
+  /** Export all (or named) collections as a self-contained JSON object. */
+  async export(collections?: string[]): Promise<ExportData> {
+    this.ensureOpen();
+    const names = collections ?? this.meta.collections;
+    const data: ExportData = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      collections: {},
+    };
+    for (const name of names) {
+      const col = await this.collection(name);
+      const result = col.find({ limit: Infinity });
+      data.collections[name] = { records: result.records };
+    }
+    return data;
+  }
+
+  /** Import collections from export data. Skips existing records by default. */
+  async import(data: ExportData, opts?: { overwrite?: boolean }): Promise<{ collections: number; records: number }> {
+    this.ensureOpen();
+    let totalRecords = 0;
+    const colNames = Object.keys(data.collections);
+    for (const name of colNames) {
+      const col = await this.collection(name);
+      const records = data.collections[name].records;
+      for (const record of records) {
+        const id = record._id as string;
+        if (!id) continue;
+        if (opts?.overwrite) {
+          await col.upsert(id, record);
+        } else {
+          if (!col.findOne(id)) {
+            await col.insert(record);
+          }
+        }
+        totalRecords++;
+      }
+    }
+    return { collections: colNames.length, records: totalRecords };
   }
 
   /** Close all open collections and write metadata. */

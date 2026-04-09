@@ -338,6 +338,36 @@ export function getTools(db: AgentDB): AgentTool[] {
     },
 
     {
+      name: "db_export",
+      description: "Export all or named collections as a self-contained JSON backup.",
+      schema: z.object({
+        collections: z.array(z.string()).optional().describe("Collection names to export (default: all)"),
+      }),
+      annotations: { readOnly: true },
+      execute: safe(async (args) => {
+        return db.export(args.collections as string[] | undefined);
+      }),
+    },
+
+    {
+      name: "db_import",
+      description: "Import collections from a previously exported JSON backup.",
+      schema: z.object({
+        data: z.object({
+          version: z.number(),
+          exportedAt: z.string(),
+          collections: z.record(z.object({ records: z.array(z.record(z.unknown())) })),
+        }).describe("Export data from db_export"),
+        overwrite: z.boolean().optional().default(false).describe("Overwrite existing records (default: skip)"),
+      }),
+      annotations: {},
+      execute: safe(async (args) => {
+        const data = args.data as { version: number; exportedAt: string; collections: Record<string, { records: Record<string, unknown>[] }> };
+        return db.import(data, { overwrite: args.overwrite as boolean });
+      }),
+    },
+
+    {
       name: "db_stats",
       description: "Get database-level statistics: number of collections and total records.",
       schema: z.object({}),
