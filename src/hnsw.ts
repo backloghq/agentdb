@@ -5,6 +5,52 @@
 
 import { cosineSimilarity } from "./embeddings/quantize.js";
 
+/** Max-heap for efficient extract-max in HNSW search queue. */
+class MaxHeap {
+  private heap: SearchCandidate[] = [];
+
+  get size(): number { return this.heap.length; }
+
+  insert(item: SearchCandidate): void {
+    this.heap.push(item);
+    this.bubbleUp(this.heap.length - 1);
+  }
+
+  extractMax(): SearchCandidate | null {
+    if (this.heap.length === 0) return null;
+    const max = this.heap[0];
+    const last = this.heap.pop()!;
+    if (this.heap.length > 0) {
+      this.heap[0] = last;
+      this.bubbleDown(0);
+    }
+    return max;
+  }
+
+  private bubbleUp(i: number): void {
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (this.heap[i].distance <= this.heap[parent].distance) break;
+      [this.heap[i], this.heap[parent]] = [this.heap[parent], this.heap[i]];
+      i = parent;
+    }
+  }
+
+  private bubbleDown(i: number): void {
+    const n = this.heap.length;
+    while (true) {
+      let largest = i;
+      const left = 2 * i + 1;
+      const right = 2 * i + 2;
+      if (left < n && this.heap[left].distance > this.heap[largest].distance) largest = left;
+      if (right < n && this.heap[right].distance > this.heap[largest].distance) largest = right;
+      if (largest === i) break;
+      [this.heap[i], this.heap[largest]] = [this.heap[largest], this.heap[i]];
+      i = largest;
+    }
+  }
+}
+
 export interface HnswOptions {
   /** Max connections per node per layer (default: 16). */
   M?: number;
@@ -229,6 +275,18 @@ export class HnswIndex {
     return bestId;
   }
 
+  /** Binary insert into descending-sorted candidates array. O(log n) find + O(n) splice. */
+  private candidateInsert(arr: SearchCandidate[], item: SearchCandidate, maxLen: number): void {
+    let lo = 0, hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (arr[mid].distance > item.distance) lo = mid + 1;
+      else hi = mid;
+    }
+    arr.splice(lo, 0, item);
+    if (arr.length > maxLen) arr.pop();
+  }
+
   /** Search a single layer with beam width ef. Returns candidates sorted by distance (descending = most similar first). */
   private searchLayer(query: number[], startId: string, ef: number, layer: number): SearchCandidate[] {
     const visited = new Set<string>();
@@ -238,15 +296,16 @@ export class HnswIndex {
     candidates.push({ id: startId, distance: startDist });
     visited.add(startId);
 
-    const queue: SearchCandidate[] = [{ id: startId, distance: startDist }];
+    // MaxHeap for exploration queue — always explore highest-similarity node next
+    const queue = new MaxHeap();
+    queue.insert({ id: startId, distance: startDist });
 
-    while (queue.length > 0) {
-      const current = queue.shift()!;
+    while (queue.size > 0) {
+      const current = queue.extractMax()!;
 
-      // If worst result is better than current, stop
+      // If worst candidate is better than current exploration node, stop
       if (candidates.length >= ef) {
-        const worstCandidate = candidates[candidates.length - 1];
-        if (current.distance < worstCandidate.distance) break;
+        if (current.distance < candidates[candidates.length - 1].distance) break;
       }
 
       const node = this.nodes.get(current.id);
@@ -264,12 +323,8 @@ export class HnswIndex {
         const candidate = { id: neighborId, distance: dist };
 
         if (candidates.length < ef || dist > candidates[candidates.length - 1].distance) {
-          candidates.push(candidate);
-          candidates.sort((a, b) => b.distance - a.distance);
-          if (candidates.length > ef) candidates.pop();
-
-          queue.push(candidate);
-          queue.sort((a, b) => b.distance - a.distance);
+          this.candidateInsert(candidates, candidate, ef);
+          queue.insert(candidate);
         }
       }
     }

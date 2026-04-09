@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Incremental text index** — update only re-indexes affected records instead of full rebuild.
 - **estimateTokens without JSON.stringify** — recursive char counting heuristic, no serialization overhead.
 - **Remove double batch write on delete** — agent-tagged deletes no longer write a tagged version before deleting.
+- **HNSW MaxHeap** — search queue uses binary MaxHeap (O(log n) extract) instead of sorted array + shift (O(n log n + n)). Candidates use binary insert. Preserves >70% recall quality.
 
 ### Added
 - **Sort on find** — `sort: "name"` (ascending) or `sort: "-score"` (descending). Supports dot notation for nested fields.
