@@ -629,6 +629,41 @@ export class Collection {
     return this.store.getOps(since);
   }
 
+  // --- WAL tailing ---
+
+  /**
+   * Read new operations from the WAL since the last known position.
+   * Applies them to the in-memory state. Returns the new operations.
+   * Useful for readOnly stores watching a writer for live updates.
+   */
+  async tail(): Promise<Operation<StoredRecord>[]> {
+    const newOps = await this.store.tail();
+    if (newOps.length > 0) {
+      this.rebuildTextIndex();
+      this.emitChange("update", newOps.map((op) => op.id));
+    }
+    return newOps;
+  }
+
+  /**
+   * Watch for new operations on an interval.
+   * Calls the callback with new operations whenever they appear.
+   */
+  watch(callback: (ops: Operation<StoredRecord>[]) => void, intervalMs = 1000): void {
+    this.store.watch((ops) => {
+      if (ops.length > 0) {
+        this.rebuildTextIndex();
+        this.emitChange("update", ops.map((op) => op.id));
+      }
+      callback(ops as Operation<StoredRecord>[]);
+    }, intervalMs);
+  }
+
+  /** Stop watching for new operations. */
+  unwatch(): void {
+    this.store.unwatch();
+  }
+
   // --- TTL cleanup ---
 
   /**

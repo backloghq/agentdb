@@ -693,6 +693,48 @@ describe("Collection", () => {
     });
   });
 
+  describe("WAL tailing", () => {
+    it("tail picks up new ops from another writer", async () => {
+      // Writer inserts data
+      await col.insert({ _id: "a", name: "Alice" });
+      await col.close();
+
+      // Open writer and reader on same directory
+      const writerStore = new Store<Record<string, unknown>>();
+      const writer = new Collection("test", writerStore);
+      await writer.open(tmpDir, { checkpointThreshold: 1000 });
+
+      const readerStore = new Store<Record<string, unknown>>();
+      const reader = new Collection("test-reader", readerStore);
+      await reader.open(tmpDir, { checkpointThreshold: 1000, readOnly: true } as Record<string, unknown>);
+
+      // Reader sees initial data
+      expect(reader.count()).toBe(1);
+
+      // Writer adds more
+      await writer.insert({ _id: "b", name: "Bob" });
+
+      // Reader tails to pick up
+      const newOps = await reader.tail();
+      expect(newOps.length).toBeGreaterThan(0);
+      expect(reader.findOne("b")?.name).toBe("Bob");
+
+      await reader.close();
+      await writer.close();
+
+      // Re-open original col for afterEach cleanup
+      store = new Store<Record<string, unknown>>();
+      col = new Collection("test", store);
+      await col.open(tmpDir, { checkpointThreshold: 1000 });
+    });
+
+    it("tail returns empty when no new ops", async () => {
+      await col.insert({ _id: "a", name: "Alice" });
+      const ops = await col.tail();
+      expect(ops).toHaveLength(0);
+    });
+  });
+
   describe("named views", () => {
     beforeEach(async () => {
       await col.insertMany([

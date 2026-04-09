@@ -348,6 +348,90 @@ describe("E2E: MCP Server", () => {
     expect(list.collections.find((c) => c.name === "temp")).toBeUndefined();
   });
 
+  // --- Archive flow ---
+
+  it("db_archive moves records to cold storage", async () => {
+    await client.call("db_insert", { collection: "logs", records: [
+      { _id: "old", status: "done", msg: "old entry" },
+      { _id: "new", status: "active", msg: "new entry" },
+    ]});
+
+    const result = await client.call("db_archive", {
+      collection: "logs",
+      filter: { status: "done" },
+      segment: "2026-Q1",
+    }) as { archived: number };
+    expect(result.archived).toBe(1);
+
+    // Active record still there
+    const count = await client.call("db_count", { collection: "logs" }) as { count: number };
+    expect(count.count).toBe(1);
+  });
+
+  it("db_archive_list returns segments", async () => {
+    const result = await client.call("db_archive_list", { collection: "logs" }) as { segments: string[] };
+    expect(result.segments.length).toBeGreaterThan(0);
+  });
+
+  it("db_archive_load reads archived records", async () => {
+    const result = await client.call("db_archive_load", {
+      collection: "logs",
+      segment: "2026-Q1",
+    }) as { records: unknown[]; count: number };
+    expect(result.count).toBe(1);
+  });
+
+  // --- Purge ---
+
+  it("db_purge permanently deletes a dropped collection", async () => {
+    await client.call("db_create", { collection: "disposable" });
+    await client.call("db_insert", { collection: "disposable", record: { x: 1 } });
+    const dropResult = await client.call("db_drop", { collection: "disposable" }) as { dropped: string };
+    expect(dropResult.dropped).toBe("disposable");
+
+    // Find the dropped name from collections (it won't be in active list)
+    // Purge using the original name as a substring match
+    await client.call("db_purge", { name: "disposable" });
+
+    // Should not appear in collections anymore
+    const list = await client.call("db_collections") as { collections: Array<{ name: string }> };
+    expect(list.collections.find((c) => c.name === "disposable")).toBeUndefined();
+  });
+
+  // --- Export / Import ---
+
+  it("db_export exports collection data", async () => {
+    const result = await client.call("db_export", { collections: ["users"] }) as {
+      version: number;
+      collections: Record<string, { records: unknown[] }>;
+    };
+    expect(result.version).toBe(1);
+    expect(result.collections.users).toBeDefined();
+    expect(result.collections.users.records.length).toBeGreaterThan(0);
+  });
+
+  it("db_import imports data into existing collections", async () => {
+    const exported = await client.call("db_export", { collections: ["users"] }) as {
+      version: number;
+      exportedAt: string;
+      collections: Record<string, { records: Record<string, unknown>[] }>;
+    };
+
+    // Import into a new collection by modifying the export
+    const importData = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      collections: { imported: { records: exported.collections.users.records.slice(0, 2) } },
+    };
+
+    const result = await client.call("db_import", { data: importData }) as { collections: number; records: number };
+    expect(result.collections).toBe(1);
+    expect(result.records).toBe(2);
+
+    const count = await client.call("db_count", { collection: "imported" }) as { count: number };
+    expect(count.count).toBe(2);
+  });
+
   // --- Error handling ---
 
   it("tool errors return isError without crashing server", async () => {
