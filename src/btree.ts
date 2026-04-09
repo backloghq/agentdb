@@ -1,14 +1,15 @@
 /**
- * Simple in-memory B-tree index for attribute matching.
- * Maps field values to sets of record IDs for O(log n) lookups.
+ * In-memory sorted index for attribute matching.
+ * Uses a flat sorted array with binary search for O(log n) lookups.
  * Supports equality, range queries, and existence checks.
+ *
+ * Named BTreeIndex for API compatibility — internally a sorted array,
+ * which performs identically to a B-tree for in-memory use cases.
  */
 
-interface BTreeNode {
-  keys: unknown[];
-  values: Set<string>[]; // Each key maps to a set of record IDs
-  children: BTreeNode[];
-  leaf: boolean;
+interface IndexEntry {
+  key: unknown;
+  ids: Set<string>;
 }
 
 function compare(a: unknown, b: unknown): number {
@@ -19,17 +20,14 @@ function compare(a: unknown, b: unknown): number {
   return String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
 }
 
-/** B-tree index on a single field. */
+/** Sorted index on a single field. Binary search for O(log n) lookups. */
 export class BTreeIndex {
   readonly field: string;
-  private root: BTreeNode;
-  private order: number;
+  private entries: IndexEntry[] = [];
   private _size = 0;
 
-  constructor(field: string, order = 32) {
+  constructor(field: string) {
     this.field = field;
-    this.order = order;
-    this.root = { keys: [], values: [], children: [], leaf: true };
   }
 
   /** Number of indexed entries (field value → ID pairs). */
@@ -39,41 +37,32 @@ export class BTreeIndex {
 
   /** Add a record ID for a field value. */
   add(value: unknown, id: string): void {
-    const node = this.findLeaf(this.root, value);
-    const idx = this.findKeyIndex(node, value);
-
-    if (idx < node.keys.length && compare(node.keys[idx], value) === 0) {
-      node.values[idx].add(id);
+    const idx = this.findIndex(value);
+    if (idx < this.entries.length && compare(this.entries[idx].key, value) === 0) {
+      this.entries[idx].ids.add(id);
     } else {
-      node.keys.splice(idx, 0, value);
-      node.values.splice(idx, 0, new Set([id]));
-      if (node.keys.length >= this.order) {
-        this.split(node);
-      }
+      this.entries.splice(idx, 0, { key: value, ids: new Set([id]) });
     }
     this._size++;
   }
 
   /** Remove a record ID for a field value. */
   remove(value: unknown, id: string): void {
-    const node = this.findLeaf(this.root, value);
-    const idx = this.findKeyIndex(node, value);
-    if (idx < node.keys.length && compare(node.keys[idx], value) === 0) {
-      node.values[idx].delete(id);
+    const idx = this.findIndex(value);
+    if (idx < this.entries.length && compare(this.entries[idx].key, value) === 0) {
+      this.entries[idx].ids.delete(id);
       this._size--;
-      if (node.values[idx].size === 0) {
-        node.keys.splice(idx, 1);
-        node.values.splice(idx, 1);
+      if (this.entries[idx].ids.size === 0) {
+        this.entries.splice(idx, 1);
       }
     }
   }
 
   /** Find all record IDs where field equals value. */
   eq(value: unknown): Set<string> {
-    const node = this.findLeaf(this.root, value);
-    const idx = this.findKeyIndex(node, value);
-    if (idx < node.keys.length && compare(node.keys[idx], value) === 0) {
-      return new Set(node.values[idx]);
+    const idx = this.findIndex(value);
+    if (idx < this.entries.length && compare(this.entries[idx].key, value) === 0) {
+      return new Set(this.entries[idx].ids);
     }
     return new Set();
   }
@@ -81,102 +70,80 @@ export class BTreeIndex {
   /** Find all record IDs where field is in range [min, max]. */
   range(min: unknown, max: unknown): Set<string> {
     const result = new Set<string>();
-    this.rangeWalk(this.root, min, max, result);
+    const start = this.findIndex(min);
+    for (let i = start; i < this.entries.length; i++) {
+      if (compare(this.entries[i].key, max) > 0) break;
+      for (const id of this.entries[i].ids) result.add(id);
+    }
     return result;
   }
 
-  /** Get all indexed values. */
-  allValues(): unknown[] {
-    const result: unknown[] = [];
-    this.inOrder(this.root, result);
+  /** All IDs where field > value (exclusive). */
+  gt(value: unknown): Set<string> {
+    const result = new Set<string>();
+    let start = this.findIndex(value);
+    // Skip entries equal to value
+    while (start < this.entries.length && compare(this.entries[start].key, value) === 0) start++;
+    for (let i = start; i < this.entries.length; i++) {
+      for (const id of this.entries[i].ids) result.add(id);
+    }
     return result;
+  }
+
+  /** All IDs where field >= value (inclusive). */
+  gte(value: unknown): Set<string> {
+    const result = new Set<string>();
+    const start = this.findIndex(value);
+    for (let i = start; i < this.entries.length; i++) {
+      for (const id of this.entries[i].ids) result.add(id);
+    }
+    return result;
+  }
+
+  /** All IDs where field < value (exclusive). */
+  lt(value: unknown): Set<string> {
+    const result = new Set<string>();
+    const end = this.findIndex(value);
+    for (let i = 0; i < end; i++) {
+      for (const id of this.entries[i].ids) result.add(id);
+    }
+    return result;
+  }
+
+  /** All IDs where field <= value (inclusive). */
+  lte(value: unknown): Set<string> {
+    const result = new Set<string>();
+    let end = this.findIndex(value);
+    // Include entries equal to value
+    while (end < this.entries.length && compare(this.entries[end].key, value) === 0) end++;
+    for (let i = 0; i < end; i++) {
+      for (const id of this.entries[i].ids) result.add(id);
+    }
+    return result;
+  }
+
+  /** Get all indexed values in sorted order. */
+  allValues(): unknown[] {
+    return this.entries.map((e) => e.key);
   }
 
   /** Clear the index. */
   clear(): void {
-    this.root = { keys: [], values: [], children: [], leaf: true };
+    this.entries = [];
     this._size = 0;
   }
 
   // --- Internal ---
 
-  private findLeaf(node: BTreeNode, value: unknown): BTreeNode {
-    if (node.leaf) return node;
-    const idx = this.findKeyIndex(node, value);
-    return this.findLeaf(node.children[idx], value);
-  }
-
-  private findKeyIndex(node: BTreeNode, value: unknown): number {
-    let lo = 0, hi = node.keys.length;
+  /** Binary search for the position of a key. */
+  private findIndex(value: unknown): number {
+    let lo = 0, hi = this.entries.length;
     while (lo < hi) {
       const mid = (lo + hi) >>> 1;
-      if (compare(node.keys[mid], value) < 0) lo = mid + 1;
+      if (compare(this.entries[mid].key, value) < 0) lo = mid + 1;
       else hi = mid;
     }
     return lo;
-  }
-
-  private split(node: BTreeNode): void {
-    // Simplified: for a leaf-only B-tree, just split the root when it overflows
-    // Full B-tree with internal splits would be more complex but overkill for our scale
-    if (node !== this.root) return; // Only split root for simplicity
-
-    const mid = Math.floor(node.keys.length / 2);
-    const left: BTreeNode = {
-      keys: node.keys.slice(0, mid),
-      values: node.values.slice(0, mid),
-      children: [],
-      leaf: true,
-    };
-    const right: BTreeNode = {
-      keys: node.keys.slice(mid),
-      values: node.values.slice(mid),
-      children: [],
-      leaf: true,
-    };
-
-    this.root = {
-      keys: [node.keys[mid]],
-      values: [node.values[mid]],
-      children: [left, right],
-      leaf: false,
-    };
-  }
-
-  private rangeWalk(node: BTreeNode, min: unknown, max: unknown, result: Set<string>): void {
-    if (node.leaf) {
-      for (let i = 0; i < node.keys.length; i++) {
-        if (compare(node.keys[i], min) >= 0 && compare(node.keys[i], max) <= 0) {
-          for (const id of node.values[i]) result.add(id);
-        }
-      }
-      return;
-    }
-    for (let i = 0; i < node.keys.length; i++) {
-      if (compare(node.keys[i], min) >= 0) {
-        this.rangeWalk(node.children[i], min, max, result);
-      }
-      if (compare(node.keys[i], min) >= 0 && compare(node.keys[i], max) <= 0) {
-        for (const id of node.values[i]) result.add(id);
-      }
-    }
-    if (node.children.length > node.keys.length) {
-      this.rangeWalk(node.children[node.children.length - 1], min, max, result);
-    }
-  }
-
-  private inOrder(node: BTreeNode, result: unknown[]): void {
-    if (node.leaf) {
-      result.push(...node.keys);
-      return;
-    }
-    for (let i = 0; i < node.keys.length; i++) {
-      if (node.children[i]) this.inOrder(node.children[i], result);
-      result.push(node.keys[i]);
-    }
-    if (node.children.length > node.keys.length) {
-      this.inOrder(node.children[node.children.length - 1], result);
-    }
   }
 }
 

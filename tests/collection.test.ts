@@ -730,6 +730,42 @@ describe("Collection", () => {
       expect(col.dropIndex("role")).toBe(true);
       expect(col.listIndexes()).not.toContain("role");
     });
+
+    it("uses index for $gt/$lt range queries", () => {
+      col.createIndex("score");
+      const result = col.find({ filter: { score: { $gt: 20 } } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].name).toBe("Charlie");
+    });
+
+    it("uses index for $gte/$lte range queries", () => {
+      col.createIndex("score");
+      const result = col.find({ filter: { score: { $gte: 10, $lte: 20 } } });
+      expect(result.records).toHaveLength(2);
+      const names = result.records.map((r) => r.name);
+      expect(names).toContain("Alice");
+      expect(names).toContain("Bob");
+    });
+
+    it("uses index for compound range + equality on different fields", () => {
+      col.createIndex("score");
+      // score index narrows, then role filter applied as predicate
+      const result = col.find({ filter: { score: { $gte: 10 }, role: "admin" } });
+      expect(result.records).toHaveLength(2);
+    });
+
+    it("count fast path returns correct count with index and no TTL", () => {
+      col.createIndex("role");
+      expect(col.count({ role: "admin" })).toBe(2);
+      expect(col.count({ role: "user" })).toBe(1);
+      expect(col.count({ role: "nonexistent" })).toBe(0);
+    });
+
+    it("count with range operator on indexed field", () => {
+      col.createIndex("score");
+      expect(col.count({ score: { $gt: 15 } })).toBe(2);
+      expect(col.count({ score: { $lte: 10 } })).toBe(1);
+    });
   });
 
   describe("WAL tailing", () => {

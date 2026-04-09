@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** All phases complete. 497 tests, 24 tools. Auth + security hardened. Group commit ~12x faster writes. B-tree indexed queries. HNSW MaxHeap optimized. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints.
+**Status:** All phases complete. 511 tests, 24 tools. Auth + security hardened. Group commit ~12x faster writes. Sorted-array indexed queries with range support ($gt/$lt/$gte/$lte). Count-from-index fast path. Predicate cache. HNSW MaxHeap optimized. Incremental index rebuild on tail/watch/undo. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints.
 
 ## Commands
 
@@ -44,7 +44,7 @@ src/
   filter.ts             # JSON filter compiler (14 operators, dot-notation)
   compact-filter.ts     # Compact string parser (role:admin age.gt:18)
   hnsw.ts               # HNSW index for approximate nearest neighbor search
-  btree.ts              # B-tree index + query frequency tracker
+  btree.ts              # Sorted-array index + query frequency tracker
   bloom.ts              # Bloom filter for probabilistic existence checks
   text-index.ts         # Inverted index for full-text search
   view.ts               # Named views with cache invalidation

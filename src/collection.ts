@@ -47,6 +47,29 @@ export interface FindOpts {
   sort?: string;
 }
 
+/** Small LRU cache for compiled filter predicates. Keyed by JSON-serialized filter. */
+const FILTER_CACHE_MAX = 64;
+const filterCache = new Map<string, (record: Record<string, unknown>) => boolean>();
+
+function cachedCompileFilter(filterObj: Record<string, unknown>): (record: Record<string, unknown>) => boolean {
+  const key = JSON.stringify(filterObj);
+  const cached = filterCache.get(key);
+  if (cached) {
+    // Touch: move to end (most-recently-used)
+    filterCache.delete(key);
+    filterCache.set(key, cached);
+    return cached;
+  }
+  const predicate = compileFilter(filterObj);
+  if (filterCache.size >= FILTER_CACHE_MAX) {
+    // Evict oldest (first entry)
+    const oldest = filterCache.keys().next().value!;
+    filterCache.delete(oldest);
+  }
+  filterCache.set(key, predicate);
+  return predicate;
+}
+
 /** Resolve a filter (string or object) into a compiled predicate, with optional virtual filter support. */
 function resolveFilter(
   filter: Filter,
@@ -87,7 +110,7 @@ function resolveFilter(
       }
 
       const basePredicate = Object.keys(remaining).length > 0
-        ? compileFilter(remaining)
+        ? cachedCompileFilter(remaining)
         : () => true;
 
       return (record) =>
@@ -95,7 +118,7 @@ function resolveFilter(
     }
   }
 
-  return compileFilter(filterObj);
+  return cachedCompileFilter(filterObj);
 }
 
 /** Result of a find query. */
@@ -290,6 +313,7 @@ export class Collection {
   private btreeIndexes = new Map<string, BTreeIndex>();
   private bloomFilters = new Map<string, BloomFilter>();
   private queryTracker = new QueryFrequencyTracker();
+  private _hasTTL = false; // Tracks if any record has been inserted with TTL
 
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
@@ -370,6 +394,25 @@ export class Collection {
     }
   }
 
+  /**
+   * Incremental index update for known affected IDs.
+   * Re-indexes only the specified records in the text index (avoids re-tokenizing all records).
+   * B-tree indexes are fully rebuilt (cheap — just field lookups, no tokenization).
+   */
+  private incrementalIndexUpdate(affectedIds: string[]): void {
+    if (this.textIdx) {
+      for (const id of affectedIds) {
+        const record = this.store.get(id);
+        if (record && !isExpired(record)) {
+          this.textIdx.add(id, stripMeta(record));
+        } else {
+          this.textIdx.remove(id);
+        }
+      }
+    }
+    this.rebuildBTreeIndexes();
+  }
+
   /** Run the validate hook on a clean record (meta stripped). Throws on invalid. */
   private validateRecord(record: Record<string, unknown>): void {
     if (this.opts.validate) {
@@ -426,19 +469,71 @@ export class Collection {
       filterObj = filter;
     }
 
-    // Look for simple equality conditions: { field: value } (not operators)
     for (const [key, value] of Object.entries(filterObj)) {
       if (key.startsWith("$") || key.startsWith("+")) continue;
+      const idx = this.btreeIndexes.get(key);
+      if (!idx) continue;
+
+      // Simple equality: { field: value }
       if (value === null || typeof value !== "object") {
-        // Simple equality — check if we have an index
-        const idx = this.btreeIndexes.get(key);
-        if (idx) {
-          return idx.eq(value);
+        return idx.eq(value);
+      }
+
+      // Range operators: { field: { $gt: v, $lte: v, ... } }
+      if (!Array.isArray(value)) {
+        const ops = value as Record<string, unknown>;
+        const opKeys = Object.keys(ops);
+        if (opKeys.length === 0 || !opKeys.every((k) => k === "$gt" || k === "$gte" || k === "$lt" || k === "$lte")) continue;
+
+        const hasGt = "$gt" in ops;
+        const hasGte = "$gte" in ops;
+        const hasLt = "$lt" in ops;
+        const hasLte = "$lte" in ops;
+
+        // Combined range: both lower and upper bound
+        if ((hasGt || hasGte) && (hasLt || hasLte)) {
+          const lo = hasGt ? ops.$gt : ops.$gte;
+          const hi = hasLt ? ops.$lt : ops.$lte;
+          // Use inclusive range then filter out exclusive bounds
+          const candidates = idx.range(lo, hi);
+          if (hasGt) {
+            for (const id of idx.eq(lo)) candidates.delete(id);
+          }
+          if (hasLt) {
+            for (const id of idx.eq(hi)) candidates.delete(id);
+          }
+          return candidates;
         }
+
+        // Single bound
+        if (hasGt) return idx.gt(ops.$gt);
+        if (hasGte) return idx.gte(ops.$gte);
+        if (hasLt) return idx.lt(ops.$lt);
+        if (hasLte) return idx.lte(ops.$lte);
       }
     }
 
     return null; // No indexed field found
+  }
+
+  /**
+   * Check if a filter is fully covered by a single index (no extra conditions).
+   * Used by count() fast path to skip record fetches entirely.
+   */
+  private isFullyCoveredByIndex(filter: Filter): boolean {
+    if (!filter || this.btreeIndexes.size === 0) return false;
+
+    let filterObj: Record<string, unknown>;
+    if (typeof filter === "string") {
+      try { filterObj = parseCompactFilter(filter); } catch { return false; }
+    } else {
+      filterObj = filter;
+    }
+
+    const fieldKeys = Object.keys(filterObj).filter((k) => !k.startsWith("$") && !k.startsWith("+"));
+    // Must be exactly one field condition, and it must be indexed
+    if (fieldKeys.length !== 1) return false;
+    return this.btreeIndexes.has(fieldKeys[0]);
   }
 
   /** Track which fields are queried for index suggestions. */
@@ -477,11 +572,10 @@ export class Collection {
   async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
-    // Build text index from existing records
-    if (this.textIdx) {
-      for (const [id, record] of this.store.entries()) {
-        this.textIdx.add(id, stripMeta(record));
-      }
+    // Detect TTL records + build text index from existing records
+    for (const [id, record] of this.store.entries()) {
+      if (record[META_EXPIRES]) this._hasTTL = true;
+      if (this.textIdx) this.textIdx.add(id, stripMeta(record));
     }
     // Load existing embeddings into HNSW index
     if (this.hnswIdx) {
@@ -512,7 +606,7 @@ export class Collection {
     const stored: StoredRecord = { ...doc, _id: id };
     if (opts?.agent) stored[META_AGENT] = opts.agent;
     if (opts?.reason) stored[META_REASON] = opts.reason;
-    if (opts?.ttl) stored[META_EXPIRES] = Date.now() + opts.ttl * 1000;
+    if (opts?.ttl) { stored[META_EXPIRES] = Date.now() + opts.ttl * 1000; this._hasTTL = true; }
     this.validateRecord(stored);
     this.stampVersion(stored, id);
     const oldRecord = this.store.get(id);
@@ -535,7 +629,7 @@ export class Collection {
       const stored: StoredRecord = { ...doc, _id: id };
       if (opts?.agent) stored[META_AGENT] = opts.agent;
       if (opts?.reason) stored[META_REASON] = opts.reason;
-      if (opts?.ttl) stored[META_EXPIRES] = Date.now() + opts.ttl * 1000;
+      if (opts?.ttl) { stored[META_EXPIRES] = Date.now() + opts.ttl * 1000; this._hasTTL = true; }
       this.validateRecord(stored);
       this.stampVersion(stored, id);
       prepared.push({ id, stored });
@@ -658,8 +752,15 @@ export class Collection {
    * Count records matching a filter.
    */
   count(filter?: Filter): number {
-    const predicate = this.resolve(filter);
     const candidateIds = this.indexedCandidates(filter);
+
+    // Fast path: if index covers the entire filter and no TTL records exist,
+    // the index size IS the count — no record fetches needed.
+    if (candidateIds && !this._hasTTL && this.isFullyCoveredByIndex(filter)) {
+      return candidateIds.size;
+    }
+
+    const predicate = this.resolve(filter);
     if (candidateIds) {
       let n = 0;
       for (const id of candidateIds) {
@@ -735,7 +836,7 @@ export class Collection {
     const stored: StoredRecord = { ...doc, _id: id };
     if (opts?.agent) stored[META_AGENT] = opts.agent;
     if (opts?.reason) stored[META_REASON] = opts.reason;
-    if (opts?.ttl) stored[META_EXPIRES] = Date.now() + opts.ttl * 1000;
+    if (opts?.ttl) { stored[META_EXPIRES] = Date.now() + opts.ttl * 1000; this._hasTTL = true; }
     this.validateRecord(stored);
     this.stampVersion(stored, id);
     await this.store.set(id, stored);
@@ -782,11 +883,18 @@ export class Collection {
    * Undo the last mutation in this collection.
    */
   async undo(): Promise<boolean> {
+    // Capture the last op's ID before undoing so we can do incremental re-index
+    const ops = this.store.getOps();
+    const lastOp = ops.length > 0 ? ops[ops.length - 1] : null;
     const result = await this.store.undo();
     if (result) {
-      this.rebuildTextIndex();
-    this.rebuildBTreeIndexes();
-      this.emitChange("undo", []);
+      if (lastOp) {
+        this.incrementalIndexUpdate([lastOp.id]);
+      } else {
+        this.rebuildTextIndex();
+        this.rebuildBTreeIndexes();
+      }
+      this.emitChange("undo", lastOp ? [lastOp.id] : []);
     }
     return result;
   }
@@ -842,9 +950,9 @@ export class Collection {
   async tail(): Promise<Operation<StoredRecord>[]> {
     const newOps = await this.store.tail();
     if (newOps.length > 0) {
-      this.rebuildTextIndex();
-    this.rebuildBTreeIndexes();
-      this.emitChange("update", newOps.map((op) => op.id));
+      const affectedIds = [...new Set(newOps.map((op) => op.id))];
+      this.incrementalIndexUpdate(affectedIds);
+      this.emitChange("update", affectedIds);
     }
     return newOps;
   }
@@ -856,9 +964,9 @@ export class Collection {
   watch(callback: (ops: Operation<StoredRecord>[]) => void, intervalMs = 1000): void {
     this.store.watch((ops) => {
       if (ops.length > 0) {
-        this.rebuildTextIndex();
-    this.rebuildBTreeIndexes();
-        this.emitChange("update", ops.map((op) => op.id));
+        const affectedIds = [...new Set(ops.map((op) => op.id))];
+        this.incrementalIndexUpdate(affectedIds);
+        this.emitChange("update", affectedIds);
       }
       callback(ops as Operation<StoredRecord>[]);
     }, intervalMs);
@@ -876,21 +984,23 @@ export class Collection {
    * Expired records are already hidden from queries, but this frees storage.
    */
   async cleanup(): Promise<number> {
-    const expired: string[] = [];
+    const expired: { id: string; record: StoredRecord }[] = [];
     for (const [id, value] of this.store.entries()) {
-      if (isExpired(value)) expired.push(id);
+      if (isExpired(value)) expired.push({ id, record: value });
     }
     if (expired.length === 0) return 0;
 
     await this.store.batch(() => {
-      for (const id of expired) {
+      for (const { id } of expired) {
         this.store.delete(id);
       }
     });
-    if (this.textIdx) {
-      for (const id of expired) this.textIdx.remove(id);
+    for (const { id, record } of expired) {
+      if (this.textIdx) this.textIdx.remove(id);
+      this.updateBTreeIndexes(id, record, undefined);
     }
-    this.emitChange("delete", expired);
+    const ids = expired.map((e) => e.id);
+    this.emitChange("delete", ids);
     return expired.length;
   }
 
@@ -902,14 +1012,18 @@ export class Collection {
    */
   async archive(filter: Filter, segment?: string): Promise<number> {
     const predicate = this.resolve(filter);
+    // Capture affected IDs before archiving for incremental re-index
+    const affectedIds: string[] = [];
+    for (const [id, value] of this.store.entries()) {
+      if (predicate(value)) affectedIds.push(id);
+    }
     const count = await this.store.archive(
       (value) => predicate(value),
       segment,
     );
     if (count > 0) {
-      this.rebuildTextIndex();
-    this.rebuildBTreeIndexes();
-      this.emitChange("delete", []);
+      this.incrementalIndexUpdate(affectedIds);
+      this.emitChange("delete", affectedIds);
     }
     return count;
   }

@@ -9,10 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Performance
 - **Group commit** — `writeMode: "group"` buffers writes, ~12x faster. CLI: `--group-commit`. Env: `AGENTDB_WRITE_MODE=group`. Auto-disabled for multi-writer (agentId). Opslog v0.5.0.
-- **B-tree indexed queries** — `find()` and `count()` use B-tree indexes for equality filters. 3.4x speedup on 10K records with indexed fields. Indexes kept in sync on all mutations.
+- **Sorted-array index** — replaced B-tree tree structure with flat sorted array + binary search. Same O(log n) lookups, simpler code, no unbounded leaf growth. `find()` and `count()` use indexes for equality filters.
+- **Indexed range queries** — `$gt`, `$gte`, `$lt`, `$lte` operators now use sorted-array index when an index exists on the filtered field. Combined bounds (e.g., `{ $gte: 10, $lte: 90 }`) also use the index. Expected 5-10x speedup on range filters.
+- **Count-from-index fast path** — `count()` with a single indexed equality/range field on TTL-free collections returns the index size directly, bypassing per-record fetch and predicate evaluation. O(1) for equality, O(log n) for range.
+- **Predicate compilation cache** — compiled filter predicates cached in a 64-entry LRU keyed by JSON-serialized filter. Repeated queries with the same filter skip re-parsing and re-compilation.
+- **Incremental index rebuild** — `tail()`, `watch()`, `undo()`, `archive()` now re-index only affected records instead of full rebuild. Text index tokenization skipped for unaffected records. Full rebuild kept for `refresh()` and `batch()` (unknown scope).
+- **Cleanup B-tree fix** — `cleanup()` now removes expired records from B-tree indexes (was previously missed).
 - **Eliminate double stripMeta** — filter predicates run on raw records (meta fields don't interfere). stripMeta only for output. Removes N object allocations per query.
 - **Epoch TTL** — `_expires` stored as epoch ms instead of ISO string. Avoids Date parsing in hot path.
-- **Incremental text index** — update only re-indexes affected records instead of full rebuild.
 - **estimateTokens without JSON.stringify** — recursive char counting heuristic, no serialization overhead.
 - **Remove double batch write on delete** — agent-tagged deletes no longer write a tagged version before deleting.
 - **HNSW MaxHeap** — search queue uses binary MaxHeap (O(log n) extract) instead of sorted array + shift (O(n log n + n)). Candidates use binary insert. Preserves >70% recall quality.

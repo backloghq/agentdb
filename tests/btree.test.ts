@@ -91,6 +91,56 @@ describe("BTreeIndex", () => {
     idx.add(null, "b");
     expect(idx.eq(null)).toEqual(new Set(["a", "b"]));
   });
+
+  describe("range comparison methods", () => {
+    let numIdx: BTreeIndex;
+
+    beforeEach(() => {
+      numIdx = new BTreeIndex("score");
+      for (let i = 0; i < 20; i++) {
+        numIdx.add(i, `id-${i}`);
+      }
+    });
+
+    it("gt returns IDs where field > value", () => {
+      const result = numIdx.gt(17);
+      expect(result).toEqual(new Set(["id-18", "id-19"]));
+      expect(numIdx.gt(19).size).toBe(0);
+      expect(numIdx.gt(-1).size).toBe(20);
+    });
+
+    it("gte returns IDs where field >= value", () => {
+      const result = numIdx.gte(18);
+      expect(result).toEqual(new Set(["id-18", "id-19"]));
+      expect(numIdx.gte(20).size).toBe(0);
+    });
+
+    it("lt returns IDs where field < value", () => {
+      const result = numIdx.lt(3);
+      expect(result).toEqual(new Set(["id-0", "id-1", "id-2"]));
+      expect(numIdx.lt(0).size).toBe(0);
+    });
+
+    it("lte returns IDs where field <= value", () => {
+      const result = numIdx.lte(2);
+      expect(result).toEqual(new Set(["id-0", "id-1", "id-2"]));
+      expect(numIdx.lte(-1).size).toBe(0);
+    });
+
+    it("gt and lt with duplicate values", () => {
+      const idx2 = new BTreeIndex("priority");
+      idx2.add(5, "a");
+      idx2.add(5, "b");
+      idx2.add(10, "c");
+      idx2.add(10, "d");
+      idx2.add(15, "e");
+
+      expect(idx2.gt(5)).toEqual(new Set(["c", "d", "e"]));
+      expect(idx2.lt(10)).toEqual(new Set(["a", "b"]));
+      expect(idx2.gte(10)).toEqual(new Set(["c", "d", "e"]));
+      expect(idx2.lte(5)).toEqual(new Set(["a", "b"]));
+    });
+  });
 });
 
 describe("QueryFrequencyTracker", () => {
