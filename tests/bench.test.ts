@@ -344,6 +344,50 @@ describe("Performance benchmarks", () => {
     expect(result.totalMs).toBeLessThan(500); // <500ms to open 1K records
   });
 
+  // --- Indexed vs unindexed find ---
+
+  it("find: indexed vs unindexed on 10K records", async () => {
+    const N = 10000;
+    const dir = join(tmpDir, "indexed-find");
+    const store = new Store<Record<string, unknown>>();
+    const col = new Collection("bench", store);
+    await col.open(dir, { checkpointThreshold: 50000 });
+
+    const records = Array.from({ length: N }, (_, i) => ({
+      _id: `rec-${i}`,
+      status: ["active", "done", "pending", "archived"][i % 4],
+      score: Math.floor(Math.random() * 100),
+      name: `User ${i}`,
+    }));
+    await col.insertMany(records);
+
+    // Unindexed scan
+    const QUERIES = 100;
+    const startUnindexed = performance.now();
+    for (let i = 0; i < QUERIES; i++) {
+      col.find({ filter: { status: "active" } });
+    }
+    const unindexedMs = performance.now() - startUnindexed;
+
+    // Create index
+    col.createIndex("status");
+
+    // Indexed scan
+    const startIndexed = performance.now();
+    for (let i = 0; i < QUERIES; i++) {
+      col.find({ filter: { status: "active" } });
+    }
+    const indexedMs = performance.now() - startIndexed;
+
+    const speedup = unindexedMs / indexedMs;
+    console.log(`  find ${QUERIES}x on ${N} records: unindexed=${(unindexedMs/QUERIES).toFixed(2)}ms, indexed=${(indexedMs/QUERIES).toFixed(2)}ms, speedup=${speedup.toFixed(1)}x`);
+
+    // Indexed should be faster (at least 2x on 10K records)
+    expect(speedup).toBeGreaterThan(1.5);
+
+    await col.close();
+  });
+
   // --- Summary ---
 
   it("prints summary", () => {

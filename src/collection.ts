@@ -306,12 +306,39 @@ export class Collection {
     this.emitter.emit("change", { type, collection: this.name, ids, agent } satisfies ChangeEvent);
   }
 
+  /** Update B-tree indexes for a record change. */
+  private updateBTreeIndexes(id: string, oldRecord: StoredRecord | undefined, newRecord: StoredRecord | undefined): void {
+    if (this.btreeIndexes.size === 0) return;
+    for (const [field, idx] of this.btreeIndexes) {
+      if (oldRecord) {
+        const oldVal = getNestedValue(stripMeta(oldRecord), field);
+        if (oldVal !== undefined) idx.remove(oldVal, id);
+      }
+      if (newRecord && !isExpired(newRecord)) {
+        const newVal = getNestedValue(stripMeta(newRecord), field);
+        if (newVal !== undefined) idx.add(newVal, id);
+      }
+    }
+  }
+
   /** Rebuild the full text index from current store contents. */
   private rebuildTextIndex(): void {
     if (!this.textIdx) return;
     this.textIdx.clear();
     for (const [id, record] of this.store.entries()) {
       this.textIdx.add(id, stripMeta(record));
+    }
+  }
+
+  /** Rebuild all B-tree indexes from current store contents. */
+  private rebuildBTreeIndexes(): void {
+    for (const [field, idx] of this.btreeIndexes) {
+      idx.clear();
+      for (const [id, record] of this.store.entries()) {
+        if (isExpired(record)) continue;
+        const value = getNestedValue(stripMeta(record), field);
+        if (value !== undefined) idx.add(value, id);
+      }
     }
   }
 
@@ -354,6 +381,36 @@ export class Collection {
     const oldText = extractTextFromRecord(stripMeta(oldRecord));
     const newText = extractTextFromRecord(stripMeta(newRecord));
     return oldText !== newText;
+  }
+
+  /**
+   * Try to narrow candidates using B-tree indexes.
+   * Extracts simple equality conditions from the filter and looks up indexed fields.
+   * Returns a Set of candidate IDs if an index was used, or null for full scan.
+   */
+  private indexedCandidates(filter: Filter): Set<string> | null {
+    if (!filter || this.btreeIndexes.size === 0) return null;
+
+    let filterObj: Record<string, unknown>;
+    if (typeof filter === "string") {
+      try { filterObj = parseCompactFilter(filter); } catch { return null; }
+    } else {
+      filterObj = filter;
+    }
+
+    // Look for simple equality conditions: { field: value } (not operators)
+    for (const [key, value] of Object.entries(filterObj)) {
+      if (key.startsWith("$") || key.startsWith("+")) continue;
+      if (value === null || typeof value !== "object") {
+        // Simple equality — check if we have an index
+        const idx = this.btreeIndexes.get(key);
+        if (idx) {
+          return idx.eq(value);
+        }
+      }
+    }
+
+    return null; // No indexed field found
   }
 
   /** Track which fields are queried for index suggestions. */
@@ -430,8 +487,10 @@ export class Collection {
     if (opts?.ttl) stored[META_EXPIRES] = new Date(Date.now() + opts.ttl * 1000).toISOString();
     this.validateRecord(stored);
     this.stampVersion(stored, id);
+    const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
     if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+    this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("insert", [id], opts?.agent);
     return id;
   }
@@ -492,7 +551,23 @@ export class Collection {
     this.trackQueryFields(opts?.filter);
 
     const predicate = this.resolve(opts?.filter);
-    const records = this.store.filter((value) => !isExpired(value) && predicate(stripMeta(value)));
+
+    // Try to use B-tree index for initial candidate narrowing
+    const candidateIds = this.indexedCandidates(opts?.filter);
+    let records: StoredRecord[];
+    if (candidateIds) {
+      // Index hit: only check indexed candidates
+      records = [];
+      for (const id of candidateIds) {
+        const value = this.store.get(id);
+        if (value && !isExpired(value) && predicate(stripMeta(value))) {
+          records.push(value);
+        }
+      }
+    } else {
+      // No index: full linear scan
+      records = this.store.filter((value) => !isExpired(value) && predicate(stripMeta(value)));
+    }
 
     const total = records.length;
     const sliced = records.slice(offset, offset + limit);
@@ -531,6 +606,15 @@ export class Collection {
    */
   count(filter?: Filter): number {
     const predicate = this.resolve(filter);
+    const candidateIds = this.indexedCandidates(filter);
+    if (candidateIds) {
+      let n = 0;
+      for (const id of candidateIds) {
+        const value = this.store.get(id);
+        if (value && !isExpired(value) && predicate(stripMeta(value))) n++;
+      }
+      return n;
+    }
     return this.store.count((value) => !isExpired(value) && predicate(stripMeta(value)));
   }
 
@@ -570,6 +654,7 @@ export class Collection {
       }
     });
     this.rebuildTextIndex();
+    this.rebuildBTreeIndexes();
     this.emitChange("update", updates.map((u) => u.id), opts?.agent);
 
     return updates.length;
@@ -645,6 +730,7 @@ export class Collection {
     const result = await this.store.undo();
     if (result) {
       this.rebuildTextIndex();
+    this.rebuildBTreeIndexes();
       this.emitChange("undo", []);
     }
     return result;
@@ -673,6 +759,7 @@ export class Collection {
   async batch(fn: () => void): Promise<void> {
     await this.store.batch(fn);
     this.rebuildTextIndex();
+    this.rebuildBTreeIndexes();
     this.emitChange("update", []);
   }
 
@@ -687,6 +774,7 @@ export class Collection {
   async refresh(): Promise<void> {
     await this.store.refresh();
     this.rebuildTextIndex();
+    this.rebuildBTreeIndexes();
     this.emitChange("update", []);
   }
 
@@ -700,6 +788,7 @@ export class Collection {
     const newOps = await this.store.tail();
     if (newOps.length > 0) {
       this.rebuildTextIndex();
+    this.rebuildBTreeIndexes();
       this.emitChange("update", newOps.map((op) => op.id));
     }
     return newOps;
@@ -713,6 +802,7 @@ export class Collection {
     this.store.watch((ops) => {
       if (ops.length > 0) {
         this.rebuildTextIndex();
+    this.rebuildBTreeIndexes();
         this.emitChange("update", ops.map((op) => op.id));
       }
       callback(ops as Operation<StoredRecord>[]);
@@ -763,6 +853,7 @@ export class Collection {
     );
     if (count > 0) {
       this.rebuildTextIndex();
+    this.rebuildBTreeIndexes();
       this.emitChange("delete", []);
     }
     return count;
