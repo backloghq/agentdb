@@ -172,6 +172,71 @@ describe("Collection", () => {
     });
   });
 
+  describe("TTL / expiry", () => {
+    // Helper to insert an already-expired record via the raw opslog store
+    async function insertExpired(c: Collection, id: string, fields: Record<string, unknown>): Promise<void> {
+      const rawStore = (c as unknown as { store: Store<Record<string, unknown>> }).store;
+      await rawStore.set(id, { _id: id, ...fields, _expires: "2020-01-01T00:00:00Z" });
+    }
+
+    it("records with expired TTL are excluded from findOne", async () => {
+      await col.insert({ _id: "perm", name: "Permanent" });
+      await insertExpired(col, "temp", { name: "Temporary" });
+
+      expect(col.findOne("perm")?.name).toBe("Permanent");
+      expect(col.findOne("temp")).toBeUndefined();
+    });
+
+    it("expired records excluded from find", async () => {
+      await col.insert({ _id: "a", name: "Active" });
+      await insertExpired(col, "b", { name: "Expired" });
+
+      const result = col.find();
+      expect(result.total).toBe(1);
+      expect(result.records[0].name).toBe("Active");
+    });
+
+    it("expired records excluded from count", async () => {
+      await col.insert({ _id: "a", name: "Active" });
+      await insertExpired(col, "b", { name: "Expired" });
+
+      expect(col.count()).toBe(1);
+    });
+
+    it("ttl option sets _expires on insert", async () => {
+      const id = await col.insert({ name: "Temp" }, { ttl: 3600 });
+      expect(col.findOne(id)?.name).toBe("Temp");
+      expect(col.findOne(id)?._expires).toBeUndefined();
+      const ops = col.history(id);
+      expect(ops[0].data?._expires).toBeDefined();
+    });
+
+    it("cleanup removes expired records", async () => {
+      await col.insert({ _id: "a", name: "Active" });
+      await insertExpired(col, "b", { name: "Expired" });
+      await insertExpired(col, "c", { name: "Also expired" });
+
+      const cleaned = await col.cleanup();
+      expect(cleaned).toBe(2);
+      expect(col.count()).toBe(1);
+    });
+
+    it("non-expired records are unaffected by cleanup", async () => {
+      await col.insert({ _id: "a", name: "Active" }, { ttl: 99999 });
+      const cleaned = await col.cleanup();
+      expect(cleaned).toBe(0);
+      expect(col.findOne("a")?.name).toBe("Active");
+    });
+
+    it("expired records excluded from update", async () => {
+      await col.insert({ _id: "a", name: "Active", score: 1 });
+      await insertExpired(col, "b", { name: "Expired", score: 1 });
+
+      const modified = await col.update({}, { $inc: { score: 10 } });
+      expect(modified).toBe(1);
+    });
+  });
+
   describe("token budget", () => {
     beforeEach(async () => {
       await col.insertMany([

@@ -16,6 +16,8 @@ export interface MutationOpts {
   agent?: string;
   /** Reason — why this change is being made. */
   reason?: string;
+  /** Time-to-live in seconds. Record expires after this duration. */
+  ttl?: number;
 }
 
 /** Filter can be a JSON object or a compact string. */
@@ -133,6 +135,7 @@ export interface CollectionOptions {
 /** Reserved field prefix for internal metadata. */
 const META_AGENT = "_agent";
 const META_REASON = "_reason";
+const META_EXPIRES = "_expires";
 
 /**
  * Strip internal metadata fields from a stored record for public consumption.
@@ -140,11 +143,18 @@ const META_REASON = "_reason";
 function stripMeta(record: StoredRecord): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    if (key !== META_AGENT && key !== META_REASON) {
+    if (key !== META_AGENT && key !== META_REASON && key !== META_EXPIRES) {
       result[key] = value;
     }
   }
   return result;
+}
+
+/** Check if a record has expired. */
+function isExpired(record: StoredRecord): boolean {
+  const expires = record[META_EXPIRES];
+  if (!expires || typeof expires !== "string") return false;
+  return new Date(expires) < new Date();
 }
 
 /**
@@ -267,11 +277,11 @@ export class Collection {
     return result;
   }
 
-  /** Create a lazy accessor for all clean records (computed NOT applied to avoid recursion). */
+  /** Create a lazy accessor for all active (non-expired) clean records. */
   private allCleanRecords(): () => Record<string, unknown>[] {
     let cached: Record<string, unknown>[] | null = null;
     return () => {
-      if (!cached) cached = this.store.all().map(stripMeta);
+      if (!cached) cached = this.store.all().filter((r) => !isExpired(r)).map(stripMeta);
       return cached;
     };
   }
@@ -321,6 +331,7 @@ export class Collection {
     const stored: StoredRecord = { ...doc, _id: id };
     if (opts?.agent) stored[META_AGENT] = opts.agent;
     if (opts?.reason) stored[META_REASON] = opts.reason;
+    if (opts?.ttl) stored[META_EXPIRES] = new Date(Date.now() + opts.ttl * 1000).toISOString();
     this.validateRecord(stored);
     await this.store.set(id, stored);
     if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
@@ -340,6 +351,7 @@ export class Collection {
       const stored: StoredRecord = { ...doc, _id: id };
       if (opts?.agent) stored[META_AGENT] = opts.agent;
       if (opts?.reason) stored[META_REASON] = opts.reason;
+      if (opts?.ttl) stored[META_EXPIRES] = new Date(Date.now() + opts.ttl * 1000).toISOString();
       this.validateRecord(stored);
       prepared.push({ id, stored });
     }
@@ -364,7 +376,7 @@ export class Collection {
    */
   findOne(id: string): Record<string, unknown> | undefined {
     const record = this.store.get(id);
-    if (!record) return undefined;
+    if (!record || isExpired(record)) return undefined;
     const clean = stripMeta(record);
     return this.applyComputed(clean, this.allCleanRecords());
   }
@@ -379,7 +391,7 @@ export class Collection {
     const maxTokens = opts?.maxTokens;
 
     const predicate = this.resolve(opts?.filter);
-    const records = this.store.filter((value) => predicate(stripMeta(value)));
+    const records = this.store.filter((value) => !isExpired(value) && predicate(stripMeta(value)));
 
     const total = records.length;
     const sliced = records.slice(offset, offset + limit);
@@ -418,7 +430,7 @@ export class Collection {
    */
   count(filter?: Filter): number {
     const predicate = this.resolve(filter);
-    return this.store.count((value) => predicate(stripMeta(value)));
+    return this.store.count((value) => !isExpired(value) && predicate(stripMeta(value)));
   }
 
   /**
@@ -428,7 +440,7 @@ export class Collection {
     const predicate = this.resolve(filter);
     const matches: [string, StoredRecord][] = [];
     for (const [id, value] of this.store.entries()) {
-      if (predicate(stripMeta(value))) {
+      if (!isExpired(value) && predicate(stripMeta(value))) {
         matches.push([id, value]);
       }
     }
@@ -469,6 +481,7 @@ export class Collection {
     const stored: StoredRecord = { ...doc, _id: id };
     if (opts?.agent) stored[META_AGENT] = opts.agent;
     if (opts?.reason) stored[META_REASON] = opts.reason;
+    if (opts?.ttl) stored[META_EXPIRES] = new Date(Date.now() + opts.ttl * 1000).toISOString();
     this.validateRecord(stored);
     await this.store.set(id, stored);
     if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
@@ -483,7 +496,7 @@ export class Collection {
     const predicate = this.resolve(filter);
     const toDelete: string[] = [];
     for (const [id, value] of this.store.entries()) {
-      if (predicate(stripMeta(value))) {
+      if (!isExpired(value) && predicate(stripMeta(value))) {
         toDelete.push(id);
       }
     }
@@ -542,6 +555,31 @@ export class Collection {
     return this.store.getOps(since);
   }
 
+  // --- TTL cleanup ---
+
+  /**
+   * Delete expired records from the store.
+   * Expired records are already hidden from queries, but this frees storage.
+   */
+  async cleanup(): Promise<number> {
+    const expired: string[] = [];
+    for (const [id, value] of this.store.entries()) {
+      if (isExpired(value)) expired.push(id);
+    }
+    if (expired.length === 0) return 0;
+
+    await this.store.batch(() => {
+      for (const id of expired) {
+        this.store.delete(id);
+      }
+    });
+    if (this.textIdx) {
+      for (const id of expired) this.textIdx.remove(id);
+    }
+    this.onMutate();
+    return expired.length;
+  }
+
   // --- Archive ---
 
   /**
@@ -592,7 +630,7 @@ export class Collection {
     const records: Record<string, unknown>[] = [];
     for (const id of matchIds) {
       const record = this.store.get(id);
-      if (record) {
+      if (record && !isExpired(record)) {
         let clean = stripMeta(record);
         clean = this.applyComputed(clean, allAccessor);
         records.push(useSummary ? summarize(clean) : clean);
