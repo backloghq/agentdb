@@ -1,0 +1,206 @@
+/**
+ * S3 backend performance benchmarks.
+ *
+ * Requires AWS credentials and a bucket. Configure via environment variables:
+ *   AGENTDB_S3_BUCKET=my-bucket AWS_REGION=us-east-1 npm test -- tests/bench-s3.test.ts
+ *
+ * Skipped automatically if AGENTDB_S3_BUCKET is not set.
+ */
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { Store } from "@backloghq/opslog";
+import { S3Backend } from "@backloghq/opslog-s3";
+import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from "@aws-sdk/client-s3";
+import { Collection } from "../src/collection.js";
+
+const BUCKET = process.env.AGENTDB_S3_BUCKET ?? "";
+const REGION = process.env.AWS_REGION ?? "us-east-1";
+const PREFIX = `agentdb-bench-${Date.now()}`;
+
+function randomString(len: number): string {
+  const chars = "abcdefghijklmnopqrstuvwxyz ";
+  return Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+}
+
+function randomRecord(i: number): Record<string, unknown> {
+  return {
+    _id: `rec-${i}`,
+    name: `User ${i}`,
+    email: `user${i}@example.com`,
+    role: ["admin", "user", "moderator"][i % 3],
+    score: Math.floor(Math.random() * 100),
+    active: i % 2 === 0,
+    bio: randomString(200),
+    tags: [`tag-${i % 10}`, `group-${i % 5}`],
+  };
+}
+
+async function benchAsync(name: string, fn: () => Promise<void>, iterations = 1): Promise<{ name: string; totalMs: number; avgMs: number; opsPerSec: number }> {
+  const start = performance.now();
+  await fn();
+  const elapsed = performance.now() - start;
+  return {
+    name,
+    totalMs: Math.round(elapsed * 100) / 100,
+    avgMs: Math.round((elapsed / iterations) * 1000) / 1000,
+    opsPerSec: Math.round(iterations / (elapsed / 1000)),
+  };
+}
+
+async function cleanupS3(client: S3Client): Promise<void> {
+  let token: string | undefined;
+  do {
+    const list = await client.send(new ListObjectsV2Command({
+      Bucket: BUCKET,
+      Prefix: PREFIX,
+      ContinuationToken: token,
+    }));
+    if (list.Contents && list.Contents.length > 0) {
+      await client.send(new DeleteObjectsCommand({
+        Bucket: BUCKET,
+        Delete: { Objects: list.Contents.map((o) => ({ Key: o.Key })) },
+      }));
+    }
+    token = list.NextContinuationToken;
+  } while (token);
+}
+
+const runS3 = BUCKET.length > 0;
+
+describe.skipIf(!runS3)("S3 backend benchmarks", () => {
+  let client: S3Client;
+
+  beforeAll(() => {
+    client = new S3Client({ region: REGION });
+  });
+
+  afterAll(async () => {
+    // Clean up all test data
+    await cleanupS3(client);
+    client.destroy();
+  }, 30000);
+
+  it("insert: 100 records individually", async () => {
+    const N = 100;
+    const backend = new S3Backend({ bucket: BUCKET, prefix: `${PREFIX}/insert-single`, client });
+    const store = new Store<Record<string, unknown>>();
+    const col = new Collection("bench", store);
+    await col.open("s3", { checkpointThreshold: 5000, backend });
+
+    const result = await benchAsync(`S3 insert ${N} records`, async () => {
+      for (let i = 0; i < N; i++) {
+        await col.insert(randomRecord(i));
+      }
+    }, N);
+
+    console.log(`  ${result.name}: ${result.totalMs}ms (${result.opsPerSec} ops/sec, ${result.avgMs}ms/op)`);
+    expect(col.count()).toBe(N);
+    await col.close();
+  }, 120000);
+
+  it("insert: 100 records via batch", async () => {
+    const N = 100;
+    const backend = new S3Backend({ bucket: BUCKET, prefix: `${PREFIX}/insert-batch`, client });
+    const store = new Store<Record<string, unknown>>();
+    const col = new Collection("bench", store);
+    await col.open("s3", { checkpointThreshold: 5000, backend });
+
+    const records = Array.from({ length: N }, (_, i) => randomRecord(i));
+    const result = await benchAsync(`S3 batch insert ${N} records`, async () => {
+      await col.insertMany(records);
+    }, N);
+
+    console.log(`  ${result.name}: ${result.totalMs}ms (${result.opsPerSec} ops/sec)`);
+    expect(col.count()).toBe(N);
+    await col.close();
+  }, 60000);
+
+  it("find: queries on 100 records (in-memory after load)", async () => {
+    const N = 100;
+    const backend = new S3Backend({ bucket: BUCKET, prefix: `${PREFIX}/find`, client });
+    const store = new Store<Record<string, unknown>>();
+    const col = new Collection("bench", store);
+    await col.open("s3", { checkpointThreshold: 5000, backend });
+    await col.insertMany(Array.from({ length: N }, (_, i) => randomRecord(i)));
+
+    const QUERIES = 100;
+    const start = performance.now();
+    for (let i = 0; i < QUERIES; i++) {
+      col.find({ filter: { role: "admin", active: true } });
+    }
+    const elapsed = performance.now() - start;
+
+    console.log(`  S3 find (${QUERIES} queries on ${N} records, in-memory): ${(elapsed / QUERIES).toFixed(3)}ms/query`);
+    expect(elapsed / QUERIES).toBeLessThan(5);
+    await col.close();
+  }, 60000);
+
+  it("cold start: open store with 100 records from S3", async () => {
+    // First, write data
+    const backend1 = new S3Backend({ bucket: BUCKET, prefix: `${PREFIX}/cold-start`, client });
+    const store1 = new Store<Record<string, unknown>>();
+    const col1 = new Collection("bench", store1);
+    await col1.open("s3", { checkpointThreshold: 5000, backend: backend1 });
+    await col1.insertMany(Array.from({ length: 100 }, (_, i) => randomRecord(i)));
+    await col1.close();
+
+    // Now measure cold start
+    const backend2 = new S3Backend({ bucket: BUCKET, prefix: `${PREFIX}/cold-start`, client });
+    const result = await benchAsync("S3 cold start (100 records)", async () => {
+      const store2 = new Store<Record<string, unknown>>();
+      const col2 = new Collection("bench", store2);
+      await col2.open("s3", { checkpointThreshold: 5000, backend: backend2 });
+      expect(col2.count()).toBe(100);
+      await col2.close();
+    });
+
+    console.log(`  ${result.name}: ${result.totalMs}ms`);
+  }, 60000);
+
+  it("undo: 10 operations on S3", async () => {
+    const backend = new S3Backend({ bucket: BUCKET, prefix: `${PREFIX}/undo`, client });
+    const store = new Store<Record<string, unknown>>();
+    const col = new Collection("bench", store);
+    await col.open("s3", { checkpointThreshold: 5000, backend });
+
+    for (let i = 0; i < 10; i++) {
+      await col.insert(randomRecord(i));
+    }
+
+    const N = 10;
+    const result = await benchAsync(`S3 undo ${N} operations`, async () => {
+      for (let i = 0; i < N; i++) {
+        await col.undo();
+      }
+    }, N);
+
+    console.log(`  ${result.name}: ${result.avgMs}ms/undo (${result.opsPerSec} ops/sec)`);
+    expect(col.count()).toBe(0);
+    await col.close();
+  }, 60000);
+
+  it("compact: checkpoint 100 records to S3 snapshot", async () => {
+    const backend = new S3Backend({ bucket: BUCKET, prefix: `${PREFIX}/compact`, client });
+    const store = new Store<Record<string, unknown>>();
+    await store.open("s3", { checkpointThreshold: 5000, backend });
+
+    for (let i = 0; i < 100; i++) {
+      await store.set(`rec-${i}`, randomRecord(i));
+    }
+
+    const result = await benchAsync("S3 compact (100 records)", async () => {
+      await store.compact();
+    });
+
+    console.log(`  ${result.name}: ${result.totalMs}ms`);
+    await store.close();
+  }, 60000);
+
+  it("prints S3 vs filesystem comparison", () => {
+    console.log("\n  === S3 vs Filesystem Comparison ===");
+    console.log("  S3 latency is dominated by HTTP round-trips (~50-200ms per PutObject).");
+    console.log("  Batch operations amortize this (1 PutObject per batch vs N for individual).");
+    console.log("  Read queries are in-memory after initial load — same speed as filesystem.");
+    console.log("  Cold start depends on snapshot + WAL size and S3 GetObject latency.\n");
+    expect(true).toBe(true);
+  });
+});
