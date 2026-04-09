@@ -67,12 +67,11 @@ Framework-agnostic. Each tool has a zod schema and an `execute` function that re
 ### 3. MCP Server
 
 ```bash
-npx agentdb --path ./data
+npx agentdb --path ./data              # stdio (single client)
+npx agentdb --path ./data --http       # HTTP (multiple clients)
 ```
 
-Runs AgentDB as an MCP server over stdio. All 16 tools are exposed as MCP tools.
-
-Claude Code config (`~/.claude/settings.json`):
+All 24 tools exposed as MCP tools. Claude Code config (`~/.claude/settings.json`):
 
 ```json
 {
@@ -84,6 +83,47 @@ Claude Code config (`~/.claude/settings.json`):
   }
 }
 ```
+
+## S3 Backend
+
+Store data in Amazon S3 instead of the local filesystem. Zero code changes — just configure via CLI flags or environment variables.
+
+### CLI flags
+
+```bash
+npx agentdb --backend s3 --bucket my-bucket --region us-east-1
+npx agentdb --backend s3 --bucket my-bucket --prefix prod/agentdb --http --port 3000
+npx agentdb --backend s3 --bucket my-bucket --agent-id agent-1  # multi-writer
+```
+
+### Environment variables
+
+```bash
+AGENTDB_BACKEND=s3
+AGENTDB_S3_BUCKET=my-bucket
+AGENTDB_S3_PREFIX=agentdb        # optional key prefix
+AWS_REGION=us-east-1
+AGENTDB_AGENT_ID=agent-1         # optional multi-writer
+npx agentdb
+```
+
+### Library usage
+
+```typescript
+import { AgentDB, S3Backend } from "@backloghq/agentdb";
+
+const db = new AgentDB("mydb", {
+  backend: new S3Backend({
+    bucket: "my-bucket",
+    prefix: "agentdb",
+    region: "us-east-1",
+  }),
+  agentId: "agent-1",  // optional: enables multi-writer
+});
+await db.init();
+```
+
+AWS credentials use the standard SDK chain (env vars, IAM role, `~/.aws/config`). The AWS SDK is only loaded when S3 is configured — filesystem users never pay the cost.
 
 ## Filter Syntax
 
@@ -161,7 +201,7 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 
 ## Tool Definitions
 
-`getTools(db)` returns 16 tools:
+`getTools(db)` returns 24 tools:
 
 | Tool | Description |
 |------|-------------|
@@ -170,19 +210,27 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 | `db_drop` | Soft-delete a collection |
 | `db_purge` | Permanently delete a dropped collection |
 | `db_insert` | Insert one or more records |
-| `db_find` | Query with filter, pagination, summary mode |
+| `db_find` | Query with filter, pagination, summary mode, token budget |
 | `db_find_one` | Get a single record by ID |
 | `db_update` | Update matching records ($set, $unset, $inc, $push) |
 | `db_upsert` | Insert or update by ID |
 | `db_delete` | Delete matching records |
 | `db_count` | Count matching records |
+| `db_batch` | Execute multiple mutations atomically |
 | `db_undo` | Undo last mutation |
 | `db_history` | Mutation history for a record |
 | `db_schema` | Inspect record shape (fields, types, examples) |
 | `db_distinct` | Unique values for a field |
 | `db_stats` | Database-level statistics |
+| `db_archive` | Move records to cold storage |
+| `db_archive_list` | List archive segments |
+| `db_archive_load` | View archived records |
+| `db_semantic_search` | Search by meaning (requires embedding provider) |
+| `db_embed` | Manually trigger embedding |
+| `db_export` | Export collections as JSON backup |
+| `db_import` | Import from a JSON backup |
 
-Each tool returns `{ content: [{ type: "text", text: "..." }] }`. Errors return `{ isError: true, content: [...] }` -- they never throw across the tool boundary.
+Each tool returns `{ content: [{ type: "text", text: "..." }] }`. Errors return `{ isError: true, content: [...] }` — they never throw across the tool boundary.
 
 ## Agent Identity
 
