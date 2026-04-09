@@ -1308,17 +1308,45 @@ describe("Collection", () => {
         { _id: "1", name: "Charlie", score: 30 },
         { _id: "2", name: "Alice", score: 10 },
         { _id: "3", name: "Bob", score: 20 },
+        { _id: "4", score: 5 }, // no name — should sort to end
       ]);
     });
 
     it("sorts ascending by field", () => {
       const result = col.find({ sort: "name" });
-      expect(result.records.map((r) => r.name)).toEqual(["Alice", "Bob", "Charlie"]);
+      const names = result.records.map((r) => r.name);
+      expect(names.slice(0, 3)).toEqual(["Alice", "Bob", "Charlie"]);
     });
 
     it("sorts descending with - prefix", () => {
       const result = col.find({ sort: "-score" });
-      expect(result.records.map((r) => r.score)).toEqual([30, 20, 10]);
+      expect(result.records.map((r) => r.score)).toEqual([30, 20, 10, 5]);
+    });
+
+    it("null/undefined values sort to end", () => {
+      const result = col.find({ sort: "name" });
+      // Record with no name should be last
+      expect(result.records[result.records.length - 1]._id).toBe("4");
+    });
+  });
+
+  describe("error paths", () => {
+    beforeEach(async () => {
+      await col.insert({ _id: "e1", name: "Alice", score: 10, tags: ["a"] });
+    });
+
+    it("$inc on non-numeric field throws", async () => {
+      await expect(col.update({ _id: "e1" }, { $inc: { name: 1 } })).rejects.toThrow("not a number");
+    });
+
+    it("$push on non-array field throws", async () => {
+      await expect(col.update({ _id: "e1" }, { $push: { name: "x" } })).rejects.toThrow("not an array");
+    });
+
+    it("duplicate _id insert overwrites", async () => {
+      await col.insert({ _id: "e1", name: "Updated" });
+      expect(col.findOne("e1")?.name).toBe("Updated");
+      expect(col.findOne("e1")?._version).toBe(2);
     });
   });
 

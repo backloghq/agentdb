@@ -623,7 +623,8 @@ export class Collection {
 
     const total = records.length;
     const sliced = records.slice(offset, offset + limit);
-    const allAccessor = this.allCleanRecords();
+    // Only materialize allCleanRecords if computed fields exist (avoids O(n) allocation)
+    const allAccessor = this.opts.computed ? this.allCleanRecords() : () => [];
     const mapped: Record<string, unknown>[] = [];
     let tokenCount = 0;
     let tokenTruncated = false;

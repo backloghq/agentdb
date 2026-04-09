@@ -15,7 +15,7 @@ npm run test:coverage  # vitest coverage
 
 ## Coding Conventions
 
-- Zero native dependencies — pure TypeScript, only Node.js built-ins + opslog
+- Zero native dependencies — pure TypeScript/JS. Core uses opslog only; tools add zod; MCP adds express, jose, @modelcontextprotocol/sdk
 - Always use conventional commits: `type(scope): description`
 - Always look up library/framework docs via Context7 before using APIs
 - Lint before committing — all code must pass eslint

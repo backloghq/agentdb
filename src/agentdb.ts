@@ -71,6 +71,7 @@ export class AgentDB {
   private open: Map<string, Collection> = new Map();
   private opening: Map<string, Promise<Collection>> = new Map();
   private collectionOpts: Map<string, CollectionOptions> = new Map();
+  private collectionListeners: Map<string, () => void> = new Map();
   private embeddingProvider: EmbeddingProvider | null = null;
   private permissions: PermissionManager;
   private memoryMonitor: MemoryMonitor;
@@ -186,9 +187,11 @@ export class AgentDB {
     this.open.set(name, col);
     this.touchLru(name);
 
-    // Track memory usage
+    // Track memory usage + store listener for cleanup on eviction
     this.trackMemory(name, col);
-    col.on("change", () => this.trackMemory(name, col));
+    const listener = () => this.trackMemory(name, col);
+    col.on("change", listener);
+    this.collectionListeners.set(name, listener);
 
     // Track in meta if new
     if (!this.meta.collections.includes(name)) {
@@ -349,6 +352,10 @@ export class AgentDB {
     const evict = this.lru.shift()!;
     const col = this.open.get(evict);
     if (col) {
+      // Remove listener before closing to prevent leak
+      const listener = this.collectionListeners.get(evict);
+      if (listener) col.off("change", listener);
+      this.collectionListeners.delete(evict);
       await col.close();
       this.open.delete(evict);
     }
