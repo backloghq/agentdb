@@ -7,6 +7,7 @@ export { parseCompactFilter } from "./compact-filter.js";
 
 export { Collection } from "./collection.js";
 export type {
+  Filter,
   MutationOpts,
   FindOpts,
   FindResult,

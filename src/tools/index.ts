@@ -37,9 +37,9 @@ function safe(fn: (args: Record<string, unknown>) => Promise<unknown>): (args: u
 const collectionParam = z.string().describe("Collection name");
 
 const filterParam = z
-  .record(z.unknown())
+  .union([z.record(z.unknown()), z.string()])
   .optional()
-  .describe("Filter object (MongoDB-style). E.g. {role: 'admin'}, {age: {$gt: 18}}");
+  .describe("Filter: JSON object ({role: 'admin'}) or compact string ('role:admin age.gt:18')");
 
 const mutationOpts = {
   agent: z.string().optional().describe("Agent identity — who is making this change"),
@@ -161,7 +161,7 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Update records matching a filter. Supports $set, $unset, $inc, $push operators.",
       schema: z.object({
         collection: collectionParam,
-        filter: z.record(z.unknown()).describe("Filter to match records"),
+        filter: z.union([z.record(z.unknown()), z.string()]).describe("Filter: JSON object or compact string"),
         update: z.object({
           $set: z.record(z.unknown()).optional(),
           $unset: z.record(z.unknown()).optional(),

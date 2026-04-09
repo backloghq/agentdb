@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Store } from "@backloghq/opslog";
 import type { Operation } from "@backloghq/opslog";
 import { compileFilter } from "./filter.js";
+import { parseCompactFilter } from "./compact-filter.js";
 
 // Internal record type — what's stored in opslog
 type StoredRecord = Record<string, unknown>;
@@ -14,16 +15,30 @@ export interface MutationOpts {
   reason?: string;
 }
 
+/** Filter can be a JSON object or a compact string. */
+export type Filter = Record<string, unknown> | string | null | undefined;
+
 /** Options for find queries. */
 export interface FindOpts {
-  /** Filter expression (JSON object). */
-  filter?: Record<string, unknown> | null;
+  /** Filter expression (JSON object or compact string like "role:admin age.gt:18"). */
+  filter?: Filter;
   /** Max records to return. */
   limit?: number;
   /** Skip N records. */
   offset?: number;
   /** Return summary fields only (short-valued fields, omit long text). */
   summary?: boolean;
+}
+
+/** Resolve a filter (string or object) into a compiled predicate. */
+function resolveFilter(filter: Filter): (record: Record<string, unknown>) => boolean {
+  if (filter === null || filter === undefined) return () => true;
+  if (typeof filter === "string") {
+    if (filter.trim() === "") return () => true;
+    return compileFilter(parseCompactFilter(filter));
+  }
+  if (Object.keys(filter).length === 0) return () => true;
+  return compileFilter(filter);
 }
 
 /** Result of a find query. */
@@ -209,18 +224,12 @@ export class Collection {
    * Find records matching a filter with pagination and summary mode.
    */
   find(opts?: FindOpts): FindResult {
-    const filter = opts?.filter;
     const limit = opts?.limit ?? 50;
     const offset = opts?.offset ?? 0;
     const useSummary = opts?.summary ?? false;
 
-    let records: StoredRecord[];
-    if (filter === null || filter === undefined || Object.keys(filter).length === 0) {
-      records = this.store.all();
-    } else {
-      const predicate = compileFilter(filter);
-      records = this.store.filter((value) => predicate(stripMeta(value)));
-    }
+    const predicate = resolveFilter(opts?.filter);
+    const records = this.store.filter((value) => predicate(stripMeta(value)));
 
     const total = records.length;
     const sliced = records.slice(offset, offset + limit);
@@ -239,19 +248,16 @@ export class Collection {
   /**
    * Count records matching a filter.
    */
-  count(filter?: Record<string, unknown> | null): number {
-    if (filter === null || filter === undefined || Object.keys(filter).length === 0) {
-      return this.store.count();
-    }
-    const predicate = compileFilter(filter);
+  count(filter?: Filter): number {
+    const predicate = resolveFilter(filter);
     return this.store.count((value) => predicate(stripMeta(value)));
   }
 
   /**
    * Update records matching a filter. Returns number of modified records.
    */
-  async update(filter: Record<string, unknown>, update: UpdateOps, opts?: MutationOpts): Promise<number> {
-    const predicate = compileFilter(filter);
+  async update(filter: Filter, update: UpdateOps, opts?: MutationOpts): Promise<number> {
+    const predicate = resolveFilter(filter);
     const matches: [string, StoredRecord][] = [];
     for (const [id, value] of this.store.entries()) {
       if (predicate(stripMeta(value))) {
@@ -293,8 +299,8 @@ export class Collection {
   /**
    * Delete records matching a filter. Returns number of deleted records.
    */
-  async remove(filter: Record<string, unknown>, opts?: MutationOpts): Promise<number> {
-    const predicate = compileFilter(filter);
+  async remove(filter: Filter, opts?: MutationOpts): Promise<number> {
+    const predicate = resolveFilter(filter);
     const toDelete: string[] = [];
     for (const [id, value] of this.store.entries()) {
       if (predicate(stripMeta(value))) {

@@ -172,6 +172,47 @@ describe("Collection", () => {
     });
   });
 
+  describe("string filters", () => {
+    beforeEach(async () => {
+      await col.insertMany([
+        { _id: "1", name: "Alice", role: "admin", age: 30 },
+        { _id: "2", name: "Bob", role: "user", age: 25 },
+        { _id: "3", name: "Charlie", role: "admin", age: 45 },
+      ]);
+    });
+
+    it("find with compact string filter", () => {
+      const result = col.find({ filter: "role:admin" });
+      expect(result.total).toBe(2);
+    });
+
+    it("find with compound string filter", () => {
+      const result = col.find({ filter: "role:admin age.gt:35" });
+      expect(result.total).toBe(1);
+      expect(result.records[0].name).toBe("Charlie");
+    });
+
+    it("count with string filter", () => {
+      expect(col.count("role:admin")).toBe(2);
+    });
+
+    it("update with string filter", async () => {
+      const modified = await col.update("role:admin", { $set: { verified: true } });
+      expect(modified).toBe(2);
+    });
+
+    it("remove with string filter", async () => {
+      const deleted = await col.remove("role:user");
+      expect(deleted).toBe(1);
+      expect(col.count()).toBe(2);
+    });
+
+    it("find with or string filter", () => {
+      const result = col.find({ filter: "(role:admin or age:25)" });
+      expect(result.total).toBe(3);
+    });
+  });
+
   describe("count", () => {
     beforeEach(async () => {
       await col.insertMany([
