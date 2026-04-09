@@ -1,0 +1,223 @@
+# AgentDB
+
+AI-first embedded database for LLM agents. Zero native dependencies, pure TypeScript.
+
+## Install
+
+```bash
+npm install @backloghq/agentdb
+```
+
+## Quick Start
+
+```typescript
+import { AgentDB } from "@backloghq/agentdb";
+
+const db = new AgentDB("./data");
+await db.init();
+
+const tasks = await db.collection("tasks");
+
+// Insert
+const id = await tasks.insert(
+  { title: "Ship v1", status: "active", priority: 1 },
+  { agent: "planner", reason: "Sprint kickoff" },
+);
+
+// Find
+const result = tasks.find({ filter: { status: "active" } });
+// → { records: [...], total: 1, truncated: false }
+
+// Update
+await tasks.update(
+  { _id: id },
+  { $set: { status: "done" } },
+  { agent: "planner", reason: "Completed" },
+);
+
+// Clean up
+await db.close();
+```
+
+## Three Ways to Use It
+
+### 1. Direct Import
+
+```typescript
+import { AgentDB } from "@backloghq/agentdb";
+```
+
+Full programmatic access. Use `AgentDB` to manage collections, `Collection` for CRUD.
+
+### 2. Tool Definitions
+
+```typescript
+import { AgentDB } from "@backloghq/agentdb";
+import { getTools } from "@backloghq/agentdb/tools";
+
+const db = new AgentDB("./data");
+await db.init();
+
+const tools = getTools(db);
+// → Array of { name, description, schema, annotations, execute }
+```
+
+Framework-agnostic. Each tool has a zod schema and an `execute` function that returns `{ content: [...] }`. Works with Vercel AI SDK, LangChain, or any framework that accepts tool definitions.
+
+### 3. MCP Server
+
+```bash
+npx agentdb --path ./data
+```
+
+Runs AgentDB as an MCP server over stdio. All 16 tools are exposed as MCP tools.
+
+Claude Code config (`~/.claude/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "agentdb": {
+      "command": "npx",
+      "args": ["agentdb", "--path", "/absolute/path/to/data"]
+    }
+  }
+}
+```
+
+## Filter Syntax
+
+Two syntaxes. JSON is primary, compact string is secondary.
+
+### JSON Filters
+
+```typescript
+// Equality (implicit)
+tasks.find({ filter: { status: "active" } });
+
+// Comparison operators
+tasks.find({ filter: { priority: { $gt: 3 } } });
+
+// Dot-notation for nested fields
+tasks.find({ filter: { "metadata.tags": { $contains: "urgent" } } });
+
+// Logical operators
+tasks.find({
+  filter: {
+    $or: [{ status: "active" }, { priority: { $gte: 5 } }],
+  },
+});
+```
+
+**Operators:** `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$contains`, `$startsWith`, `$endsWith`, `$exists`, `$regex`, `$not`
+
+Top-level keys are implicitly ANDed.
+
+### Compact String Filters
+
+Shorthand for tool calls and quick queries:
+
+```
+status:active                          → { status: "active" }
+status:active priority.gt:3           → { $and: [{ status: "active" }, { priority: { $gt: 3 } }] }
+name.contains:alice                    → { name: { $contains: "alice" } }
+(role:admin or role:mod)               → { $or: [{ role: "admin" }, { role: "mod" }] }
+tags.in:bug,feature                    → { tags: { $in: ["bug", "feature"] } }
+```
+
+Modifier aliases: `gt`, `gte`, `lt`, `lte`, `ne`, `contains`, `has`, `startsWith`, `starts`, `endsWith`, `ends`, `in`, `nin`, `exists`, `regex`, `match`, `eq`, `is`, `not`, `after`, `before`, `above`, `below`, `over`, `under`
+
+## Collection API
+
+```typescript
+const col = await db.collection("tasks");
+
+// Insert
+const id = await col.insert(doc, opts?);
+const ids = await col.insertMany(docs, opts?);
+
+// Read
+const record = col.findOne(id);
+const result = col.find({ filter?, limit?, offset?, summary? });
+const n = col.count(filter?);
+
+// Update
+const modified = await col.update(filter, { $set?, $unset?, $inc?, $push? }, opts?);
+const { id, action } = await col.upsert(id, doc, opts?);
+
+// Delete
+const deleted = await col.remove(filter, opts?);
+
+// History
+const undone = await col.undo();
+const ops = col.history(id);
+
+// Inspect
+const shape = col.schema(sampleSize?);
+const uniq = col.distinct(field);
+```
+
+All mutation methods accept `opts?: { agent?: string; reason?: string }`.
+
+## Tool Definitions
+
+`getTools(db)` returns 16 tools:
+
+| Tool | Description |
+|------|-------------|
+| `db_collections` | List all collections with record counts |
+| `db_create` | Create a collection (idempotent) |
+| `db_drop` | Soft-delete a collection |
+| `db_purge` | Permanently delete a dropped collection |
+| `db_insert` | Insert one or more records |
+| `db_find` | Query with filter, pagination, summary mode |
+| `db_find_one` | Get a single record by ID |
+| `db_update` | Update matching records ($set, $unset, $inc, $push) |
+| `db_upsert` | Insert or update by ID |
+| `db_delete` | Delete matching records |
+| `db_count` | Count matching records |
+| `db_undo` | Undo last mutation |
+| `db_history` | Mutation history for a record |
+| `db_schema` | Inspect record shape (fields, types, examples) |
+| `db_distinct` | Unique values for a field |
+| `db_stats` | Database-level statistics |
+
+Each tool returns `{ content: [{ type: "text", text: "..." }] }`. Errors return `{ isError: true, content: [...] }` -- they never throw across the tool boundary.
+
+## Agent Identity
+
+Every mutation accepts `agent` and `reason`. These are stored internally and visible in history, but stripped from query results.
+
+```typescript
+await col.insert(
+  { title: "Fix login bug" },
+  { agent: "triage-bot", reason: "Auto-filed from error spike" },
+);
+
+// History shows who did what and why
+col.history(id);
+// → [{ type: "set", key: "...", value: { ..., _agent: "triage-bot", _reason: "..." }, ... }]
+```
+
+## Progressive Disclosure
+
+Use `summary: true` on find to get compact results. Omits long text fields (>200 chars), nested objects, and large arrays (>10 items). Useful for agents scanning many records before drilling into one.
+
+```typescript
+col.find({ filter: { status: "active" }, summary: true });
+```
+
+## Development
+
+```bash
+npm run build          # tsc
+npm run lint           # eslint src/ tests/
+npm test               # vitest run
+npm run test:coverage  # vitest coverage
+```
+
+Built on [@backloghq/opslog](https://github.com/backloghq/opslog) -- every mutation is an operation in an append-only log. You get crash safety, undo, and audit trails for free.
+
+## License
+
+MIT
