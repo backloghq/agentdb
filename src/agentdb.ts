@@ -43,6 +43,8 @@ export interface AgentDBOptions {
   groupCommitSize?: number;
   /** Group commit: flush after N ms (default: 100). */
   groupCommitMs?: number;
+  /** Open in read-only mode. Skips write locks, rejects mutations. Safe to run alongside a writer. */
+  readOnly?: boolean;
 }
 
 export interface CollectionInfo {
@@ -90,6 +92,7 @@ export class AgentDB {
       writeMode: opts?.writeMode,
       groupCommitSize: opts?.groupCommitSize,
       groupCommitMs: opts?.groupCommitMs,
+      readOnly: opts?.readOnly,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -182,6 +185,7 @@ export class AgentDB {
       writeMode: this.opts.writeMode,
       groupCommitSize: this.opts.groupCommitSize,
       groupCommitMs: this.opts.groupCommitMs,
+      readOnly: this.opts.readOnly,
     });
 
     this.open.set(name, col);

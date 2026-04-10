@@ -312,6 +312,17 @@ const db = new AgentDB("./data", { writeMode: "group" });
 
 **Tradeoff:** A crash can lose buffered ops (up to 100ms of data). Default `"immediate"` mode is safe — every write survives a crash.
 
+### Read-only mode
+
+Open a read-only instance alongside a running writer — no write locks, safe for dashboards and monitoring:
+
+```typescript
+const reader = new AgentDB("./data", { readOnly: true });
+await reader.init();
+const col = await reader.collection("tasks");
+await col.tail(); // pick up latest writes
+```
+
 ### Embeddings and vector search
 
 AgentDB supports semantic search via embedding providers and explicit vector storage.

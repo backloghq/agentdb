@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **HNSW MaxHeap** — search queue uses binary MaxHeap (O(log n) extract) instead of sorted array + shift (O(n log n + n)). Candidates use binary insert. Preserves >70% recall quality.
 
 ### Changed
+- **`readOnly` mode** — `new AgentDB(dir, { readOnly: true })` opens without write locks, rejects mutations. Safe to run alongside a writer process. Used by the live dashboard demo.
 - **Zod v4** — upgraded from zod 3.25 to 4.3. `z.record()` calls updated to include key type (`z.record(z.string(), z.unknown())`). `.describe()` still works (backward compat).
 - **JSON import** — replaced `createRequire` hack with `import pkg from "../package.json" with { type: "json" }` (Node 20.10+ / TS 6.0).
 - **tsconfig** — removed redundant `esModuleInterop` (TS 6.0 default), added `resolveJsonModule`.

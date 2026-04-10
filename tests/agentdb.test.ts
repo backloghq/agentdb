@@ -293,4 +293,67 @@ describe("AgentDB", () => {
       expect(stats.totalRecords).toBe(3);
     });
   });
+
+  describe("readOnly mode", () => {
+    it("opens without write lock and reads data from a writer", async () => {
+      // Writer inserts data
+      const col = await db.collection("items");
+      await col.insert({ _id: "a", name: "Alice" });
+      await col.insert({ _id: "b", name: "Bob" });
+      await db.close();
+
+      // Reader opens read-only
+      const reader = new AgentDB(tmpDir, { readOnly: true });
+      await reader.init();
+
+      const items = await reader.collection("items");
+      expect(items.count()).toBe(2);
+      expect(items.findOne("a")?.name).toBe("Alice");
+
+      await reader.close();
+
+      // Reopen writer for afterEach cleanup
+      db = new AgentDB(tmpDir);
+      await db.init();
+    });
+
+    it("read-only rejects mutations", async () => {
+      // Create a collection first so readOnly has something to open
+      const col = await db.collection("test");
+      await col.insert({ _id: "x", name: "seed" });
+      await db.close();
+
+      const reader = new AgentDB(tmpDir, { readOnly: true });
+      await reader.init();
+
+      const readCol = await reader.collection("test");
+      await expect(readCol.insert({ name: "fail" })).rejects.toThrow("read-only");
+
+      await reader.close();
+
+      db = new AgentDB(tmpDir);
+      await db.init();
+    });
+
+    it("read-only can tail new writes from a writer", async () => {
+      const col = await db.collection("items");
+      await col.insert({ _id: "a", name: "Alice" });
+
+      // Open reader
+      const reader = new AgentDB(tmpDir, { readOnly: true });
+      await reader.init();
+      const readerCol = await reader.collection("items");
+      expect(readerCol.count()).toBe(1);
+
+      // Writer adds more
+      await col.insert({ _id: "b", name: "Bob" });
+
+      // Reader tails
+      await readerCol.tail();
+      expect(readerCol.count()).toBe(2);
+      expect(readerCol.findOne("b")?.name).toBe("Bob");
+
+      await reader.close();
+    });
+  });
 });
