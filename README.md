@@ -1,5 +1,8 @@
 # AgentDB
 
+[![CI](https://github.com/backloghq/agentdb/actions/workflows/ci.yml/badge.svg)](https://github.com/backloghq/agentdb/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 AI-first embedded database for LLM agents. Zero native dependencies, pure TypeScript.
 
 ## Install
@@ -71,7 +74,7 @@ npx agentdb --path ./data              # stdio (single client)
 npx agentdb --path ./data --http       # HTTP (multiple clients)
 ```
 
-All 24 tools exposed as MCP tools. Claude Code config (`~/.claude/settings.json`):
+All 26 tools exposed as MCP tools (28 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
 
 ```json
 {
@@ -202,7 +205,7 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 
 ## Tool Definitions
 
-`getTools(db)` returns 24 tools:
+`getTools(db)` returns 26 tools:
 
 | Tool | Description |
 |------|-------------|
@@ -228,6 +231,8 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 | `db_archive_load` | View archived records |
 | `db_semantic_search` | Search by meaning (requires embedding provider) |
 | `db_embed` | Manually trigger embedding |
+| `db_vector_upsert` | Store a pre-computed vector with metadata |
+| `db_vector_search` | Search by raw vector (no embedding provider needed) |
 | `db_export` | Export collections as JSON backup |
 | `db_import` | Import from a JSON backup |
 

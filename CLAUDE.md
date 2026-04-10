@@ -39,6 +39,7 @@ agentdb/mcp      — MCP server adapter (stdio + HTTP/Streamable transport)
 ```
 src/
   index.ts              # Core exports
+  auth-context.ts       # Shared auth identity (AsyncLocalStorage) — used by tools + mcp
   agentdb.ts            # AgentDB class: collection manager, lazy loading, LRU, memory monitor
   collection.ts         # Collection: CRUD, middleware, search, views, TTL, tailing (~1130 lines)
   collection-helpers.ts # Pure utilities: stripMeta, isExpired, applyUpdate, compositeKey, filter cache
