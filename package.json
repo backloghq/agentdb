@@ -18,7 +18,7 @@
     }
   },
   "bin": {
-    "agentdb": "./dist/mcp/cli.js"
+    "agentdb": "dist/mcp/cli.js"
   },
   "scripts": {
     "build": "tsc",
