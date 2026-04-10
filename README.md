@@ -414,6 +414,12 @@ See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed deployment guidance:
 
 **Default recommendation: HTTP server.** Use the library directly for maximum performance, stdio MCP for single-agent, HTTP MCP for multi-agent.
 
+## Examples
+
+See [examples/](./examples/) for runnable demos:
+
+- **[Multi-Agent Task Board](./examples/multi-agent/)** — Multiple AI agents (Ollama) collaborate on a shared task board via HTTP MCP. Event-driven with NOTIFY/LISTEN, optimistic locking, per-agent auth.
+
 ## Development
 
 ```bash
