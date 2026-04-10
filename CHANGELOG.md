@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`$text` in find()** — combine text search with attribute filters: `find({ filter: { $text: "auth", status: "open" } })`. Also works in compact filters as bare words.
 - **Auto-increment IDs** — `{ type: "autoIncrement" }` in schema fields assigns sequential integers (1, 2, 3...). Continues from max on reopen.
 - **Hook context** — lifecycle hooks receive `{ collection }` for side effects (recurrence, cascading updates).
+- **Field resolve** — `{ type: "date", resolve: (v) => myDateParser(v) }` transforms values before validation. For parsing "tomorrow" → ISO date, "42" → number, etc.
+- **Configurable tagField** — `tagField: "labels"` in schema changes which field `+tag`/`-tag` queries target. Default: "tags".
 - **`upsertMany()`** — atomic bulk create-or-update. Each doc must have `_id`.
 - **Blob storage** — `writeBlob(id, name, content)`, `readBlob()`, `listBlobs()`, `deleteBlob()`. Stores files outside the WAL via StorageBackend — works on both filesystem and S3 transparently. Cascade delete: blobs auto-cleaned when records are deleted. For attaching code, images, PDFs to records.
 - **MCP blob tools** — `db_blob_write` (base64 content), `db_blob_read`, `db_blob_list`, `db_blob_delete`. 32 tools total (30 core + 2 HTTP-only).

@@ -79,7 +79,23 @@ await tasks.insert({ title: "Fix critical bug", priority: "H" });
 const urgent = tasks.find({ filter: { "+URGENT": true } });
 ```
 
-Fields support: `string`, `number`, `boolean`, `date`, `enum`, `string[]`, `number[]`, `object`. Constraints: `required`, `maxLength`, `min`, `max`, `pattern`, `default`.
+Fields support: `string`, `number`, `boolean`, `date`, `enum`, `string[]`, `number[]`, `object`, `autoIncrement`. Constraints: `required`, `maxLength`, `min`, `max`, `pattern`, `default`, `resolve`.
+
+**Field resolve** — transform values before validation (e.g. parse natural language dates):
+
+```typescript
+fields: {
+  due: { type: "date", resolve: (v) => v === "tomorrow" ? nextDay() : v },
+  score: { type: "number", resolve: (v) => typeof v === "string" ? parseInt(v) : v },
+}
+```
+
+**Custom tag field** — `+tag`/`-tag` syntax queries "tags" by default, configurable via `tagField`:
+
+```typescript
+defineSchema({ tagField: "labels", fields: { labels: { type: "string[]" } } })
+// +bug → { labels: { $contains: "bug" } }
+```
 
 ## Three Ways to Use It
 

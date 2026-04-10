@@ -241,9 +241,9 @@ function parsePrimary(tokens: Token[], pos: { i: number }): FilterObject {
   if (token.type === "tag") {
     pos.i++;
     if (token.include) {
-      return { tags: { $contains: token.value } };
+      return { [_tagField]: { $contains: token.value } };
     } else {
-      return { tags: { $not: { $contains: token.value } } };
+      return { [_tagField]: { $not: { $contains: token.value } } };
     }
   }
 
@@ -300,7 +300,10 @@ function attrToFilter(field: string, modifier: string | null, rawValue: string):
  * parseCompactFilter("name.contains:alice age.gt:18")
  * // → { $and: [{ name: { $contains: "alice" } }, { age: { $gt: 18 } }] }
  */
-export function parseCompactFilter(input: string): FilterObject {
+let _tagField = "tags";
+
+export function parseCompactFilter(input: string, tagField = "tags"): FilterObject {
+  _tagField = tagField;
   const trimmed = input.trim();
   if (!trimmed) return {};
 

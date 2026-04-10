@@ -24,6 +24,8 @@ export interface FieldDef {
   max?: number;
   /** Regex pattern for strings. */
   pattern?: RegExp;
+  /** Transform value before validation (e.g. resolve "tomorrow" → ISO date string). */
+  resolve?: (value: unknown) => unknown;
 }
 
 // --- Hooks ---
@@ -65,6 +67,8 @@ export interface SchemaDefinition {
   hooks?: SchemaHooks;
   /** Enable full-text search. */
   textSearch?: boolean;
+  /** Array field name for +tag/-tag compact filter syntax. Default: "tags". */
+  tagField?: string;
 }
 
 // --- Compiled schema ---
@@ -81,6 +85,8 @@ export interface CollectionSchema {
   autoIncrementFields: string[];
   /** Shared counters for auto-increment fields. */
   counters: Map<string, number>;
+  /** Array field name for +tag/-tag compact filter. Default: "tags". */
+  tagField: string;
 }
 
 // --- Compile ---
@@ -129,6 +135,7 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     applyDefaults: defaults ?? ((r) => r),
     autoIncrementFields,
     counters,
+    tagField: def.tagField ?? "tags",
   };
 }
 
@@ -208,11 +215,18 @@ function compileFieldValidation(fields: Record<string, FieldDef>): (record: Reco
 function compileDefaults(fields: Record<string, FieldDef>, counters: Map<string, number>): (record: Record<string, unknown>) => Record<string, unknown> {
   const defaultEntries = Object.entries(fields).filter(([, def]) => def.default !== undefined);
   const autoIncrFields = Object.entries(fields).filter(([, def]) => def.type === "autoIncrement").map(([name]) => name);
+  const resolveEntries = Object.entries(fields).filter(([, def]) => def.resolve !== undefined);
 
-  if (defaultEntries.length === 0 && autoIncrFields.length === 0) return (r) => r;
+  if (defaultEntries.length === 0 && autoIncrFields.length === 0 && resolveEntries.length === 0) return (r) => r;
 
   return (record: Record<string, unknown>) => {
     const result = { ...record };
+    // Apply resolve functions first (transform before defaults/validation)
+    for (const [name, def] of resolveEntries) {
+      if (result[name] !== undefined && result[name] !== null) {
+        result[name] = def.resolve!(result[name]);
+      }
+    }
     for (const [name, def] of defaultEntries) {
       if (result[name] === undefined) {
         result[name] = typeof def.default === "function" ? (def.default as () => unknown)() : def.default;

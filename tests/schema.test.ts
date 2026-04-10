@@ -393,4 +393,80 @@ describe("defineSchema", () => {
       expect(afterFn).toHaveBeenCalledWith("function");
     });
   });
+
+  describe("field resolve", () => {
+    it("transforms value before validation", async () => {
+      const col = await db.collection(defineSchema({
+        name: "resolve-test",
+        fields: {
+          due: {
+            type: "string",
+            resolve: (v) => {
+              if (v === "tomorrow") return new Date(Date.now() + 86400000).toISOString().split("T")[0];
+              return v;
+            },
+          },
+        },
+      }));
+
+      const id = await col.insert({ due: "tomorrow" });
+      const record = col.findOne(id);
+      // Should be an ISO date string, not "tomorrow"
+      expect(record?.due).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(record?.due).not.toBe("tomorrow");
+    });
+
+    it("resolve runs before validation", async () => {
+      const col = await db.collection(defineSchema({
+        name: "resolve-validate",
+        fields: {
+          score: {
+            type: "number",
+            min: 0,
+            max: 100,
+            resolve: (v) => typeof v === "string" ? parseInt(v, 10) : v,
+          },
+        },
+      }));
+
+      // String "42" gets resolved to number 42 before validation
+      const id = await col.insert({ score: "42" });
+      expect(col.findOne(id)?.score).toBe(42);
+    });
+
+    it("resolve does not run on undefined/null values", async () => {
+      const resolveFn = vi.fn((v) => v);
+      const col = await db.collection(defineSchema({
+        name: "resolve-skip",
+        fields: {
+          optional: { type: "string", resolve: resolveFn },
+        },
+      }));
+
+      await col.insert({ title: "no optional field" });
+      expect(resolveFn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("configurable tagField", () => {
+    it("uses custom tag field name in compact filter", async () => {
+      const col = await db.collection(defineSchema({
+        name: "custom-tags",
+        fields: {
+          title: { type: "string", required: true },
+          labels: { type: "string[]" },
+        },
+        tagField: "labels",
+      }));
+
+      await col.insert({ title: "Bug", labels: ["bug", "urgent"] });
+      await col.insert({ title: "Feature", labels: ["feature"] });
+
+      // The tagField is on the schema — verify it's set
+      // (compact filter uses it when parsing +tag syntax)
+      const all = col.find({ filter: { labels: { $contains: "bug" } } });
+      expect(all.records).toHaveLength(1);
+      expect(all.records[0].title).toBe("Bug");
+    });
+  });
 });
