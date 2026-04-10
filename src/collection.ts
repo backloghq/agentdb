@@ -72,6 +72,8 @@ export interface CollectionOptions {
   virtualFilters?: Record<string, VirtualFilterFn>;
   /** Enable full-text search index. Automatically indexes all string fields. */
   textSearch?: boolean;
+  /** Array field name for +tag/-tag compact filter syntax. Default: "tags". */
+  tagField?: string;
 }
 
 /** Change event emitted after mutations. */
@@ -241,7 +243,7 @@ export class Collection {
 
   /** Resolve a filter with virtual filter support. */
   private resolve(filter: Filter): (record: Record<string, unknown>) => boolean {
-    return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter());
+    return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter(), this.opts.tagField);
   }
 
   /** Whether the underlying store is open. */
@@ -1122,19 +1124,23 @@ export class Collection {
   private static readonly BLOB_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
   private blobPath(recordId: string, name?: string): string {
+    if (recordId.includes("..") || recordId.includes("/") || recordId.includes("\\")) {
+      throw new Error(`Invalid record ID for blob operation: '${recordId}'`);
+    }
+    if (name !== undefined && (!Collection.BLOB_NAME_RE.test(name) || name.includes(".."))) {
+      throw new Error(`Invalid blob name '${name}'`);
+    }
     return name ? `${this.blobPrefix}/${recordId}/${name}` : `${this.blobPrefix}/${recordId}`;
   }
 
   /** Store a blob (text or binary) associated with a record. Backed by StorageBackend. */
   async writeBlob(recordId: string, name: string, content: Buffer | string): Promise<void> {
-    if (!Collection.BLOB_NAME_RE.test(name) || name.includes("..")) {
-      throw new Error(`Invalid blob name '${name}'`);
-    }
+    const path = this.blobPath(recordId, name); // validates recordId + name
     const record = this.store.get(recordId);
     if (!record) throw new Error(`Record '${recordId}' not found`);
 
     const buf = typeof content === "string" ? Buffer.from(content, "utf-8") : content;
-    await this.backend.writeBlob(this.blobPath(recordId, name), buf);
+    await this.backend.writeBlob(path, buf);
 
     // Update _blobs metadata
     const blobs = (record._blobs as string[]) ?? [];

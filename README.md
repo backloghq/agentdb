@@ -247,6 +247,7 @@ const n = col.count(filter?);
 // Update
 const modified = await col.update(filter, { $set?, $unset?, $inc?, $push? }, opts?);
 const { id, action } = await col.upsert(id, doc, opts?);
+const results = await col.upsertMany([{ _id, ...doc }, ...], opts?);
 
 // Delete
 const deleted = await col.remove(filter, opts?);

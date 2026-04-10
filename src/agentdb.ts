@@ -75,7 +75,7 @@ export class AgentDB {
   private opening: Map<string, Promise<Collection>> = new Map();
   private collectionOpts: Map<string, CollectionOptions> = new Map();
   private schemas: Map<string, CollectionSchema> = new Map();
-  private collectionListeners: Map<string, () => void> = new Map();
+  private collectionListeners: Map<string, (event: import("./collection.js").ChangeEvent) => void> = new Map();
   private embeddingProvider: EmbeddingProvider | null = null;
   private permissions: PermissionManager;
   private memoryMonitor: MemoryMonitor;
@@ -207,15 +207,13 @@ export class AgentDB {
     if (schema) {
       for (const field of schema.indexes) col.createIndex(field);
       for (const fields of schema.compositeIndexes) col.createCompositeIndex(fields);
-      // Initialize auto-increment counters from existing records
+      // Initialize auto-increment counters from existing records (sorted desc, limit 1)
       if (schema.autoIncrementFields.length > 0) {
-        for (const [, record] of col.find({ limit: 10000 }).records.entries()) {
-          for (const field of schema.autoIncrementFields) {
-            const val = record[field];
-            if (typeof val === "number") {
-              const current = schema.counters.get(field) ?? 0;
-              if (val > current) schema.counters.set(field, val);
-            }
+        for (const field of schema.autoIncrementFields) {
+          const top = col.find({ sort: `-${field}`, limit: 1 });
+          if (top.records.length > 0) {
+            const val = top.records[0][field];
+            if (typeof val === "number") schema.counters.set(field, val);
           }
         }
       }
@@ -232,21 +230,44 @@ export class AgentDB {
         if (schema.hooks.afterInsert) schema.hooks.afterInsert(id, record, ctx);
         return id;
       };
-      // Wire afterUpdate/afterDelete via change events
-      if (schema.hooks.afterUpdate || schema.hooks.afterDelete) {
-        col.on("change", (event) => {
-          if (event.type === "update" && schema.hooks.afterUpdate) schema.hooks.afterUpdate(event.ids, ctx);
-          if (event.type === "delete" && schema.hooks.afterDelete) schema.hooks.afterDelete(event.ids, ctx);
+      // Wrap upsertMany to apply defaults + hooks per doc
+      const originalUpsertMany = col.upsertMany.bind(col);
+      col.upsertMany = async (docs, opts?) => {
+        const processed = docs.map((doc) => {
+          let record = schema.applyDefaults(doc);
+          if (schema.hooks.beforeInsert) {
+            const modified = schema.hooks.beforeInsert(record, ctx);
+            if (modified) record = modified;
+          }
+          return record;
         });
-      }
+        const results = await originalUpsertMany(processed, opts);
+        if (schema.hooks.afterInsert) {
+          for (const r of results) {
+            if (r.action === "inserted") {
+              const record = col.findOne(r.id);
+              if (record) schema.hooks.afterInsert(r.id, record, ctx);
+            }
+          }
+        }
+        return results;
+      };
     }
 
     this.open.set(name, col);
     this.touchLru(name);
 
-    // Track memory usage + store listener for cleanup on eviction
+    // Track memory usage + schema hooks via single listener (cleaned up on eviction)
     this.trackMemory(name, col);
-    const listener = () => this.trackMemory(name, col);
+    const schemaHooks = schema?.hooks;
+    const schemaCtx = schema ? { collection: col } : undefined;
+    const listener = (event: import("./collection.js").ChangeEvent) => {
+      this.trackMemory(name, col);
+      if (schemaHooks && schemaCtx) {
+        if (event.type === "update" && schemaHooks.afterUpdate) schemaHooks.afterUpdate(event.ids, schemaCtx);
+        if (event.type === "delete" && schemaHooks.afterDelete) schemaHooks.afterDelete(event.ids, schemaCtx);
+      }
+    };
     col.on("change", listener);
     this.collectionListeners.set(name, listener);
 

@@ -124,6 +124,7 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     computed: def.computed,
     virtualFilters: def.virtualFilters,
     textSearch: def.textSearch,
+    tagField: def.tagField,
   };
 
   return {
@@ -224,7 +225,11 @@ function compileDefaults(fields: Record<string, FieldDef>, counters: Map<string,
     // Apply resolve functions first (transform before defaults/validation)
     for (const [name, def] of resolveEntries) {
       if (result[name] !== undefined && result[name] !== null) {
-        result[name] = def.resolve!(result[name]);
+        try {
+          result[name] = def.resolve!(result[name]);
+        } catch (err) {
+          throw new Error(`Field '${name}' resolve failed: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+        }
       }
     }
     for (const [name, def] of defaultEntries) {

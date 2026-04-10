@@ -332,6 +332,44 @@ describe("defineSchema", () => {
     });
   });
 
+  describe("upsertMany with schema", () => {
+    it("applies defaults and validation on upsertMany", async () => {
+      const afterFn = vi.fn();
+      const col = await db.collection(defineSchema({
+        name: "upsert-schema",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+        },
+        hooks: { afterInsert: afterFn },
+      }));
+
+      await col.upsertMany([
+        { _id: "u1", title: "First" },
+        { _id: "u2", title: "Second" },
+      ]);
+
+      // Defaults applied
+      expect(col.findOne("u1")?.status).toBe("open");
+      expect(col.findOne("u2")?.status).toBe("open");
+
+      // Hooks fired
+      expect(afterFn).toHaveBeenCalledTimes(2);
+    });
+
+    it("rejects invalid records in upsertMany", async () => {
+      const col = await db.collection(defineSchema({
+        name: "upsert-validate",
+        fields: {
+          title: { type: "string", required: true },
+        },
+      }));
+
+      // Missing required field
+      await expect(col.upsertMany([{ _id: "bad" }])).rejects.toThrow("'title' is required");
+    });
+  });
+
   describe("auto-increment IDs", () => {
     it("assigns sequential IDs on insert", async () => {
       const col = await db.collection(defineSchema({
@@ -467,6 +505,30 @@ describe("defineSchema", () => {
       const all = col.find({ filter: { labels: { $contains: "bug" } } });
       expect(all.records).toHaveLength(1);
       expect(all.records[0].title).toBe("Bug");
+    });
+
+    it("+tag compact filter uses custom tagField", async () => {
+      const col = await db.collection(defineSchema({
+        name: "custom-tags2",
+        fields: {
+          title: { type: "string", required: true },
+          labels: { type: "string[]" },
+        },
+        tagField: "labels",
+      }));
+
+      await col.insert({ title: "Bug", labels: ["bug", "urgent"] });
+      await col.insert({ title: "Feature", labels: ["feature"] });
+
+      // +bug compact string filter should query "labels" field, not "tags"
+      const results = col.find({ filter: "+bug" });
+      expect(results.records).toHaveLength(1);
+      expect(results.records[0].title).toBe("Bug");
+
+      // -bug should exclude
+      const excluded = col.find({ filter: "-bug" });
+      expect(excluded.records).toHaveLength(1);
+      expect(excluded.records[0].title).toBe("Feature");
     });
   });
 });

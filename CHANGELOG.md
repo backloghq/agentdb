@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Blob storage** — `writeBlob(id, name, content)`, `readBlob()`, `listBlobs()`, `deleteBlob()`. Stores files outside the WAL via StorageBackend — works on both filesystem and S3 transparently. Cascade delete: blobs auto-cleaned when records are deleted. For attaching code, images, PDFs to records.
 - **MCP blob tools** — `db_blob_write` (base64 content), `db_blob_read`, `db_blob_list`, `db_blob_delete`. 32 tools total (30 core + 2 HTTP-only).
 
+### Fixed
+- **Compact filter `tagField` propagation** — `+tag`/`-tag` syntax now correctly uses the schema's `tagField` setting. Previously always queried "tags" regardless of configuration.
+- **Blob path traversal** — `blobPath()` now validates both `recordId` and `name` centrally, rejecting `..`, `/`, `\` characters. Previously `readBlob`/`deleteBlob` skipped name validation.
+- **Auto-increment counter initialization** — uses `find({ sort: "-field", limit: 1 })` instead of scanning up to 10K records on collection open. O(n log 1) vs O(n).
+- **`upsertMany()` schema support** — now applies schema defaults, `beforeInsert`/`afterInsert` hooks. Previously bypassed schema wrapping.
+- **Compact filter thread safety** — removed module-level mutable `_tagField` state; `tagField` is now threaded as a parameter through the parser.
+- **Schema hook listener accumulation** — schema `afterUpdate`/`afterDelete` hooks merged into a single change listener with memory tracking; properly cleaned up on LRU eviction and close.
+- **`resolve()` error handling** — field resolve functions now wrapped in try-catch with clear error messages and `cause` chain; prevents uncaught throws from bypassing validation.
+
 ## [1.0.0] - 2026-04-10
 
 ### Performance

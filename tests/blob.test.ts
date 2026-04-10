@@ -79,6 +79,19 @@ describe("Blob storage", () => {
     expect(blobs).toEqual([]);
   });
 
+  it("rejects path traversal in blob name on read/delete", async () => {
+    const id = await col.insert({ title: "test" });
+    await expect(col.readBlob(id, "../../../etc/passwd")).rejects.toThrow("Invalid blob name");
+    await expect(col.deleteBlob(id, "../secret")).rejects.toThrow("Invalid blob name");
+  });
+
+  it("rejects path traversal in recordId", async () => {
+    await expect(col.writeBlob("../evil", "file.txt", "data")).rejects.toThrow("Invalid record ID");
+    await expect(col.readBlob("../../etc/passwd", "file.txt")).rejects.toThrow("Invalid record ID");
+    await expect(col.listBlobs("foo/../../bar")).rejects.toThrow("Invalid record ID");
+    await expect(col.deleteBlob("a\\b", "file.txt")).rejects.toThrow("Invalid record ID");
+  });
+
   it("cascade: deleteById removes blobs", async () => {
     await col.insert({ _id: "cascade2", title: "Another" });
     await col.writeBlob("cascade2", "file.txt", "data");
