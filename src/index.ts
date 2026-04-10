@@ -29,7 +29,7 @@ export async function loadS3Backend(): Promise<any> {
   return import("@backloghq/opslog-s3");
 }
 export { AgentDB } from "./agentdb.js";
-export { resolveProvider, OpenAIEmbeddingProvider, HttpEmbeddingProvider, OllamaEmbeddingProvider, VoyageEmbeddingProvider, CohereEmbeddingProvider } from "./embeddings/index.js";
+export { resolveProvider, OpenAIEmbeddingProvider, HttpEmbeddingProvider, OllamaEmbeddingProvider, VoyageEmbeddingProvider, CohereEmbeddingProvider, GeminiEmbeddingProvider } from "./embeddings/index.js";
 export type { EmbeddingProvider, EmbeddingConfig } from "./embeddings/index.js";
 export type {
   AgentDBOptions,

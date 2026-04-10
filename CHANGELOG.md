@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Ollama embedding provider** — local embeddings via Ollama API (`nomic-embed-text`). No API key required.
 - **Voyage AI embedding provider** — `voyage-3-lite` model. Batch API.
 - **Cohere embedding provider** — `embed-english-v3.0` with `input_type` support.
+- **Gemini embedding provider** — `gemini-embedding-001` with configurable output dimensionality. Free tier available.
 - **CLI `--embeddings` flag** — configure embedding provider from CLI (e.g. `--embeddings ollama`, `--embeddings openai:text-embedding-3-small`). Env: `AGENTDB_EMBEDDINGS`.
 - **Sort on find** — `sort: "name"` (ascending) or `sort: "-score"` (descending). Supports dot notation for nested fields.
 - **Max query limit** — `find()` enforces max 10,000 records per query to prevent memory exhaustion.

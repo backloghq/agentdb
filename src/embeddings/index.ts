@@ -4,6 +4,7 @@ export { HttpEmbeddingProvider } from "./http.js";
 export { OllamaEmbeddingProvider } from "./ollama.js";
 export { VoyageEmbeddingProvider } from "./voyage.js";
 export { CohereEmbeddingProvider } from "./cohere.js";
+export { GeminiEmbeddingProvider } from "./gemini.js";
 
 import type { EmbeddingProvider, EmbeddingConfig } from "./types.js";
 import { OpenAIEmbeddingProvider } from "./openai.js";
@@ -11,6 +12,7 @@ import { HttpEmbeddingProvider } from "./http.js";
 import { OllamaEmbeddingProvider } from "./ollama.js";
 import { VoyageEmbeddingProvider } from "./voyage.js";
 import { CohereEmbeddingProvider } from "./cohere.js";
+import { GeminiEmbeddingProvider } from "./gemini.js";
 
 /** Resolve an embedding config to a provider instance. */
 export function resolveProvider(config: EmbeddingConfig): EmbeddingProvider {
@@ -52,6 +54,14 @@ export function resolveProvider(config: EmbeddingConfig): EmbeddingProvider {
       model: config.model,
       baseUrl: config.baseUrl,
       inputType: config.inputType,
+      dimensions: config.dimensions,
+    });
+  }
+  if (config.provider === "gemini") {
+    return new GeminiEmbeddingProvider({
+      apiKey: config.apiKey,
+      model: config.model,
+      baseUrl: config.baseUrl,
       dimensions: config.dimensions,
     });
   }

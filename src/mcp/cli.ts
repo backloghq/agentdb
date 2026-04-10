@@ -64,10 +64,12 @@ async function resolveBackend(): Promise<AgentDBOptions> {
       opts.embeddings = { provider: "voyage", apiKey, model: model || undefined } as import("../embeddings/index.js").EmbeddingConfig;
     } else if (provider === "cohere") {
       opts.embeddings = { provider: "cohere", apiKey, model: model || undefined } as import("../embeddings/index.js").EmbeddingConfig;
+    } else if (provider === "gemini") {
+      opts.embeddings = { provider: "gemini", apiKey: apiKey || process.env.GEMINI_API_KEY || "", model: model || undefined } as import("../embeddings/index.js").EmbeddingConfig;
     } else if (provider === "http") {
       opts.embeddings = { provider: "http", url: model || "", dimensions: 0 } as import("../embeddings/index.js").EmbeddingConfig;
     } else {
-      console.error(`Unknown embedding provider: ${provider}. Use: ollama, openai, voyage, cohere, http`);
+      console.error(`Unknown embedding provider: ${provider}. Use: ollama, openai, voyage, cohere, gemini, http`);
       process.exit(1);
     }
     console.error(`Embeddings: ${provider}${model ? `:${model}` : ""}`);

@@ -564,6 +564,60 @@ describe("Embedding Providers", () => {
     });
   });
 
+  describe("Gemini provider (mocked)", () => {
+    afterEach(() => { vi.unstubAllGlobals(); });
+
+    it("embeds text via Gemini API", async () => {
+      vi.stubGlobal("fetch", async () => {
+        return new Response(JSON.stringify({
+          embedding: { values: [0.1, 0.2, 0.3] },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+
+      const { GeminiEmbeddingProvider } = await import("../src/embeddings/gemini.js");
+      const provider = new GeminiEmbeddingProvider({ apiKey: "test-key" });
+      const vectors = await provider.embed(["hello"]);
+      expect(vectors).toHaveLength(1);
+      expect(vectors[0]).toEqual([0.1, 0.2, 0.3]);
+      expect(provider.dimensions).toBe(3);
+    });
+
+    it("auto-detects dimensions from first response", async () => {
+      vi.stubGlobal("fetch", async () => {
+        return new Response(JSON.stringify({
+          embedding: { values: [0.1, 0.2, 0.3, 0.4, 0.5] },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+
+      const { GeminiEmbeddingProvider } = await import("../src/embeddings/gemini.js");
+      const provider = new GeminiEmbeddingProvider({ apiKey: "key" });
+      expect(provider.dimensions).toBe(0);
+      await provider.embed(["test"]);
+      expect(provider.dimensions).toBe(5);
+    });
+
+    it("throws on non-2xx response", async () => {
+      vi.stubGlobal("fetch", async () => new Response("Forbidden", { status: 403 }));
+
+      const { GeminiEmbeddingProvider } = await import("../src/embeddings/gemini.js");
+      const provider = new GeminiEmbeddingProvider({ apiKey: "bad" });
+      await expect(provider.embed(["test"])).rejects.toThrow("403");
+    });
+
+    it("returns empty array for empty input", async () => {
+      const { GeminiEmbeddingProvider } = await import("../src/embeddings/gemini.js");
+      const provider = new GeminiEmbeddingProvider({ apiKey: "key" });
+      const vectors = await provider.embed([]);
+      expect(vectors).toEqual([]);
+    });
+
+    it("resolveProvider creates Gemini provider", () => {
+      const provider = resolveProvider({ provider: "gemini", apiKey: "key" });
+      expect(provider).toBeDefined();
+      expect(provider.dimensions).toBe(0);
+    });
+  });
+
   describe("AgentDB embedding config", () => {
     it("AgentDB accepts embedding config", async () => {
       const { AgentDB } = await import("../src/agentdb.js");

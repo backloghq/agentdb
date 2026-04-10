@@ -341,6 +341,9 @@ npx agentdb --http --embeddings ollama
 # OpenAI
 OPENAI_API_KEY=sk-... npx agentdb --http --embeddings openai:text-embedding-3-small
 
+# Gemini (free tier available)
+GEMINI_API_KEY=... npx agentdb --http --embeddings gemini
+
 # Voyage AI / Cohere
 AGENTDB_EMBEDDINGS_API_KEY=... npx agentdb --http --embeddings voyage
 AGENTDB_EMBEDDINGS_API_KEY=... npx agentdb --http --embeddings cohere
