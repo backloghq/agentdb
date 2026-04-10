@@ -61,7 +61,8 @@ describe("Blob storage", () => {
   });
 
   it("listBlobs returns empty for record with no blobs", async () => {
-    const blobs = await col.listBlobs("doc1");
+    await col.insert({ _id: "empty-doc", title: "No blobs" });
+    const blobs = await col.listBlobs("empty-doc");
     expect(blobs).toEqual([]);
   });
 });

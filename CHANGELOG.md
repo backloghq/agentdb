@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Auto-increment IDs** — `{ type: "autoIncrement" }` in schema fields assigns sequential integers (1, 2, 3...). Continues from max on reopen.
 - **Hook context** — lifecycle hooks receive `{ collection }` for side effects (recurrence, cascading updates).
 - **`upsertMany()`** — atomic bulk create-or-update. Each doc must have `_id`.
-- **Blob storage** — `writeBlob(id, name, content)`, `readBlob()`, `listBlobs()`, `deleteBlob()`. Stores files outside the WAL directly on filesystem. For attaching code, images, PDFs to records.
+- **Blob storage** — `writeBlob(id, name, content)`, `readBlob()`, `listBlobs()`, `deleteBlob()`. Stores files outside the WAL via StorageBackend — works on both filesystem and S3 transparently. Cascade delete: blobs auto-cleaned when records are deleted. For attaching code, images, PDFs to records.
 
 ## [1.0.0] - 2026-04-10
 

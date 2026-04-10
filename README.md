@@ -371,6 +371,28 @@ const col = await reader.collection("tasks");
 await col.tail(); // pick up latest writes
 ```
 
+### Blob storage
+
+Attach files to records — images, PDFs, code, any binary. Stored outside the WAL via the StorageBackend (works on filesystem and S3).
+
+```typescript
+const col = await db.collection("tasks");
+await col.insert({ _id: "task-1", title: "Fix auth" });
+
+// Attach files
+await col.writeBlob("task-1", "spec.md", "# Spec\n\nDetails...");
+await col.writeBlob("task-1", "screenshot.png", imageBuffer);
+
+// Read back
+const spec = await col.readBlob("task-1", "spec.md");
+const blobs = await col.listBlobs("task-1"); // → ["spec.md", "screenshot.png"]
+
+// Delete
+await col.deleteBlob("task-1", "spec.md");
+```
+
+Blobs are automatically cleaned up when their parent record is deleted.
+
 ### Embeddings and vector search
 
 AgentDB supports semantic search via embedding providers and explicit vector storage.

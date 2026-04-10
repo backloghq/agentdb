@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile, readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { Store } from "@backloghq/opslog";
+import { Store, FsBackend } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
 import { getNestedValue } from "./filter.js";
 // parseCompactFilter used by IndexManager (imported there directly)
@@ -98,7 +96,8 @@ export class Collection {
   private views = new ViewManager();
   private hnswIdx: HnswIndex | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
-  private blobDir = "";
+  private backend: StorageBackend = new FsBackend();
+  private blobPrefix = "";
   private emitter = new EventEmitter();
   private indexes = new IndexManager();
   private _hasTTL = false; // Tracks if any record has been inserted with TTL
@@ -260,7 +259,8 @@ export class Collection {
   async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
-    this.blobDir = join(dir, "blobs");
+    this.backend = options?.backend ?? new FsBackend();
+    this.blobPrefix = "blobs";
     // Single pass: detect TTL, build text index, load HNSW embeddings
     for (const [id, record] of this.store.entries()) {
       if (record[META_EXPIRES]) this._hasTTL = true;
@@ -593,6 +593,7 @@ export class Collection {
     this.store.delete(id);
     if (this.textIdx) this.textIdx.remove(id);
     this.updateBTreeIndexes(id, record, undefined);
+    if (record._blobs) this.deleteBlobsForRecord(id).catch(() => {});
     this.emitChange("delete", [id], opts?.agent);
     return true;
   }
@@ -701,6 +702,7 @@ export class Collection {
     }
     for (const { id, record } of oldRecords) {
       if (record) this.updateBTreeIndexes(id, record, undefined);
+      if (record?._blobs) this.deleteBlobsForRecord(id).catch(() => {});
     }
     this.emitChange("delete", toDelete, opts?.agent);
 
@@ -1119,7 +1121,11 @@ export class Collection {
 
   private static readonly BLOB_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
-  /** Store a blob (text or binary) associated with a record. */
+  private blobPath(recordId: string, name?: string): string {
+    return name ? `${this.blobPrefix}/${recordId}/${name}` : `${this.blobPrefix}/${recordId}`;
+  }
+
+  /** Store a blob (text or binary) associated with a record. Backed by StorageBackend. */
   async writeBlob(recordId: string, name: string, content: Buffer | string): Promise<void> {
     if (!Collection.BLOB_NAME_RE.test(name) || name.includes("..")) {
       throw new Error(`Invalid blob name '${name}'`);
@@ -1127,9 +1133,8 @@ export class Collection {
     const record = this.store.get(recordId);
     if (!record) throw new Error(`Record '${recordId}' not found`);
 
-    const dir = join(this.blobDir, recordId);
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, name), content);
+    const buf = typeof content === "string" ? Buffer.from(content, "utf-8") : content;
+    await this.backend.writeBlob(this.blobPath(recordId, name), buf);
 
     // Update _blobs metadata
     const blobs = (record._blobs as string[]) ?? [];
@@ -1138,28 +1143,29 @@ export class Collection {
     }
   }
 
-  /** Read a blob. Returns a Buffer. */
+  /** Read a blob. Returns a Buffer. Backed by StorageBackend. */
   async readBlob(recordId: string, name: string): Promise<Buffer> {
-    return readFile(join(this.blobDir, recordId, name));
+    return this.backend.readBlob(this.blobPath(recordId, name));
   }
 
-  /** List blob names for a record. */
+  /** List blob names for a record. Backed by StorageBackend. */
   async listBlobs(recordId: string): Promise<string[]> {
-    try {
-      return await readdir(join(this.blobDir, recordId));
-    } catch {
-      return [];
-    }
+    return this.backend.listBlobs(this.blobPath(recordId));
   }
 
-  /** Delete a blob. */
+  /** Delete a blob. Backed by StorageBackend. */
   async deleteBlob(recordId: string, name: string): Promise<void> {
-    await rm(join(this.blobDir, recordId, name), { force: true });
+    await this.backend.deleteBlob(this.blobPath(recordId, name));
     const record = this.store.get(recordId);
     if (record && Array.isArray(record._blobs)) {
       const blobs = (record._blobs as string[]).filter((b) => b !== name);
       await this.store.set(recordId, { ...record, _blobs: blobs.length > 0 ? blobs : undefined });
     }
+  }
+
+  /** Delete all blobs for a record. Called on record deletion for cascade cleanup. */
+  async deleteBlobsForRecord(recordId: string): Promise<void> {
+    await this.backend.deleteBlobDir(this.blobPath(recordId));
   }
 
   /** Get collection stats. */
