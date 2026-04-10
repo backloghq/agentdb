@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Store } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
-import { compileFilter, getNestedValue } from "./filter.js";
+import { getNestedValue } from "./filter.js";
 import { parseCompactFilter } from "./compact-filter.js";
 import { TextIndex } from "./text-index.js";
 import { ViewManager } from "./view.js";
@@ -12,9 +12,19 @@ import { BTreeIndex, QueryFrequencyTracker } from "./btree.js";
 import { BloomFilter } from "./bloom.js";
 import type { EmbeddingProvider } from "./embeddings/types.js";
 import { quantize, serializeQuantized, deserializeQuantized } from "./embeddings/quantize.js";
+import {
+  type StoredRecord,
+  type Filter,
+  type VirtualFilterFn,
+  type UpdateOps,
+  META_AGENT, META_REASON, META_EXPIRES, META_EMBEDDING, META_VERSION,
+  resolveFilter, stripMeta, isExpired, summarize, estimateTokens,
+  applyUpdate, compositeKey, compositeIndexKey, extractTextFromRecord, summarizeValue,
+} from "./collection-helpers.js";
 
-// Internal record type — what's stored in opslog
-type StoredRecord = Record<string, unknown>;
+// Re-export types and helpers that external consumers depend on
+export type { StoredRecord, Filter, UpdateOps } from "./collection-helpers.js";
+export type { ComputedFn, VirtualFilterFn } from "./collection-helpers.js";
 
 /** Options for mutation operations. */
 export interface MutationOpts {
@@ -27,9 +37,6 @@ export interface MutationOpts {
   /** Optimistic lock — fail if record has been modified past this version. */
   expectedVersion?: number;
 }
-
-/** Filter can be a JSON object or a compact string. */
-export type Filter = Record<string, unknown> | string | null | undefined;
 
 /** Options for find queries. */
 export interface FindOpts {
@@ -47,80 +54,6 @@ export interface FindOpts {
   sort?: string;
 }
 
-/** Small LRU cache for compiled filter predicates. Keyed by JSON-serialized filter. */
-const FILTER_CACHE_MAX = 64;
-const filterCache = new Map<string, (record: Record<string, unknown>) => boolean>();
-
-function cachedCompileFilter(filterObj: Record<string, unknown>): (record: Record<string, unknown>) => boolean {
-  const key = JSON.stringify(filterObj);
-  const cached = filterCache.get(key);
-  if (cached) {
-    // Touch: move to end (most-recently-used)
-    filterCache.delete(key);
-    filterCache.set(key, cached);
-    return cached;
-  }
-  const predicate = compileFilter(filterObj);
-  if (filterCache.size >= FILTER_CACHE_MAX) {
-    // Evict oldest (first entry)
-    const oldest = filterCache.keys().next().value!;
-    filterCache.delete(oldest);
-  }
-  filterCache.set(key, predicate);
-  return predicate;
-}
-
-/** Resolve a filter (string or object) into a compiled predicate, with optional virtual filter support. */
-function resolveFilter(
-  filter: Filter,
-  virtualFilters?: Record<string, VirtualFilterFn>,
-  getter?: (id: string) => Record<string, unknown> | undefined,
-): (record: Record<string, unknown>) => boolean {
-  if (filter === null || filter === undefined) return () => true;
-
-  let filterObj: Record<string, unknown>;
-  if (typeof filter === "string") {
-    if (filter.trim() === "") return () => true;
-    filterObj = parseCompactFilter(filter);
-  } else {
-    filterObj = filter;
-  }
-  if (Object.keys(filterObj).length === 0) return () => true;
-
-  // Extract virtual filter keys and build separate predicates
-  if (virtualFilters) {
-    const vfKeys = Object.keys(filterObj).filter((k) => k.startsWith("+") && virtualFilters[k]);
-    if (vfKeys.length > 0) {
-      const remaining: Record<string, unknown> = {};
-      const vfPredicates: ((record: Record<string, unknown>) => boolean)[] = [];
-
-      for (const [key, value] of Object.entries(filterObj)) {
-        if (key.startsWith("+") && virtualFilters[key]) {
-          const vfFn = virtualFilters[key];
-          const g = getter ?? (() => undefined);
-          // value of true = include matching, false = include non-matching
-          if (value === false) {
-            vfPredicates.push((record) => !vfFn(record, g));
-          } else {
-            vfPredicates.push((record) => vfFn(record, g));
-          }
-        } else {
-          remaining[key] = value;
-        }
-      }
-
-      const basePredicate = Object.keys(remaining).length > 0
-        ? cachedCompileFilter(remaining)
-        : () => true;
-
-      return (record) =>
-        basePredicate(record) && vfPredicates.every((p) => p(record));
-    }
-  }
-
-  return cachedCompileFilter(filterObj);
-}
-
 /** Result of a find query. */
 export interface FindResult {
   records: Record<string, unknown>[];
@@ -130,85 +63,16 @@ export interface FindResult {
   estimatedTokens?: number;
 }
 
-/** Approximate token count for a value (4 chars per token heuristic). */
-function estimateTokens(value: unknown): number {
-  return Math.ceil(estimateChars(value) / 4);
-}
-
-function estimateChars(value: unknown): number {
-  if (value === null || value === undefined) return 4;
-  if (typeof value === "string") return value.length + 2;
-  if (typeof value === "number" || typeof value === "boolean") return String(value).length;
-  if (Array.isArray(value)) {
-    let n = 2;
-    for (const item of value) n += estimateChars(item) + 1;
-    return n;
-  }
-  if (typeof value === "object") {
-    let n = 2;
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      n += k.length + 3 + estimateChars(v) + 1;
-    }
-    return n;
-  }
-  return 4;
-}
-
-/** Update operators. */
-export interface UpdateOps {
-  /** Set fields to values. */
-  $set?: Record<string, unknown>;
-  /** Remove fields (value is ignored). */
-  $unset?: Record<string, unknown>;
-  /** Increment numeric fields. */
-  $inc?: Record<string, number>;
-  /** Push values to array fields. */
-  $push?: Record<string, unknown>;
-}
-
-/** Computed field function — receives the record and a lazy accessor for all records. */
-export type ComputedFn = (record: Record<string, unknown>, allRecords: () => Record<string, unknown>[]) => unknown;
-
-/** Virtual filter function — receives the record and a getter for looking up records by ID. */
-export type VirtualFilterFn = (record: Record<string, unknown>, getter: (id: string) => Record<string, unknown> | undefined) => boolean;
-
 /** Options for configuring collection middleware. */
 export interface CollectionOptions {
   /** Validation function — called before every insert/update/upsert. Throw to reject. */
   validate?: (record: Record<string, unknown>) => void;
   /** Computed fields — calculated on read, not stored. Keys are field names, values are compute functions. */
-  computed?: Record<string, ComputedFn>;
+  computed?: Record<string, import("./collection-helpers.js").ComputedFn>;
   /** Virtual filters — domain-specific query predicates. Keys like "+OVERDUE" usable in filters. */
   virtualFilters?: Record<string, VirtualFilterFn>;
   /** Enable full-text search index. Automatically indexes all string fields. */
   textSearch?: boolean;
-}
-
-// --- Composite key serialization ---
-
-const COMPOSITE_SEP = "\x00";
-
-/** Serialize a single value for composite key ordering. Type-prefixed for stable cross-type sort. */
-function serializeKeyPart(v: unknown): string {
-  if (v === null || v === undefined) return "\x01null";
-  if (typeof v === "number") {
-    // Prefix: \x02 for numbers. Pad to fixed width so lexicographic = numeric order.
-    // Handle negatives: offset so all values are positive in the string representation.
-    const offset = v + 1e15; // shift range so negatives sort correctly
-    return "\x02" + offset.toFixed(10).padStart(30, "0");
-  }
-  if (typeof v === "boolean") return "\x03" + (v ? "1" : "0");
-  return "\x04" + String(v);
-}
-
-/** Build a composite key from field values. */
-function compositeKey(values: unknown[]): string {
-  return values.map(serializeKeyPart).join(COMPOSITE_SEP);
-}
-
-/** Internal key for a composite index (fields joined by separator). */
-function compositeIndexKey(fields: string[]): string {
-  return fields.join(COMPOSITE_SEP);
 }
 
 /** Change event emitted after mutations. */
@@ -217,109 +81,6 @@ export interface ChangeEvent {
   collection: string;
   ids: string[];
   agent?: string;
-}
-
-/** Reserved field prefix for internal metadata. */
-const META_AGENT = "_agent";
-const META_REASON = "_reason";
-const META_EXPIRES = "_expires";
-const META_EMBEDDING = "_embedding";
-const META_VERSION = "_version";
-
-/**
- * Strip internal metadata fields from a stored record for public consumption.
- */
-function stripMeta(record: StoredRecord): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
-    if (key !== META_AGENT && key !== META_REASON && key !== META_EXPIRES && key !== META_EMBEDDING) {
-      result[key] = value;
-    }
-  }
-  return result;
-}
-
-/** Check if a record has expired. */
-function isExpired(record: StoredRecord): boolean {
-  const expires = record[META_EXPIRES];
-  if (!expires) return false;
-  // Support both epoch ms (number) and ISO string (backward compat)
-  const expiresMs = typeof expires === "number" ? expires : new Date(expires as string).getTime();
-  return expiresMs < Date.now();
-}
-
-/**
- * Summarize a record for progressive disclosure.
- * Keeps short-valued fields (numbers, booleans, dates, short strings, null).
- * Omits long text fields (strings > 200 chars).
- */
-function summarize(record: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
-    if (typeof value === "string" && value.length > 200) {
-      continue;
-    }
-    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-      continue; // Skip nested objects in summary
-    }
-    if (Array.isArray(value) && value.length > 10) {
-      continue; // Skip large arrays in summary
-    }
-    result[key] = value;
-  }
-  return result;
-}
-
-/**
- * Apply update operators to a record, returning a new record.
- */
-/** Fields that cannot be modified via $set/$unset/$inc/$push. */
-const PROTECTED_FIELDS = new Set([META_AGENT, META_REASON, META_EXPIRES, META_EMBEDDING, META_VERSION, "_id", "__proto__", "constructor", "prototype"]);
-
-function applyUpdate(record: StoredRecord, update: UpdateOps): StoredRecord {
-  const result = { ...record };
-
-  if (update.$set) {
-    for (const [key, value] of Object.entries(update.$set)) {
-      if (!PROTECTED_FIELDS.has(key)) result[key] = value;
-    }
-  }
-
-  if (update.$unset) {
-    for (const key of Object.keys(update.$unset)) {
-      if (!PROTECTED_FIELDS.has(key)) delete result[key];
-    }
-  }
-
-  if (update.$inc) {
-    for (const [key, amount] of Object.entries(update.$inc)) {
-      if (PROTECTED_FIELDS.has(key)) continue;
-      const current = result[key];
-      if (typeof current === "number") {
-        result[key] = current + amount;
-      } else if (current === undefined || current === null) {
-        result[key] = amount;
-      } else {
-        throw new Error(`$inc: field '${key}' is not a number (got ${typeof current})`);
-      }
-    }
-  }
-
-  if (update.$push) {
-    for (const [key, value] of Object.entries(update.$push)) {
-      if (PROTECTED_FIELDS.has(key)) continue;
-      const current = result[key];
-      if (Array.isArray(current)) {
-        result[key] = [...current, value];
-      } else if (current === undefined || current === null) {
-        result[key] = [value];
-      } else {
-        throw new Error(`$push: field '${key}' is not an array (got ${typeof current})`);
-      }
-    }
-  }
-
-  return result;
 }
 
 /**
@@ -1630,28 +1391,3 @@ export interface FieldInfo {
   example: unknown;
 }
 
-/** Extract all text from a record for embedding (concatenate string fields). */
-function extractTextFromRecord(record: Record<string, unknown>): string {
-  const parts: string[] = [];
-  for (const value of Object.values(record)) {
-    if (typeof value === "string" && value.length > 0) {
-      parts.push(value);
-    } else if (Array.isArray(value)) {
-      for (const item of value) {
-        if (typeof item === "string") parts.push(item);
-      }
-    }
-  }
-  return parts.join(" ");
-}
-
-/** Truncate a value for display in schema examples. */
-function summarizeValue(value: unknown): unknown {
-  if (typeof value === "string" && value.length > 100) {
-    return value.slice(0, 100) + "...";
-  }
-  if (Array.isArray(value) && value.length > 5) {
-    return [...value.slice(0, 5), `... (${value.length} items)`];
-  }
-  return value;
-}
