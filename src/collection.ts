@@ -257,22 +257,20 @@ export class Collection {
   async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
-    // Detect TTL records + build text index from existing records
+    // Single pass: detect TTL, build text index, load HNSW embeddings
     for (const [id, record] of this.store.entries()) {
       if (record[META_EXPIRES]) this._hasTTL = true;
       if (this.textIdx) this.textIdx.add(id, stripMeta(record));
-    }
-    // Load existing embeddings into HNSW index (auto-init if stored vectors exist but no provider)
-    for (const [id, record] of this.store.entries()) {
-      if (isExpired(record)) continue;
-      const stored = record[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
-      if (stored) {
-        const q = deserializeQuantized(stored);
-        const vec = Array.from(q.data).map((v) => v / q.scale);
-        if (!this.hnswIdx || this.hnswIdx.dims === 0) {
-          this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+      if (!isExpired(record)) {
+        const stored = record[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
+        if (stored) {
+          const q = deserializeQuantized(stored);
+          const vec = Array.from(q.data).map((v) => v / q.scale);
+          if (!this.hnswIdx || this.hnswIdx.dims === 0) {
+            this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+          }
+          this.hnswIdx.add(id, vec);
         }
-        this.hnswIdx.add(id, vec);
       }
     }
   }
@@ -803,6 +801,9 @@ export class Collection {
    * Load archived records from a segment. Returns them as an array (read-only, not re-inserted).
    */
   async loadArchive(segment: string): Promise<Record<string, unknown>[]> {
+    if (!/^[a-zA-Z0-9_-]+$/.test(segment) || segment.includes("..")) {
+      throw new Error(`Invalid archive segment name '${segment}'.`);
+    }
     const archived = await this.store.loadArchive(segment);
     return Array.from(archived.values()).map(stripMeta);
   }

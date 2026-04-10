@@ -864,6 +864,110 @@ describe("Collection", () => {
     it("rejects composite index with fewer than 2 fields", () => {
       expect(() => col.createCompositeIndex(["role"])).toThrow("at least 2 fields");
     });
+
+    it("range query on indexed field with no matching records returns empty", () => {
+      col.createIndex("score");
+      const result = col.find({ filter: { score: { $gt: 100 } } });
+      expect(result.records).toHaveLength(0);
+      expect(result.total).toBe(0);
+    });
+
+    it("composite index with all fields matching exact equality", () => {
+      col.createCompositeIndex(["role", "score"]);
+      // Both fields match exactly one record
+      const result = col.find({ filter: { role: "user", score: 20 } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].name).toBe("Bob");
+    });
+
+    it("indexedCandidates returns null when filter has no indexed fields", () => {
+      // Create an index on 'role' but filter on 'name' (not indexed)
+      col.createIndex("role");
+      // We query on a non-indexed field — index cannot help, falls through to full scan
+      const result = col.find({ filter: { name: "Alice" } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].name).toBe("Alice");
+    });
+
+    it("createIndex on a field that already exists is a no-op", () => {
+      col.createIndex("role");
+      const indexesBefore = col.listIndexes();
+      // Create again — should silently no-op
+      col.createIndex("role");
+      const indexesAfter = col.listIndexes();
+      expect(indexesAfter).toEqual(indexesBefore);
+    });
+
+    it("createCompositeIndex on fields that already exist is a no-op", () => {
+      col.createCompositeIndex(["role", "score"]);
+      const before = col.listCompositeIndexes();
+      // Create again — should silently no-op
+      col.createCompositeIndex(["role", "score"]);
+      const after = col.listCompositeIndexes();
+      expect(after).toEqual(before);
+    });
+
+    it("suggestIndexes returns empty when no queries tracked", () => {
+      // No find() calls have been made with filters, so no query tracking
+      const suggestions = col.suggestIndexes(1);
+      expect(suggestions).toHaveLength(0);
+    });
+
+  });
+
+  describe("subscription cleanup", () => {
+    it("subscribe then unsubscribe prevents further notifications", async () => {
+      const events: Array<{ type: string; ids: string[] }> = [];
+      const listener = (e: { type: string; ids: string[] }) => {
+        events.push(e);
+      };
+
+      col.on("change", listener);
+      await col.insert({ _id: "x1", name: "Test" });
+      expect(events.length).toBeGreaterThan(0);
+
+      const countBefore = events.length;
+      col.off("change", listener);
+
+      await col.insert({ _id: "x2", name: "Test2" });
+      // No new events after unsubscribe
+      expect(events.length).toBe(countBefore);
+    });
+  });
+
+  describe("TTL cleanup removes from indexes", () => {
+    it("cleanup of expired records also removes them from indexes", async () => {
+      await col.insert({ _id: "a", name: "Active", role: "admin" });
+
+      // Insert a record that will expire immediately via raw store
+      const rawStore = (col as unknown as { store: Store<Record<string, unknown>> }).store;
+      await rawStore.set("b", {
+        _id: "b",
+        name: "Expired",
+        role: "admin",
+        _expires: "2020-01-01T00:00:00Z",
+      });
+
+      // Create index on role — expired records are excluded during index creation
+      col.createIndex("role");
+
+      // Verify: find with index only returns active record
+      const beforeCleanup = col.find({ filter: { role: "admin" } });
+      expect(beforeCleanup.records).toHaveLength(1);
+      expect(beforeCleanup.records[0]._id).toBe("a");
+
+      // Run cleanup — removes expired from store + indexes
+      const cleaned = await col.cleanup();
+      expect(cleaned).toBe(1);
+
+      // After cleanup, index should still work correctly
+      const afterCleanup = col.find({ filter: { role: "admin" } });
+      expect(afterCleanup.records).toHaveLength(1);
+      expect(afterCleanup.records[0]._id).toBe("a");
+
+      // Total count should reflect only active records
+      expect(col.count()).toBe(1);
+    });
   });
 
   describe("WAL tailing", () => {

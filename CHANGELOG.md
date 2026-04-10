@@ -90,6 +90,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - Rate limiter periodically cleans up expired entries
 - Signal handlers use `process.once` (no stacking on repeated calls)
 - `removeById()` guard uses `.has()` instead of `!== undefined`
+- `loadArchive()` validates segment name (symmetric with `archive()`)
+- `open()` merged to single-pass iteration (was two loops over store entries)
 - `AgentDB.close()` now cleans up listeners and memory monitor (was leaking like `dropCollection` before fix)
 - MCP servers properly disconnected on session cleanup (was only closing transport)
 - Archive segment names validated against strict regex (prevents path traversal)

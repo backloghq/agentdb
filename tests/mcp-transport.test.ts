@@ -107,6 +107,44 @@ describe("MCP HTTP Transport", () => {
     });
   });
 
+  describe("POST /mcp with valid session but invalid body", () => {
+    it("returns an error when body is not valid JSON-RPC", async () => {
+      await setup();
+
+      // First, establish a valid session via initialize
+      const initRes = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "test-client", version: "1.0.0" },
+          },
+        }),
+      });
+      expect(initRes.status).toBe(200);
+      const sessionId = initRes.headers.get("mcp-session-id");
+      expect(sessionId).toBeTruthy();
+
+      // Now POST with the valid session ID but a completely invalid body
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "Mcp-Session-Id": sessionId!,
+        },
+        body: JSON.stringify({ not: "a valid jsonrpc message" }),
+      });
+      // The transport should reject with 400 for malformed JSON-RPC
+      expect(res.status).toBe(400);
+    });
+  });
+
   describe("invalid session on GET/DELETE", () => {
     it("GET /mcp with invalid session ID returns 400", async () => {
       await setup();
