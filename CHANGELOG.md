@@ -5,10 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [1.1.0] - 2026-04-10
 
 ### Added
-- **`defineSchema()`** — declarative collection definitions. Define fields with types (string, number, boolean, date, enum, arrays), constraints (required, maxLength, min/max, pattern), defaults, computed fields, virtual filters, lifecycle hooks (beforeInsert, afterInsert, afterUpdate, afterDelete), and auto-indexing in a single schema object. Pass to `db.collection(schema)`.
+- **`defineSchema()`** — declarative collection definitions. Define fields with types (string, number, boolean, date, enum, arrays, autoIncrement), constraints (required, maxLength, min/max, pattern), defaults, computed fields, virtual filters, lifecycle hooks with collection context, and auto-indexing.
+- **`$contains` operator** — filter array fields: `{ tags: { $contains: "bug" } }`.
+- **`+tag`/`-tag` in compact filter** — `+bug` matches records where tags contains "bug", `-old` excludes.
+- **`$text` in find()** — combine text search with attribute filters: `find({ filter: { $text: "auth", status: "open" } })`. Also works in compact filters as bare words.
+- **Auto-increment IDs** — `{ type: "autoIncrement" }` in schema fields assigns sequential integers (1, 2, 3...). Continues from max on reopen.
+- **Hook context** — lifecycle hooks receive `{ collection }` for side effects (recurrence, cascading updates).
+- **`upsertMany()`** — atomic bulk create-or-update. Each doc must have `_id`.
+- **Blob storage** — `writeBlob(id, name, content)`, `readBlob()`, `listBlobs()`, `deleteBlob()`. Stores files outside the WAL directly on filesystem. For attaching code, images, PDFs to records.
 
 ## [1.0.0] - 2026-04-10
 

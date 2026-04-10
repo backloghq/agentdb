@@ -331,4 +331,66 @@ describe("defineSchema", () => {
       expect(results.records).toHaveLength(1);
     });
   });
+
+  describe("auto-increment IDs", () => {
+    it("assigns sequential IDs on insert", async () => {
+      const col = await db.collection(defineSchema({
+        name: "autoinc",
+        fields: {
+          id: { type: "autoIncrement" },
+          title: { type: "string", required: true },
+        },
+      }));
+
+      const id1 = await col.insert({ title: "First" });
+      const id2 = await col.insert({ title: "Second" });
+      const id3 = await col.insert({ title: "Third" });
+
+      expect(col.findOne(id1)?.id).toBe(1);
+      expect(col.findOne(id2)?.id).toBe(2);
+      expect(col.findOne(id3)?.id).toBe(3);
+    });
+
+    it("continues from max on reopen", async () => {
+      const col1 = await db.collection(defineSchema({
+        name: "autoinc2",
+        fields: { id: { type: "autoIncrement" }, title: { type: "string" } },
+      }));
+      await col1.insert({ title: "First" });
+      await col1.insert({ title: "Second" });
+      await db.close();
+
+      const db2 = new AgentDB(tmpDir);
+      await db2.init();
+      const col2 = await db2.collection(defineSchema({
+        name: "autoinc2",
+        fields: { id: { type: "autoIncrement" }, title: { type: "string" } },
+      }));
+      const id3 = await col2.insert({ title: "Third" });
+      expect(col2.findOne(id3)?.id).toBe(3);
+      await db2.close();
+
+      // Reopen for afterEach cleanup
+      db = new AgentDB(tmpDir);
+      await db.init();
+    });
+  });
+
+  describe("hook context", () => {
+    it("hooks receive collection reference in context", async () => {
+      const afterFn = vi.fn();
+      const col = await db.collection(defineSchema({
+        name: "hookctx",
+        fields: { title: { type: "string" } },
+        hooks: {
+          afterInsert: (_id, _record, ctx) => {
+            afterFn(typeof ctx.collection.findOne);
+          },
+        },
+      }));
+
+      await col.insert({ title: "test" });
+      expect(afterFn).toHaveBeenCalledWith("function");
+    });
+  });
 });

@@ -202,8 +202,25 @@ describe("parseCompactFilter", () => {
       expect(parseCompactFilter("   ")).toEqual({});
     });
 
-    it("throws on bare word without colon", () => {
-      expect(() => parseCompactFilter("admin")).toThrow("Invalid filter token");
+    it("bare word becomes $text search", () => {
+      expect(parseCompactFilter("admin")).toEqual({ $text: "admin" });
+    });
+
+    it("multiple bare words combine into $text", () => {
+      expect(parseCompactFilter("auth error")).toEqual({ $text: "auth error" });
+    });
+
+    it("+tag becomes array contains", () => {
+      expect(parseCompactFilter("+bug")).toEqual({ tags: { $contains: "bug" } });
+    });
+
+    it("-tag becomes array not contains", () => {
+      expect(parseCompactFilter("-old")).toEqual({ tags: { $not: { $contains: "old" } } });
+    });
+
+    it("mixed: field + tag + text", () => {
+      const result = parseCompactFilter("status:active +bug error");
+      expect(result).toEqual({ $and: [{ status: "active" }, { tags: { $contains: "bug" } }, { $text: "error" }] });
     });
   });
 

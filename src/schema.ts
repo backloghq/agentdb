@@ -8,8 +8,8 @@ import type { CollectionOptions } from "./collection.js";
 // --- Field types ---
 
 export interface FieldDef {
-  /** Field type. */
-  type: "string" | "number" | "boolean" | "date" | "enum" | "string[]" | "number[]" | "object";
+  /** Field type. "autoIncrement" assigns sequential integer IDs (1, 2, 3...). */
+  type: "string" | "number" | "boolean" | "date" | "enum" | "string[]" | "number[]" | "object" | "autoIncrement";
   /** Field is required on insert. Default: false. */
   required?: boolean;
   /** Default value — applied on insert if field is missing. */
@@ -28,17 +28,22 @@ export interface FieldDef {
 
 // --- Hooks ---
 
+/** Context passed to lifecycle hooks — provides access to the collection for side effects. */
+export interface HookContext {
+  collection: import("./collection.js").Collection;
+}
+
 export interface SchemaHooks {
   /** Called before insert — can modify the record by returning a new one. */
-  beforeInsert?: (record: Record<string, unknown>) => void | Record<string, unknown>;
+  beforeInsert?: (record: Record<string, unknown>, ctx: HookContext) => void | Record<string, unknown>;
   /** Called before update. */
-  beforeUpdate?: (filter: unknown, update: unknown) => void;
+  beforeUpdate?: (filter: unknown, update: unknown, ctx: HookContext) => void;
   /** Called after insert with the new record's ID. */
-  afterInsert?: (id: string, record: Record<string, unknown>) => void;
+  afterInsert?: (id: string, record: Record<string, unknown>, ctx: HookContext) => void;
   /** Called after update with affected IDs. */
-  afterUpdate?: (ids: string[]) => void;
+  afterUpdate?: (ids: string[], ctx: HookContext) => void;
   /** Called after delete with affected IDs. */
-  afterDelete?: (ids: string[]) => void;
+  afterDelete?: (ids: string[], ctx: HookContext) => void;
 }
 
 // --- Schema definition ---
@@ -72,6 +77,10 @@ export interface CollectionSchema {
   hooks: SchemaHooks;
   /** Apply defaults to a record (called before validation). */
   applyDefaults: (record: Record<string, unknown>) => Record<string, unknown>;
+  /** Auto-increment field names (for counter initialization from existing records). */
+  autoIncrementFields: string[];
+  /** Shared counters for auto-increment fields. */
+  counters: Map<string, number>;
 }
 
 // --- Compile ---
@@ -92,8 +101,12 @@ export interface CollectionSchema {
  * ```
  */
 export function defineSchema(def: SchemaDefinition): CollectionSchema {
+  const counters = new Map<string, number>();
+  const autoIncrementFields = def.fields
+    ? Object.entries(def.fields).filter(([, d]) => d.type === "autoIncrement").map(([name]) => name)
+    : [];
   const fieldValidator = def.fields ? compileFieldValidation(def.fields) : undefined;
-  const defaults = def.fields ? compileDefaults(def.fields) : undefined;
+  const defaults = def.fields ? compileDefaults(def.fields, counters) : undefined;
 
   // Build validate function: apply defaults, then run field validation, then user beforeInsert
   const validate = (record: Record<string, unknown>): void => {
@@ -114,6 +127,8 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     compositeIndexes: def.compositeIndexes ?? [],
     hooks: def.hooks ?? {},
     applyDefaults: defaults ?? ((r) => r),
+    autoIncrementFields,
+    counters,
   };
 }
 
@@ -190,16 +205,24 @@ function compileFieldValidation(fields: Record<string, FieldDef>): (record: Reco
 
 // --- Defaults compiler ---
 
-function compileDefaults(fields: Record<string, FieldDef>): (record: Record<string, unknown>) => Record<string, unknown> {
+function compileDefaults(fields: Record<string, FieldDef>, counters: Map<string, number>): (record: Record<string, unknown>) => Record<string, unknown> {
   const defaultEntries = Object.entries(fields).filter(([, def]) => def.default !== undefined);
+  const autoIncrFields = Object.entries(fields).filter(([, def]) => def.type === "autoIncrement").map(([name]) => name);
 
-  if (defaultEntries.length === 0) return (r) => r;
+  if (defaultEntries.length === 0 && autoIncrFields.length === 0) return (r) => r;
 
   return (record: Record<string, unknown>) => {
     const result = { ...record };
     for (const [name, def] of defaultEntries) {
       if (result[name] === undefined) {
         result[name] = typeof def.default === "function" ? (def.default as () => unknown)() : def.default;
+      }
+    }
+    for (const name of autoIncrFields) {
+      if (result[name] === undefined) {
+        const next = (counters.get(name) ?? 0) + 1;
+        counters.set(name, next);
+        result[name] = next;
       }
     }
     return result;

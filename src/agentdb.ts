@@ -202,28 +202,41 @@ export class AgentDB {
       readOnly: this.opts.readOnly,
     });
 
-    // Apply schema features: auto-create indexes, register hooks
+    // Apply schema features: auto-create indexes, init counters, register hooks
     const schema = this.schemas.get(name);
     if (schema) {
       for (const field of schema.indexes) col.createIndex(field);
       for (const fields of schema.compositeIndexes) col.createCompositeIndex(fields);
+      // Initialize auto-increment counters from existing records
+      if (schema.autoIncrementFields.length > 0) {
+        for (const [, record] of col.find({ limit: 10000 }).records.entries()) {
+          for (const field of schema.autoIncrementFields) {
+            const val = record[field];
+            if (typeof val === "number") {
+              const current = schema.counters.get(field) ?? 0;
+              if (val > current) schema.counters.set(field, val);
+            }
+          }
+        }
+      }
       // Wrap insert to apply defaults + beforeInsert hook
+      const ctx = { collection: col };
       const originalInsert = col.insert.bind(col);
       col.insert = async (doc: Record<string, unknown>, opts?) => {
         let record = schema.applyDefaults(doc);
         if (schema.hooks.beforeInsert) {
-          const modified = schema.hooks.beforeInsert(record);
+          const modified = schema.hooks.beforeInsert(record, ctx);
           if (modified) record = modified;
         }
         const id = await originalInsert(record, opts);
-        if (schema.hooks.afterInsert) schema.hooks.afterInsert(id, record);
+        if (schema.hooks.afterInsert) schema.hooks.afterInsert(id, record, ctx);
         return id;
       };
       // Wire afterUpdate/afterDelete via change events
       if (schema.hooks.afterUpdate || schema.hooks.afterDelete) {
         col.on("change", (event) => {
-          if (event.type === "update" && schema.hooks.afterUpdate) schema.hooks.afterUpdate(event.ids);
-          if (event.type === "delete" && schema.hooks.afterDelete) schema.hooks.afterDelete(event.ids);
+          if (event.type === "update" && schema.hooks.afterUpdate) schema.hooks.afterUpdate(event.ids, ctx);
+          if (event.type === "delete" && schema.hooks.afterDelete) schema.hooks.afterDelete(event.ids, ctx);
         });
       }
     }

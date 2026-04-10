@@ -206,6 +206,10 @@ status:active priority.gt:3           → { $and: [{ status: "active" }, { prior
 name.contains:alice                    → { name: { $contains: "alice" } }
 (role:admin or role:mod)               → { $or: [{ role: "admin" }, { role: "mod" }] }
 tags.in:bug,feature                    → { tags: { $in: ["bug", "feature"] } }
++bug                                   → { tags: { $contains: "bug" } }
+-old                                   → { tags: { $not: { $contains: "old" } } }
+auth error                             → { $text: "auth error" }
+status:active auth                     → { $and: [{ status: "active" }, { $text: "auth" }] }
 ```
 
 Modifier aliases: `gt`, `gte`, `lt`, `lte`, `ne`, `contains`, `has`, `startsWith`, `starts`, `endsWith`, `ends`, `in`, `nin`, `exists`, `regex`, `match`, `eq`, `is`, `not`, `after`, `before`, `above`, `below`, `over`, `under`

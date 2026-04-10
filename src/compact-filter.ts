@@ -51,6 +51,8 @@ const MODIFIER_MAP: Record<string, string> = {
 
 type Token =
   | { type: "attr"; field: string; modifier: string | null; value: string }
+  | { type: "tag"; include: boolean; value: string }
+  | { type: "text"; value: string }
   | { type: "and" }
   | { type: "or" }
   | { type: "lparen" }
@@ -120,11 +122,18 @@ function tokenize(input: string): Token[] {
       continue;
     }
 
+    // +tag / -tag syntax
+    if ((word.startsWith("+") || word.startsWith("-")) && !word.includes(":")) {
+      tokens.push({ type: "tag", include: word.startsWith("+"), value: word.slice(1) });
+      continue;
+    }
+
     // Parse attribute expression: field.modifier:value or field:value
     const colonIdx = word.indexOf(":");
     if (colonIdx === -1) {
-      // Bare word — treat as a text search or error
-      throw new Error(`Invalid filter token: '${word}'. Expected field:value syntax.`);
+      // Bare word — collected as text search term
+      tokens.push({ type: "text", value: word });
+      continue;
     }
 
     const left = word.slice(0, colonIdx);
@@ -195,7 +204,7 @@ function parseAnd(tokens: Token[], pos: { i: number }): FilterObject {
     if (token.type === "and") {
       pos.i++; // skip explicit 'and'
       operands.push(parsePrimary(tokens, pos));
-    } else if (token.type === "attr" || token.type === "lparen") {
+    } else if (token.type === "attr" || token.type === "lparen" || token.type === "tag" || token.type === "text") {
       // Implicit AND — adjacent terms
       operands.push(parsePrimary(tokens, pos));
     } else {
@@ -227,6 +236,26 @@ function parsePrimary(tokens: Token[], pos: { i: number }): FilterObject {
   if (token.type === "attr") {
     pos.i++;
     return attrToFilter(token.field, token.modifier, token.value);
+  }
+
+  if (token.type === "tag") {
+    pos.i++;
+    if (token.include) {
+      return { tags: { $contains: token.value } };
+    } else {
+      return { tags: { $not: { $contains: token.value } } };
+    }
+  }
+
+  if (token.type === "text") {
+    // Collect consecutive text tokens
+    const words: string[] = [token.value];
+    pos.i++;
+    while (pos.i < tokens.length && tokens[pos.i].type === "text") {
+      words.push((tokens[pos.i] as { type: "text"; value: string }).value);
+      pos.i++;
+    }
+    return { $text: words.join(" ") };
   }
 
   throw new Error(`Unexpected token: ${token.type}`);
