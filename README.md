@@ -367,56 +367,9 @@ MCP tools: `db_vector_upsert`, `db_vector_search`, `db_semantic_search`, `db_emb
 npx agentdb --http --auth-token secret --rate-limit 100 --cors https://app.example.com
 ```
 
-### Real-time notifications (NOTIFY/LISTEN)
+### Real-time notifications
 
-Agents can subscribe to collection changes and receive push notifications via MCP — no polling needed.
-
-**MCP tools:**
-```
-db_subscribe({ collection: "tasks" })       → subscribe to all changes
-db_unsubscribe({ collection: "tasks" })     → stop notifications
-```
-
-**How it works:** When an agent calls `db_subscribe`, the server registers a change listener on that collection. When any agent inserts, updates, or deletes a record, the server pushes a notification to all subscribers via the SSE stream (MCP Streamable HTTP transport).
-
-**Notification format** (received as MCP logging message):
-```json
-{
-  "event": "db_change",
-  "collection": "tasks",
-  "type": "insert",
-  "ids": ["abc-123"],
-  "agent": "planner",
-  "timestamp": "2026-04-10T12:00:00.000Z"
-}
-```
-
-**Programmatic client example** (using `@modelcontextprotocol/sdk`):
-```typescript
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { LoggingMessageNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
-
-const client = new Client({ name: "my-agent", version: "1.0" });
-const transport = new StreamableHTTPClientTransport(new URL("http://localhost:3000/mcp"));
-
-// Listen for notifications BEFORE connecting
-client.setNotificationHandler(LoggingMessageNotificationSchema, (notification) => {
-  const data = JSON.parse(notification.params.data as string);
-  console.log(`Change in ${data.collection}: ${data.type} [${data.ids}]`);
-});
-
-await client.connect(transport);
-await client.callTool({ name: "db_subscribe", arguments: { collection: "tasks" } });
-// Now you'll receive push notifications when "tasks" changes
-```
-
-**Lifecycle:**
-- Subscriptions are per-session — each MCP client session has its own subscriptions
-- Cleaned up automatically on session disconnect, idle timeout (30 min), or server shutdown
-- Available on HTTP MCP transport only (stdio has no concurrent sessions)
-
-See [examples/multi-agent/](./examples/multi-agent/) for a full working demo with event-driven agents.
+Subscribe to collection changes via `db_subscribe` / `db_unsubscribe` on the HTTP MCP transport. Agents receive push notifications via SSE when records are inserted, updated, or deleted — no polling needed. See [examples/multi-agent/](./examples/multi-agent/) for a working demo.
 
 ## Docker
 
