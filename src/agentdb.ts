@@ -8,6 +8,7 @@ import type { EmbeddingConfig, EmbeddingProvider } from "./embeddings/index.js";
 import { resolveProvider } from "./embeddings/index.js";
 import { PermissionManager } from "./permissions.js";
 import type { AgentPermissions } from "./permissions.js";
+import type { CollectionSchema } from "./schema.js";
 import { MemoryMonitor } from "./memory.js";
 import type { MemoryStats } from "./memory.js";
 
@@ -73,6 +74,7 @@ export class AgentDB {
   private open: Map<string, Collection> = new Map();
   private opening: Map<string, Promise<Collection>> = new Map();
   private collectionOpts: Map<string, CollectionOptions> = new Map();
+  private schemas: Map<string, CollectionSchema> = new Map();
   private collectionListeners: Map<string, () => void> = new Map();
   private embeddingProvider: EmbeddingProvider | null = null;
   private permissions: PermissionManager;
@@ -133,15 +135,27 @@ export class AgentDB {
 
   /**
    * Get or create a named collection.
-   * Lazy-opens the underlying opslog store on first access.
-   * Evicts least-recently-used collections when the limit is reached.
+   * Accepts a name + options, or a CollectionSchema from defineSchema().
    */
-  async collection(name: string, colOpts?: CollectionOptions): Promise<Collection> {
+  async collection(nameOrSchema: string | CollectionSchema, colOpts?: CollectionOptions): Promise<Collection> {
     this.ensureOpen();
+
+    let name: string;
+    let schema: CollectionSchema | undefined;
+
+    if (typeof nameOrSchema === "string") {
+      name = nameOrSchema;
+    } else {
+      schema = nameOrSchema;
+      name = schema.name;
+      colOpts = schema.collectionOptions;
+    }
+
     validateCollectionName(name);
 
     // Store collection options for future reopens (LRU eviction + reopen)
     if (colOpts) this.collectionOpts.set(name, colOpts);
+    if (schema) this.schemas.set(name, schema);
 
     // Return cached + touch LRU
     const existing = this.open.get(name);
@@ -187,6 +201,32 @@ export class AgentDB {
       groupCommitMs: this.opts.groupCommitMs,
       readOnly: this.opts.readOnly,
     });
+
+    // Apply schema features: auto-create indexes, register hooks
+    const schema = this.schemas.get(name);
+    if (schema) {
+      for (const field of schema.indexes) col.createIndex(field);
+      for (const fields of schema.compositeIndexes) col.createCompositeIndex(fields);
+      // Wrap insert to apply defaults + beforeInsert hook
+      const originalInsert = col.insert.bind(col);
+      col.insert = async (doc: Record<string, unknown>, opts?) => {
+        let record = schema.applyDefaults(doc);
+        if (schema.hooks.beforeInsert) {
+          const modified = schema.hooks.beforeInsert(record);
+          if (modified) record = modified;
+        }
+        const id = await originalInsert(record, opts);
+        if (schema.hooks.afterInsert) schema.hooks.afterInsert(id, record);
+        return id;
+      };
+      // Wire afterUpdate/afterDelete via change events
+      if (schema.hooks.afterUpdate || schema.hooks.afterDelete) {
+        col.on("change", (event) => {
+          if (event.type === "update" && schema.hooks.afterUpdate) schema.hooks.afterUpdate(event.ids);
+          if (event.type === "delete" && schema.hooks.afterDelete) schema.hooks.afterDelete(event.ids);
+        });
+      }
+    }
 
     this.open.set(name, col);
     this.touchLru(name);

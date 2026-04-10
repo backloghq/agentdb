@@ -1,0 +1,334 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AgentDB } from "../src/agentdb.js";
+import { defineSchema } from "../src/schema.js";
+
+describe("defineSchema", () => {
+  let tmpDir: string;
+  let db: AgentDB;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "agentdb-schema-"));
+    db = new AgentDB(tmpDir);
+    await db.init();
+  });
+
+  afterEach(async () => {
+    await db.close();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  describe("field validation", () => {
+    it("validates required fields", async () => {
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: { title: { type: "string", required: true } },
+      }));
+
+      await expect(col.insert({})).rejects.toThrow("'title' is required");
+      const id = await col.insert({ title: "Hello" });
+      expect(id).toBeTruthy();
+    });
+
+    it("validates string type", async () => {
+      const col = await db.collection(defineSchema({
+        name: "items",
+        fields: { name: { type: "string" } },
+      }));
+
+      await expect(col.insert({ name: 42 })).rejects.toThrow("must be a string");
+    });
+
+    it("validates string maxLength", async () => {
+      const col = await db.collection(defineSchema({
+        name: "items",
+        fields: { code: { type: "string", maxLength: 5 } },
+      }));
+
+      await expect(col.insert({ code: "toolong" })).rejects.toThrow("max length");
+      await col.insert({ code: "ok" });
+    });
+
+    it("validates string pattern", async () => {
+      const col = await db.collection(defineSchema({
+        name: "items",
+        fields: { slug: { type: "string", pattern: /^[a-z-]+$/ } },
+      }));
+
+      await expect(col.insert({ slug: "BAD SLUG" })).rejects.toThrow("pattern");
+      await col.insert({ slug: "good-slug" });
+    });
+
+    it("validates number type and min/max", async () => {
+      const col = await db.collection(defineSchema({
+        name: "items",
+        fields: { score: { type: "number", min: 0, max: 100 } },
+      }));
+
+      await expect(col.insert({ score: "not a number" })).rejects.toThrow("must be a number");
+      await expect(col.insert({ score: -1 })).rejects.toThrow(">= 0");
+      await expect(col.insert({ score: 101 })).rejects.toThrow("<= 100");
+      await col.insert({ score: 50 });
+    });
+
+    it("validates boolean type", async () => {
+      const col = await db.collection(defineSchema({
+        name: "items",
+        fields: { active: { type: "boolean" } },
+      }));
+
+      await expect(col.insert({ active: "yes" })).rejects.toThrow("must be a boolean");
+      await col.insert({ active: true });
+    });
+
+    it("validates enum type", async () => {
+      const col = await db.collection(defineSchema({
+        name: "items",
+        fields: { status: { type: "enum", values: ["open", "closed"] } },
+      }));
+
+      await expect(col.insert({ status: "invalid" })).rejects.toThrow("must be one of: open, closed");
+      await col.insert({ status: "open" });
+    });
+
+    it("validates string array", async () => {
+      const col = await db.collection(defineSchema({
+        name: "items",
+        fields: { tags: { type: "string[]" } },
+      }));
+
+      await expect(col.insert({ tags: [1, 2] })).rejects.toThrow("string array");
+      await col.insert({ tags: ["a", "b"] });
+    });
+
+    it("validates date type", async () => {
+      const col = await db.collection(defineSchema({
+        name: "items",
+        fields: { due: { type: "date" } },
+      }));
+
+      await expect(col.insert({ due: 42 })).rejects.toThrow("date");
+      await col.insert({ due: "2026-04-10" });
+    });
+
+    it("skips validation for undefined optional fields", async () => {
+      const col = await db.collection(defineSchema({
+        name: "items",
+        fields: {
+          title: { type: "string", required: true },
+          priority: { type: "enum", values: ["H", "M", "L"] },
+        },
+      }));
+
+      const id = await col.insert({ title: "Hello" }); // priority is undefined, that's ok
+      expect(col.findOne(id)?.title).toBe("Hello");
+    });
+  });
+
+  describe("defaults", () => {
+    it("applies static defaults on insert", async () => {
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["pending", "done"], default: "pending" },
+        },
+      }));
+
+      const id = await col.insert({ title: "Fix bug" });
+      expect(col.findOne(id)?.status).toBe("pending");
+    });
+
+    it("applies function defaults on insert", async () => {
+      const col = await db.collection(defineSchema({
+        name: "items",
+        fields: {
+          createdAt: { type: "string", default: () => new Date().toISOString() },
+        },
+      }));
+
+      const id = await col.insert({ name: "test" });
+      expect(col.findOne(id)?.createdAt).toBeTruthy();
+    });
+
+    it("does not overwrite provided values", async () => {
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: {
+          status: { type: "enum", values: ["pending", "done"], default: "pending" },
+        },
+      }));
+
+      const id = await col.insert({ status: "done" });
+      expect(col.findOne(id)?.status).toBe("done");
+    });
+  });
+
+  describe("auto-indexing", () => {
+    it("creates indexes on collection open", async () => {
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: {
+          status: { type: "string" },
+          priority: { type: "string" },
+        },
+        indexes: ["status", "priority"],
+      }));
+
+      expect(col.listIndexes()).toContain("status");
+      expect(col.listIndexes()).toContain("priority");
+    });
+
+    it("creates composite indexes on collection open", async () => {
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: {
+          status: { type: "string" },
+          priority: { type: "string" },
+        },
+        compositeIndexes: [["status", "priority"]],
+      }));
+
+      expect(col.listCompositeIndexes()).toEqual([["status", "priority"]]);
+    });
+  });
+
+  describe("computed fields", () => {
+    it("adds computed fields to query results", async () => {
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: { title: { type: "string", required: true } },
+        computed: {
+          wordCount: (r) => (r.title as string).split(" ").length,
+        },
+      }));
+
+      const id = await col.insert({ title: "Fix the login bug" });
+      expect(col.findOne(id)?.wordCount).toBe(4);
+    });
+  });
+
+  describe("virtual filters", () => {
+    it("filters with virtual predicates", async () => {
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: {
+          title: { type: "string", required: true },
+          done: { type: "boolean", default: false },
+        },
+        virtualFilters: {
+          "+PENDING": (r) => !r.done,
+        },
+      }));
+
+      await col.insert({ title: "A", done: true });
+      await col.insert({ title: "B", done: false });
+
+      const pending = col.find({ filter: { "+PENDING": true } });
+      expect(pending.records).toHaveLength(1);
+      expect(pending.records[0].title).toBe("B");
+    });
+  });
+
+  describe("lifecycle hooks", () => {
+    it("beforeInsert can modify the record", async () => {
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: { title: { type: "string" } },
+        hooks: {
+          beforeInsert: (record) => ({ ...record, title: (record.title as string).toUpperCase() }),
+        },
+      }));
+
+      const id = await col.insert({ title: "hello" });
+      expect(col.findOne(id)?.title).toBe("HELLO");
+    });
+
+    it("afterInsert fires with id and record", async () => {
+      const afterFn = vi.fn();
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: { title: { type: "string" } },
+        hooks: { afterInsert: afterFn },
+      }));
+
+      await col.insert({ title: "test" });
+      expect(afterFn).toHaveBeenCalledTimes(1);
+      expect(afterFn.mock.calls[0][1].title).toBe("test");
+    });
+
+    it("afterUpdate fires on update", async () => {
+      const afterFn = vi.fn();
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: { title: { type: "string" }, status: { type: "string" } },
+        hooks: { afterUpdate: afterFn },
+      }));
+
+      const id = await col.insert({ title: "test", status: "open" });
+      await col.update({ _id: id }, { $set: { status: "closed" } });
+      expect(afterFn).toHaveBeenCalled();
+      expect(afterFn.mock.calls[0][0]).toContain(id);
+    });
+
+    it("afterDelete fires on delete", async () => {
+      const afterFn = vi.fn();
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: { title: { type: "string" } },
+        hooks: { afterDelete: afterFn },
+      }));
+
+      const id = await col.insert({ title: "test" });
+      await col.remove({ _id: id });
+      expect(afterFn).toHaveBeenCalled();
+    });
+  });
+
+  describe("full schema integration", () => {
+    it("works with all features combined", async () => {
+      const col = await db.collection(defineSchema({
+        name: "tasks",
+        fields: {
+          title: { type: "string", required: true, maxLength: 200 },
+          status: { type: "enum", values: ["pending", "done"], default: "pending" },
+          priority: { type: "enum", values: ["H", "M", "L"], default: "M" },
+          score: { type: "number", min: 0, max: 100 },
+        },
+        indexes: ["status"],
+        computed: {
+          isHighPriority: (r) => r.priority === "H",
+        },
+        virtualFilters: {
+          "+HIGH": (r) => r.priority === "H",
+        },
+        textSearch: true,
+      }));
+
+      await col.insert({ title: "Fix critical bug", priority: "H", score: 90 });
+      await col.insert({ title: "Update docs", score: 30 });
+
+      // Defaults applied
+      const all = col.find();
+      expect(all.records.every((r) => r.status === "pending")).toBe(true);
+      expect(all.records[1].priority).toBe("M");
+
+      // Computed
+      expect(all.records[0].isHighPriority).toBe(true);
+      expect(all.records[1].isHighPriority).toBe(false);
+
+      // Virtual filter
+      const high = col.find({ filter: { "+HIGH": true } });
+      expect(high.records).toHaveLength(1);
+
+      // Index used
+      expect(col.listIndexes()).toContain("status");
+
+      // Text search
+      const results = col.search("critical");
+      expect(results.records).toHaveLength(1);
+    });
+  });
+});

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+- **`defineSchema()`** — declarative collection definitions. Define fields with types (string, number, boolean, date, enum, arrays), constraints (required, maxLength, min/max, pattern), defaults, computed fields, virtual filters, lifecycle hooks (beforeInsert, afterInsert, afterUpdate, afterDelete), and auto-indexing in a single schema object. Pass to `db.collection(schema)`.
+
 ## [1.0.0] - 2026-04-10
 
 ### Performance

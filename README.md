@@ -42,6 +42,45 @@ await tasks.update(
 await db.close();
 ```
 
+## Declarative Schemas
+
+Define typed, validated collections in one place:
+
+```typescript
+import { AgentDB, defineSchema } from "@backloghq/agentdb";
+
+const db = new AgentDB("./data");
+await db.init();
+
+const tasks = await db.collection(defineSchema({
+  name: "tasks",
+  fields: {
+    title: { type: "string", required: true, maxLength: 200 },
+    status: { type: "enum", values: ["pending", "done"], default: "pending" },
+    priority: { type: "enum", values: ["H", "M", "L"], default: "M" },
+    score: { type: "number", min: 0, max: 100 },
+    tags: { type: "string[]" },
+  },
+  indexes: ["status", "priority"],
+  computed: {
+    isUrgent: (r) => r.priority === "H" && r.status === "pending",
+  },
+  virtualFilters: {
+    "+URGENT": (r) => r.priority === "H" && r.status === "pending",
+  },
+  hooks: {
+    beforeInsert: (record) => ({ ...record, createdAt: new Date().toISOString() }),
+  },
+}));
+
+await tasks.insert({ title: "Fix critical bug", priority: "H" });
+// → status defaults to "pending", priority validated, createdAt auto-set
+
+const urgent = tasks.find({ filter: { "+URGENT": true } });
+```
+
+Fields support: `string`, `number`, `boolean`, `date`, `enum`, `string[]`, `number[]`, `object`. Constraints: `required`, `maxLength`, `min`, `max`, `pattern`, `default`.
+
 ## Three Ways to Use It
 
 ### 1. Direct Import
