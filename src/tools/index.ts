@@ -62,16 +62,16 @@ function makeSafe(db: AgentDB, toolName: string, annotations: { readOnlyHint?: b
 
 // --- Schemas ---
 
-const collectionParam = z.string().describe("Collection name");
+const collectionParam = z.string().meta({ description: "Collection name" });
 
 const filterParam = z
-  .union([z.record(z.unknown()), z.string()])
+  .union([z.record(z.string(), z.unknown()), z.string()])
   .optional()
-  .describe("Filter: JSON object ({role: 'admin'}) or compact string ('role:admin age.gt:18')");
+  .meta({ description: "Filter: JSON object ({role: 'admin'}) or compact string ('role:admin age.gt:18')" });
 
 const mutationOpts = {
-  agent: z.string().optional().describe("Agent identity — who is making this change"),
-  reason: z.string().optional().describe("Why this change is being made"),
+  agent: z.string().optional().meta({ description: "Agent identity — who is making this change" }),
+  reason: z.string().optional().meta({ description: "Why this change is being made" }),
 };
 
 // --- Tool definitions ---
@@ -131,7 +131,7 @@ export function getTools(db: AgentDB): AgentTool[] {
       title: "Purge Dropped Collection",
       description: "Permanently delete a previously soft-dropped collection. This cannot be undone. Use db_drop first to soft-delete, then db_purge to permanently erase." + API_NOTE,
       schema: z.object({
-        name: z.string().describe("Name of the dropped collection to purge"),
+        name: z.string().meta({ description: "Name of the dropped collection to purge" }),
       }),
       outputSchema: z.object({ purged: z.string() }),
       annotations: DESTRUCTIVE,
@@ -147,8 +147,8 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Insert one or more records into a collection. Auto-generates _id if not provided. Use 'record' for single insert, 'records' for batch insert (more efficient — single disk write). Returns the generated _id(s)." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        record: z.record(z.unknown()).optional().describe("Single record to insert. E.g. {name: 'Alice', role: 'admin'}"),
-        records: z.array(z.record(z.unknown())).optional().describe("Multiple records for batch insert (single disk write). E.g. [{name: 'Alice'}, {name: 'Bob'}]"),
+        record: z.record(z.string(), z.unknown()).optional().meta({ description: "Single record to insert. E.g. {name: 'Alice', role: 'admin'}" }),
+        records: z.array(z.record(z.string(), z.unknown())).optional().meta({ description: "Multiple records for batch insert (single disk write). E.g. [{name: 'Alice'}, {name: 'Bob'}]" }),
         ...mutationOpts,
       }),
       outputSchema: z.object({ ids: z.array(z.string()), inserted: z.number() }),
@@ -173,13 +173,13 @@ export function getTools(db: AgentDB): AgentTool[] {
       schema: z.object({
         collection: collectionParam,
         filter: filterParam,
-        limit: z.number().optional().default(50).describe("Max records to return (default 50)"),
-        offset: z.number().optional().default(0).describe("Skip N records"),
-        summary: z.boolean().optional().default(false).describe("Return summary fields only (omit long text)"),
-        maxTokens: z.number().optional().describe("Approximate token budget — stop adding records when estimated tokens exceed this"),
-        sort: z.string().optional().describe("Sort by field. Prefix with '-' for descending. E.g. 'name' or '-score'. Supports dot notation."),
+        limit: z.number().optional().default(50).meta({ description: "Max records to return (default 50)" }),
+        offset: z.number().optional().default(0).meta({ description: "Skip N records" }),
+        summary: z.boolean().optional().default(false).meta({ description: "Return summary fields only (omit long text)" }),
+        maxTokens: z.number().optional().meta({ description: "Approximate token budget — stop adding records when estimated tokens exceed this" }),
+        sort: z.string().optional().meta({ description: "Sort by field. Prefix with '-' for descending. E.g. 'name' or '-score'. Supports dot notation." }),
       }),
-      outputSchema: z.object({ records: z.array(z.record(z.unknown())), total: z.number(), truncated: z.boolean(), estimatedTokens: z.number().optional() }),
+      outputSchema: z.object({ records: z.array(z.record(z.string(), z.unknown())), total: z.number(), truncated: z.boolean(), estimatedTokens: z.number().optional() }),
       annotations: READ,
       execute: safe("db_find", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
@@ -200,9 +200,9 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Get a single record by its _id. Returns the full record with all fields. Returns null if not found. Use db_find for queries, this tool is for direct ID lookup." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        id: z.string().describe("Record _id"),
+        id: z.string().meta({ description: "Record _id" }),
       }),
-      outputSchema: z.object({ record: z.record(z.unknown()).nullable(), message: z.string().optional() }),
+      outputSchema: z.object({ record: z.record(z.string(), z.unknown()).nullable(), message: z.string().optional() }),
       annotations: READ,
       execute: safe("db_find_one", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
@@ -218,13 +218,13 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Update records matching a filter using operators: $set (set fields), $unset (remove fields), $inc (increment numbers), $push (append to arrays). Returns the number of modified records. Use db_find first to preview which records match." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        filter: z.union([z.record(z.unknown()), z.string()]).describe("Filter: JSON object or compact string"),
+        filter: z.union([z.record(z.string(), z.unknown()), z.string()]).meta({ description: "Filter: JSON object or compact string" }),
         update: z.object({
-          $set: z.record(z.unknown()).optional(),
-          $unset: z.record(z.unknown()).optional(),
-          $inc: z.record(z.number()).optional(),
-          $push: z.record(z.unknown()).optional(),
-        }).describe("Update operators"),
+          $set: z.record(z.string(), z.unknown()).optional(),
+          $unset: z.record(z.string(), z.unknown()).optional(),
+          $inc: z.record(z.string(), z.number()).optional(),
+          $push: z.record(z.string(), z.unknown()).optional(),
+        }).meta({ description: "Update operators" }),
         ...mutationOpts,
       }),
       outputSchema: z.object({ modified: z.number() }),
@@ -247,8 +247,8 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Insert or update a record by ID. If the ID exists, replaces the record; otherwise inserts it. Idempotent — safe to retry. Returns whether the action was 'inserted' or 'updated'." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        id: z.string().describe("Record _id"),
-        record: z.record(z.unknown()).describe("Record data"),
+        id: z.string().meta({ description: "Record _id" }),
+        record: z.record(z.string(), z.unknown()).meta({ description: "Record data" }),
         ...mutationOpts,
       }),
       outputSchema: z.object({ id: z.string(), action: z.enum(["inserted", "updated"]) }),
@@ -269,7 +269,7 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Permanently delete records matching a filter. Returns the number of deleted records. Use db_find first to preview matches. This cannot be undone except with db_undo (which only reverses the last mutation)." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        filter: z.union([z.record(z.unknown()), z.string()]).describe("Filter to match records to delete (JSON object or compact string)"),
+        filter: z.union([z.record(z.string(), z.unknown()), z.string()]).meta({ description: "Filter to match records to delete (JSON object or compact string)" }),
         ...mutationOpts,
       }),
       outputSchema: z.object({ deleted: z.number() }),
@@ -291,17 +291,17 @@ export function getTools(db: AgentDB): AgentTool[] {
       schema: z.object({
         collection: collectionParam,
         operations: z.array(z.object({
-          op: z.enum(["insert", "update", "delete"]).describe("Operation type"),
-          id: z.string().optional().describe("Record ID (required for update/delete)"),
-          record: z.record(z.unknown()).optional().describe("Record data (for insert)"),
-          filter: z.union([z.record(z.unknown()), z.string()]).optional().describe("Filter (for update/delete)"),
+          op: z.enum(["insert", "update", "delete"]).meta({ description: "Operation type" }),
+          id: z.string().optional().meta({ description: "Record ID (required for update/delete)" }),
+          record: z.record(z.string(), z.unknown()).optional().meta({ description: "Record data (for insert)" }),
+          filter: z.union([z.record(z.string(), z.unknown()), z.string()]).optional().meta({ description: "Filter (for update/delete)" }),
           update: z.object({
-            $set: z.record(z.unknown()).optional(),
-            $unset: z.record(z.unknown()).optional(),
-            $inc: z.record(z.number()).optional(),
-            $push: z.record(z.unknown()).optional(),
-          }).optional().describe("Update operators (for update)"),
-        })).describe("Array of operations to execute atomically"),
+            $set: z.record(z.string(), z.unknown()).optional(),
+            $unset: z.record(z.string(), z.unknown()).optional(),
+            $inc: z.record(z.string(), z.number()).optional(),
+            $push: z.record(z.string(), z.unknown()).optional(),
+          }).optional().meta({ description: "Update operators (for update)" }),
+        })).meta({ description: "Array of operations to execute atomically" }),
         ...mutationOpts,
       }),
       outputSchema: z.object({ operations: z.number() }),
@@ -372,7 +372,7 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Get the full mutation history for a specific record by _id. Shows all operations (insert, update, delete) with timestamps, before/after state, and agent identity. Useful for audit trails and understanding how data changed." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        id: z.string().describe("Record _id"),
+        id: z.string().meta({ description: "Record _id" }),
       }),
       outputSchema: z.object({ operations: z.array(z.unknown()) }),
       annotations: READ,
@@ -388,7 +388,7 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Inspect the shape of records in a collection by sampling. Reports field names, types (string, number, boolean, array, object), and example values. Use this to understand the data structure before writing queries or filters." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        sampleSize: z.number().optional().default(50).describe("Number of records to sample"),
+        sampleSize: z.number().optional().default(50).meta({ description: "Number of records to sample" }),
       }),
       outputSchema: z.object({ fields: z.array(z.object({ name: z.string(), type: z.string(), example: z.unknown() })), sampleCount: z.number() }),
       annotations: READ,
@@ -404,7 +404,7 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Get unique values for a specific field across all records in a collection. Supports dot notation for nested fields (e.g. 'metadata.category'). Useful for discovering what values exist before writing filters." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        field: z.string().describe("Field name (supports dot notation for nested fields)"),
+        field: z.string().meta({ description: "Field name (supports dot notation for nested fields)" }),
       }),
       outputSchema: z.object({ field: z.string(), values: z.array(z.unknown()), count: z.number() }),
       annotations: READ,
@@ -420,8 +420,8 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Move records matching a filter to cold storage (quarterly archive segments). Archived records are removed from the active set, keeping queries fast. Archives are append-only and read-only. Use db_archive_list to see segments and db_archive_load to view archived data." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        filter: z.union([z.record(z.unknown()), z.string()]).describe("Filter: JSON object or compact string"),
-        segment: z.string().optional().describe("Archive segment name (defaults to current quarter, e.g. 2026-Q2)"),
+        filter: z.union([z.record(z.string(), z.unknown()), z.string()]).meta({ description: "Filter: JSON object or compact string" }),
+        segment: z.string().optional().meta({ description: "Archive segment name (defaults to current quarter, e.g. 2026-Q2)" }),
       }),
       outputSchema: z.object({ archived: z.number() }),
       annotations: DESTRUCTIVE,
@@ -454,9 +454,9 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Load and view records from an archive segment. Read-only — records are not re-inserted into the active set. Use db_archive_list to discover available segments." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        segment: z.string().describe("Archive segment name"),
+        segment: z.string().meta({ description: "Archive segment name" }),
       }),
-      outputSchema: z.object({ records: z.array(z.record(z.unknown())), count: z.number() }),
+      outputSchema: z.object({ records: z.array(z.record(z.string(), z.unknown())), count: z.number() }),
       annotations: READ,
       execute: safe("db_archive_load", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
@@ -471,12 +471,12 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Search records by meaning using vector embeddings. Pass a natural language query and get the most similar records. Supports hybrid queries: combine semantic similarity with attribute filters. Requires an embedding provider to be configured. Records are lazily embedded on first search." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        query: z.string().describe("Natural language search query"),
+        query: z.string().meta({ description: "Natural language search query" }),
         filter: filterParam,
-        limit: z.number().optional().default(10).describe("Max results (default 10)"),
-        summary: z.boolean().optional().default(false).describe("Return summary fields only"),
+        limit: z.number().optional().default(10).meta({ description: "Max results (default 10)" }),
+        summary: z.boolean().optional().default(false).meta({ description: "Return summary fields only" }),
       }),
-      outputSchema: z.object({ records: z.array(z.record(z.unknown())), scores: z.array(z.number()) }),
+      outputSchema: z.object({ records: z.array(z.record(z.string(), z.unknown())), scores: z.array(z.number()) }),
       annotations: READ,
       execute: safe("db_semantic_search", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
@@ -508,9 +508,9 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Store a pre-computed vector for a record. No embedding provider required. Creates or replaces the record with the given vector and optional metadata fields." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        id: z.string().describe("Record ID"),
-        vector: z.array(z.number()).describe("Vector (array of numbers)"),
-        metadata: z.record(z.unknown()).optional().describe("Optional metadata fields to store with the vector"),
+        id: z.string().meta({ description: "Record ID" }),
+        vector: z.array(z.number()).meta({ description: "Vector (array of numbers)" }),
+        metadata: z.record(z.string(), z.unknown()).optional().meta({ description: "Optional metadata fields to store with the vector" }),
       }),
       outputSchema: z.object({ id: z.string() }),
       annotations: WRITE,
@@ -531,12 +531,12 @@ export function getTools(db: AgentDB): AgentTool[] {
       description: "Search by a raw vector (array of numbers). Returns the most similar records with cosine similarity scores. No embedding provider required — works with vectors stored via db_vector_upsert. Use db_semantic_search instead if you have a text query and an embedding provider configured." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        vector: z.array(z.number()).describe("Query vector"),
-        filter: z.union([z.record(z.unknown()), z.string()]).optional().describe("Optional attribute filter"),
-        limit: z.number().optional().describe("Max results (default: 10)"),
-        summary: z.boolean().optional().describe("Return summary fields only"),
+        vector: z.array(z.number()).meta({ description: "Query vector" }),
+        filter: z.union([z.record(z.string(), z.unknown()), z.string()]).optional().meta({ description: "Optional attribute filter" }),
+        limit: z.number().optional().meta({ description: "Max results (default: 10)" }),
+        summary: z.boolean().optional().meta({ description: "Return summary fields only" }),
       }),
-      outputSchema: z.object({ records: z.array(z.record(z.unknown())), scores: z.array(z.number()) }),
+      outputSchema: z.object({ records: z.array(z.record(z.string(), z.unknown())), scores: z.array(z.number()) }),
       annotations: READ,
       execute: safe("db_vector_search", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
@@ -553,9 +553,9 @@ export function getTools(db: AgentDB): AgentTool[] {
       title: "Export Collections",
       description: "Export all or named collections as a self-contained JSON backup. The export includes all records with their _id fields. Use db_import to restore into a fresh or existing database." + API_NOTE,
       schema: z.object({
-        collections: z.array(z.string()).optional().describe("Collection names to export (default: all)"),
+        collections: z.array(z.string()).optional().meta({ description: "Collection names to export (default: all)" }),
       }),
-      outputSchema: z.object({ version: z.number(), exportedAt: z.string(), collections: z.record(z.unknown()) }),
+      outputSchema: z.object({ version: z.number(), exportedAt: z.string(), collections: z.record(z.string(), z.unknown()) }),
       annotations: READ,
       execute: safe("db_export", READ)(async (args) => {
         return db.export(args.collections as string[] | undefined);
@@ -570,9 +570,9 @@ export function getTools(db: AgentDB): AgentTool[] {
         data: z.object({
           version: z.number(),
           exportedAt: z.string(),
-          collections: z.record(z.object({ records: z.array(z.record(z.unknown())) })),
-        }).describe("Export data from db_export"),
-        overwrite: z.boolean().optional().default(false).describe("Overwrite existing records (default: skip)"),
+          collections: z.record(z.string(), z.object({ records: z.array(z.record(z.string(), z.unknown())) })),
+        }).meta({ description: "Export data from db_export" }),
+        overwrite: z.boolean().optional().default(false).meta({ description: "Overwrite existing records (default: skip)" }),
       }),
       outputSchema: z.object({ collections: z.number(), records: z.number() }),
       annotations: DESTRUCTIVE,

@@ -42,8 +42,8 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
       {
         title: tool.title,
         description: tool.description,
-        inputSchema: tool.schema as z.ZodObject<z.ZodRawShape>,
-        outputSchema: tool.outputSchema as z.ZodObject<z.ZodRawShape> | undefined,
+        inputSchema: tool.schema as z.ZodObject,
+        outputSchema: tool.outputSchema as z.ZodObject | undefined,
         annotations: tool.annotations,
       },
       async (args) => {
@@ -62,7 +62,7 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
         description: "Subscribe to real-time change notifications on a collection. When records are inserted, updated, or deleted, you'll receive a logging notification with the change details.",
         inputSchema: z.object({
           collection: z.string().describe("Collection to subscribe to"),
-        }) as z.ZodObject<z.ZodRawShape>,
+        }) as z.ZodObject,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
       async (args) => {
@@ -78,7 +78,7 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
         description: "Stop receiving change notifications for a collection.",
         inputSchema: z.object({
           collection: z.string().describe("Collection to unsubscribe from"),
-        }) as z.ZodObject<z.ZodRawShape>,
+        }) as z.ZodObject,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
       async (args) => {

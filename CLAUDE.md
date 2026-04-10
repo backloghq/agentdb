@@ -61,7 +61,7 @@ src/
     http.ts             # Custom HTTP embedding provider
     quantize.ts         # Int8 quantization for vector storage
     index.ts            # Provider factory
-  tools/index.ts        # 24 tool definitions with zod schemas + safe() wrapper
+  tools/index.ts        # 26 tool definitions with zod schemas + safe() wrapper (28 total with db_subscribe/db_unsubscribe on HTTP)
   mcp/index.ts          # MCP server (stdio + HTTP/Streamable transport)
   mcp/auth.ts           # Auth middleware (bearer token, rate limiter, audit logger)
   mcp/jwt.ts            # JWT validation with jose
