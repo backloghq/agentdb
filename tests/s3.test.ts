@@ -8,13 +8,17 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Store } from "@backloghq/opslog";
-import { S3Backend } from "@backloghq/opslog-s3";
-import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from "@aws-sdk/client-s3";
 import { Collection } from "../src/collection.js";
 
 const BUCKET = process.env.AGENTDB_S3_BUCKET ?? "";
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const PREFIX = `agentdb-bench-${Date.now()}`;
+
+// Dynamic imports — only loaded when S3 tests actually run
+let S3Backend: typeof import("@backloghq/opslog-s3").S3Backend;
+let S3Client: typeof import("@aws-sdk/client-s3").S3Client;
+let ListObjectsV2Command: typeof import("@aws-sdk/client-s3").ListObjectsV2Command;
+let DeleteObjectsCommand: typeof import("@aws-sdk/client-s3").DeleteObjectsCommand;
 
 function randomString(len: number): string {
   const chars = "abcdefghijklmnopqrstuvwxyz ";
@@ -67,13 +71,21 @@ async function cleanupS3(client: S3Client): Promise<void> {
 const runS3 = BUCKET.length > 0;
 
 describe.skipIf(!runS3)("S3 backend benchmarks", () => {
-  let client: S3Client;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let client: any;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    const s3Mod = await import("@aws-sdk/client-s3");
+    const opslogS3 = await import("@backloghq/opslog-s3");
+    S3Backend = opslogS3.S3Backend;
+    S3Client = s3Mod.S3Client;
+    ListObjectsV2Command = s3Mod.ListObjectsV2Command;
+    DeleteObjectsCommand = s3Mod.DeleteObjectsCommand;
     client = new S3Client({ region: REGION });
   });
 
   afterAll(async () => {
+    if (!client) return;
     // Clean up all test data
     await cleanupS3(client);
     client.destroy();
@@ -203,4 +215,43 @@ describe.skipIf(!runS3)("S3 backend benchmarks", () => {
     console.log("  Cold start depends on snapshot + WAL size and S3 GetObject latency.\n");
     expect(true).toBe(true);
   });
+
+  it("blob: write, read, list, delete on S3", async () => {
+    const backend = new S3Backend({ bucket: BUCKET, prefix: `${PREFIX}/blobs`, client });
+    const store = new Store<Record<string, unknown>>();
+    const col = new Collection("bench", store);
+    await col.open("s3", { checkpointThreshold: 5000, backend });
+
+    await col.insert({ _id: "doc1", title: "Blob test" });
+
+    // Write text blob
+    await col.writeBlob("doc1", "spec.md", "# My Spec\n\nHello from S3!");
+    const text = await col.readBlob("doc1", "spec.md");
+    expect(text.toString("utf-8")).toBe("# My Spec\n\nHello from S3!");
+
+    // Write binary blob
+    const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+    await col.writeBlob("doc1", "image.png", binary);
+    const readBinary = await col.readBlob("doc1", "image.png");
+    expect(Buffer.compare(readBinary, binary)).toBe(0);
+
+    // List blobs
+    const blobs = await col.listBlobs("doc1");
+    expect(blobs).toContain("spec.md");
+    expect(blobs).toContain("image.png");
+
+    // Delete blob
+    await col.deleteBlob("doc1", "spec.md");
+    const afterDelete = await col.listBlobs("doc1");
+    expect(afterDelete).not.toContain("spec.md");
+    expect(afterDelete).toContain("image.png");
+
+    // Delete all blobs for record
+    await col.deleteBlobsForRecord("doc1");
+    const afterPurge = await col.listBlobs("doc1");
+    expect(afterPurge).toEqual([]);
+
+    await col.close();
+    console.log("  Blob storage on S3: write, read, list, delete — all passed");
+  }, 30000);
 });

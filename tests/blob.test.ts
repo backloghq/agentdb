@@ -1,0 +1,113 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Store } from "@backloghq/opslog";
+import { Collection } from "../src/collection.js";
+
+describe("Blob storage", () => {
+  let tmpDir: string;
+  let store: Store<Record<string, unknown>>;
+  let col: Collection;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "agentdb-blob-"));
+    store = new Store<Record<string, unknown>>();
+    col = new Collection("test", store);
+    await col.open(tmpDir, { checkpointThreshold: 1000 });
+    await col.insert({ _id: "doc1", title: "Test" });
+  });
+
+  afterEach(async () => {
+    await col.close();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("write and read a text blob", async () => {
+    await col.writeBlob("doc1", "spec.md", "# My Spec\n\nDetails here.");
+    const content = await col.readBlob("doc1", "spec.md");
+    expect(content.toString("utf-8")).toBe("# My Spec\n\nDetails here.");
+  });
+
+  it("write and read a binary blob", async () => {
+    const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    await col.writeBlob("doc1", "image.png", binary);
+    const content = await col.readBlob("doc1", "image.png");
+    expect(Buffer.compare(content, binary)).toBe(0);
+  });
+
+  it("listBlobs returns blob names", async () => {
+    await col.writeBlob("doc1", "spec.md", "content");
+    await col.writeBlob("doc1", "notes.txt", "notes");
+    const blobs = await col.listBlobs("doc1");
+    expect(blobs).toContain("spec.md");
+    expect(blobs).toContain("notes.txt");
+  });
+
+  it("deleteBlob removes the blob", async () => {
+    await col.writeBlob("doc1", "temp.txt", "temp");
+    await col.deleteBlob("doc1", "temp.txt");
+    const blobs = await col.listBlobs("doc1");
+    expect(blobs).not.toContain("temp.txt");
+  });
+
+  it("rejects invalid blob names", async () => {
+    await expect(col.writeBlob("doc1", "../evil", "hack")).rejects.toThrow("Invalid blob name");
+    await expect(col.writeBlob("doc1", "", "hack")).rejects.toThrow("Invalid blob name");
+  });
+
+  it("throws when record doesn't exist", async () => {
+    await expect(col.writeBlob("nonexistent", "file.txt", "content")).rejects.toThrow("not found");
+  });
+
+  it("listBlobs returns empty for record with no blobs", async () => {
+    await col.insert({ _id: "empty-doc", title: "No blobs" });
+    const blobs = await col.listBlobs("empty-doc");
+    expect(blobs).toEqual([]);
+  });
+
+  it("cascade: deleting a record removes its blobs", async () => {
+    await col.insert({ _id: "cascade1", title: "Cascade test" });
+    await col.writeBlob("cascade1", "spec.md", "content");
+    await col.writeBlob("cascade1", "notes.txt", "notes");
+    expect((await col.listBlobs("cascade1")).length).toBe(2);
+
+    await col.remove({ _id: "cascade1" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const blobs = await col.listBlobs("cascade1");
+    expect(blobs).toEqual([]);
+  });
+
+  it("rejects path traversal in blob name on read/delete", async () => {
+    const id = await col.insert({ title: "test" });
+    await expect(col.readBlob(id, "../../../etc/passwd")).rejects.toThrow("Invalid blob name");
+    await expect(col.deleteBlob(id, "../secret")).rejects.toThrow("Invalid blob name");
+  });
+
+  it("rejects path traversal in recordId", async () => {
+    await expect(col.writeBlob("../evil", "file.txt", "data")).rejects.toThrow("Invalid record ID");
+    await expect(col.readBlob("../../etc/passwd", "file.txt")).rejects.toThrow("Invalid record ID");
+    await expect(col.listBlobs("foo/../../bar")).rejects.toThrow("Invalid record ID");
+    await expect(col.deleteBlob("a\\b", "file.txt")).rejects.toThrow("Invalid record ID");
+  });
+
+  it("stores blobs inside collection directory, not CWD", async () => {
+    await col.writeBlob("doc1", "location-test.txt", "hello");
+    // Blob should exist inside the collection tmpDir
+    const blobFile = join(tmpDir, "blobs", "doc1", "location-test.txt");
+    const s = await stat(blobFile);
+    expect(s.isFile()).toBe(true);
+  });
+
+  it("cascade: deleteById removes blobs", async () => {
+    await col.insert({ _id: "cascade2", title: "Another" });
+    await col.writeBlob("cascade2", "file.txt", "data");
+
+    await col.deleteById("cascade2");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const blobs = await col.listBlobs("cascade2");
+    expect(blobs).toEqual([]);
+  });
+});

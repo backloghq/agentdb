@@ -51,6 +51,8 @@ const MODIFIER_MAP: Record<string, string> = {
 
 type Token =
   | { type: "attr"; field: string; modifier: string | null; value: string }
+  | { type: "tag"; include: boolean; value: string }
+  | { type: "text"; value: string }
   | { type: "and" }
   | { type: "or" }
   | { type: "lparen" }
@@ -120,11 +122,18 @@ function tokenize(input: string): Token[] {
       continue;
     }
 
+    // +tag / -tag syntax
+    if ((word.startsWith("+") || word.startsWith("-")) && !word.includes(":")) {
+      tokens.push({ type: "tag", include: word.startsWith("+"), value: word.slice(1) });
+      continue;
+    }
+
     // Parse attribute expression: field.modifier:value or field:value
     const colonIdx = word.indexOf(":");
     if (colonIdx === -1) {
-      // Bare word — treat as a text search or error
-      throw new Error(`Invalid filter token: '${word}'. Expected field:value syntax.`);
+      // Bare word — collected as text search term
+      tokens.push({ type: "text", value: word });
+      continue;
     }
 
     const left = word.slice(0, colonIdx);
@@ -169,35 +178,35 @@ function coerceValue(value: string): unknown {
 
 type FilterObject = Record<string, unknown>;
 
-function parseExpression(tokens: Token[], pos: { i: number }): FilterObject {
-  return parseOr(tokens, pos);
+function parseExpression(tokens: Token[], pos: { i: number }, tagField: string): FilterObject {
+  return parseOr(tokens, pos, tagField);
 }
 
-function parseOr(tokens: Token[], pos: { i: number }): FilterObject {
-  const left = parseAnd(tokens, pos);
+function parseOr(tokens: Token[], pos: { i: number }, tagField: string): FilterObject {
+  const left = parseAnd(tokens, pos, tagField);
   const operands = [left];
 
   while (pos.i < tokens.length && tokens[pos.i].type === "or") {
     pos.i++; // skip 'or'
-    operands.push(parseAnd(tokens, pos));
+    operands.push(parseAnd(tokens, pos, tagField));
   }
 
   if (operands.length === 1) return operands[0];
   return { $or: operands };
 }
 
-function parseAnd(tokens: Token[], pos: { i: number }): FilterObject {
-  const left = parsePrimary(tokens, pos);
+function parseAnd(tokens: Token[], pos: { i: number }, tagField: string): FilterObject {
+  const left = parsePrimary(tokens, pos, tagField);
   const operands = [left];
 
   while (pos.i < tokens.length) {
     const token = tokens[pos.i];
     if (token.type === "and") {
       pos.i++; // skip explicit 'and'
-      operands.push(parsePrimary(tokens, pos));
-    } else if (token.type === "attr" || token.type === "lparen") {
+      operands.push(parsePrimary(tokens, pos, tagField));
+    } else if (token.type === "attr" || token.type === "lparen" || token.type === "tag" || token.type === "text") {
       // Implicit AND — adjacent terms
-      operands.push(parsePrimary(tokens, pos));
+      operands.push(parsePrimary(tokens, pos, tagField));
     } else {
       break;
     }
@@ -207,7 +216,7 @@ function parseAnd(tokens: Token[], pos: { i: number }): FilterObject {
   return { $and: operands };
 }
 
-function parsePrimary(tokens: Token[], pos: { i: number }): FilterObject {
+function parsePrimary(tokens: Token[], pos: { i: number }, tagField: string): FilterObject {
   if (pos.i >= tokens.length) {
     throw new Error("Unexpected end of filter expression");
   }
@@ -216,7 +225,7 @@ function parsePrimary(tokens: Token[], pos: { i: number }): FilterObject {
 
   if (token.type === "lparen") {
     pos.i++; // skip (
-    const expr = parseExpression(tokens, pos);
+    const expr = parseExpression(tokens, pos, tagField);
     if (pos.i >= tokens.length || tokens[pos.i].type !== "rparen") {
       throw new Error("Unmatched opening parenthesis");
     }
@@ -227,6 +236,26 @@ function parsePrimary(tokens: Token[], pos: { i: number }): FilterObject {
   if (token.type === "attr") {
     pos.i++;
     return attrToFilter(token.field, token.modifier, token.value);
+  }
+
+  if (token.type === "tag") {
+    pos.i++;
+    if (token.include) {
+      return { [tagField]: { $contains: token.value } };
+    } else {
+      return { [tagField]: { $not: { $contains: token.value } } };
+    }
+  }
+
+  if (token.type === "text") {
+    // Collect consecutive text tokens
+    const words: string[] = [token.value];
+    pos.i++;
+    while (pos.i < tokens.length && tokens[pos.i].type === "text") {
+      words.push((tokens[pos.i] as { type: "text"; value: string }).value);
+      pos.i++;
+    }
+    return { $text: words.join(" ") };
   }
 
   throw new Error(`Unexpected token: ${token.type}`);
@@ -271,7 +300,7 @@ function attrToFilter(field: string, modifier: string | null, rawValue: string):
  * parseCompactFilter("name.contains:alice age.gt:18")
  * // → { $and: [{ name: { $contains: "alice" } }, { age: { $gt: 18 } }] }
  */
-export function parseCompactFilter(input: string): FilterObject {
+export function parseCompactFilter(input: string, tagField = "tags"): FilterObject {
   const trimmed = input.trim();
   if (!trimmed) return {};
 
@@ -279,7 +308,7 @@ export function parseCompactFilter(input: string): FilterObject {
   if (tokens.length === 0) return {};
 
   const pos = { i: 0 };
-  const result = parseExpression(tokens, pos);
+  const result = parseExpression(tokens, pos, tagField);
 
   if (pos.i < tokens.length) {
     throw new Error(`Unexpected token at position ${pos.i}: ${tokens[pos.i].type}`);

@@ -42,6 +42,61 @@ await tasks.update(
 await db.close();
 ```
 
+## Declarative Schemas
+
+Define typed, validated collections in one place:
+
+```typescript
+import { AgentDB, defineSchema } from "@backloghq/agentdb";
+
+const db = new AgentDB("./data");
+await db.init();
+
+const tasks = await db.collection(defineSchema({
+  name: "tasks",
+  fields: {
+    title: { type: "string", required: true, maxLength: 200 },
+    status: { type: "enum", values: ["pending", "done"], default: "pending" },
+    priority: { type: "enum", values: ["H", "M", "L"], default: "M" },
+    score: { type: "number", min: 0, max: 100 },
+    tags: { type: "string[]" },
+  },
+  indexes: ["status", "priority"],
+  computed: {
+    isUrgent: (r) => r.priority === "H" && r.status === "pending",
+  },
+  virtualFilters: {
+    "+URGENT": (r) => r.priority === "H" && r.status === "pending",
+  },
+  hooks: {
+    beforeInsert: (record) => ({ ...record, createdAt: new Date().toISOString() }),
+  },
+}));
+
+await tasks.insert({ title: "Fix critical bug", priority: "H" });
+// → status defaults to "pending", priority validated, createdAt auto-set
+
+const urgent = tasks.find({ filter: { "+URGENT": true } });
+```
+
+Fields support: `string`, `number`, `boolean`, `date`, `enum`, `string[]`, `number[]`, `object`, `autoIncrement`. Constraints: `required`, `maxLength`, `min`, `max`, `pattern`, `default`, `resolve`.
+
+**Field resolve** — transform values before validation (e.g. parse natural language dates):
+
+```typescript
+fields: {
+  due: { type: "date", resolve: (v) => v === "tomorrow" ? nextDay() : v },
+  score: { type: "number", resolve: (v) => typeof v === "string" ? parseInt(v) : v },
+}
+```
+
+**Custom tag field** — `+tag`/`-tag` syntax queries "tags" by default, configurable via `tagField`:
+
+```typescript
+defineSchema({ tagField: "labels", fields: { labels: { type: "string[]" } } })
+// +bug → { labels: { $contains: "bug" } }
+```
+
 ## Three Ways to Use It
 
 ### 1. Direct Import
@@ -74,7 +129,7 @@ npx agentdb --path ./data              # stdio (single client)
 npx agentdb --path ./data --http       # HTTP (multiple clients)
 ```
 
-All 26 tools exposed as MCP tools (28 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
+All 30 tools exposed as MCP tools (32 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
 
 ```json
 {
@@ -167,6 +222,10 @@ status:active priority.gt:3           → { $and: [{ status: "active" }, { prior
 name.contains:alice                    → { name: { $contains: "alice" } }
 (role:admin or role:mod)               → { $or: [{ role: "admin" }, { role: "mod" }] }
 tags.in:bug,feature                    → { tags: { $in: ["bug", "feature"] } }
++bug                                   → { tags: { $contains: "bug" } }
+-old                                   → { tags: { $not: { $contains: "old" } } }
+auth error                             → { $text: "auth error" }
+status:active auth                     → { $and: [{ status: "active" }, { $text: "auth" }] }
 ```
 
 Modifier aliases: `gt`, `gte`, `lt`, `lte`, `ne`, `contains`, `has`, `startsWith`, `starts`, `endsWith`, `ends`, `in`, `nin`, `exists`, `regex`, `match`, `eq`, `is`, `not`, `after`, `before`, `above`, `below`, `over`, `under`
@@ -188,6 +247,7 @@ const n = col.count(filter?);
 // Update
 const modified = await col.update(filter, { $set?, $unset?, $inc?, $push? }, opts?);
 const { id, action } = await col.upsert(id, doc, opts?);
+const results = await col.upsertMany([{ _id, ...doc }, ...], opts?);
 
 // Delete
 const deleted = await col.remove(filter, opts?);
@@ -205,7 +265,7 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 
 ## Tool Definitions
 
-`getTools(db)` returns 26 tools:
+`getTools(db)` returns 30 tools:
 
 | Tool | Description |
 |------|-------------|
@@ -233,6 +293,10 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 | `db_embed` | Manually trigger embedding |
 | `db_vector_upsert` | Store a pre-computed vector with metadata |
 | `db_vector_search` | Search by raw vector (no embedding provider needed) |
+| `db_blob_write` | Attach a file (base64) to a record |
+| `db_blob_read` | Read an attached file |
+| `db_blob_list` | List files attached to a record |
+| `db_blob_delete` | Delete an attached file |
 | `db_export` | Export collections as JSON backup |
 | `db_import` | Import from a JSON backup |
 
@@ -327,6 +391,28 @@ await reader.init();
 const col = await reader.collection("tasks");
 await col.tail(); // pick up latest writes
 ```
+
+### Blob storage
+
+Attach files to records — images, PDFs, code, any binary. Stored outside the WAL via the StorageBackend (works on filesystem and S3).
+
+```typescript
+const col = await db.collection("tasks");
+await col.insert({ _id: "task-1", title: "Fix auth" });
+
+// Attach files
+await col.writeBlob("task-1", "spec.md", "# Spec\n\nDetails...");
+await col.writeBlob("task-1", "screenshot.png", imageBuffer);
+
+// Read back
+const spec = await col.readBlob("task-1", "spec.md");
+const blobs = await col.listBlobs("task-1"); // → ["spec.md", "screenshot.png"]
+
+// Delete
+await col.deleteBlob("task-1", "spec.md");
+```
+
+Blobs are automatically cleaned up when their parent record is deleted.
 
 ### Embeddings and vector search
 

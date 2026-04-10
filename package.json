@@ -1,6 +1,6 @@
 {
   "name": "@backloghq/agentdb",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI-first embedded database for LLM agents. Library-first architecture with framework-agnostic tool definitions and MCP adapter.",
   "type": "module",
   "exports": {
@@ -46,16 +46,17 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@backloghq/opslog": "^0.5.1",
+    "@backloghq/opslog": "^0.6.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "express": "^5.2.1",
     "jose": "^6.2.2",
     "zod": "^4.3.6"
   },
   "optionalDependencies": {
-    "@backloghq/opslog-s3": "^0.1.1"
+    "@backloghq/opslog-s3": "^0.2.0"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1028.0",
     "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.6",
     "@types/node": "^25.6.0",

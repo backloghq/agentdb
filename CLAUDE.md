@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** All phases complete. 615 tests, 28 tools (26 core + db_subscribe/db_unsubscribe on HTTP). 5 runnable demos. Auth + security hardened. Group commit ~12x faster writes. Sorted-array indexed queries with range support ($gt/$lt/$gte/$lte). Count-from-index fast path. Predicate cache. HNSW MaxHeap optimized. Incremental index rebuild on tail/watch/undo. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints.
+**Status:** All phases complete. 672 tests, 32 tools (30 core + db_subscribe/db_unsubscribe on HTTP). 5 runnable demos. Auth + security hardened. Group commit ~12x faster writes. Sorted-array indexed queries with range support ($gt/$lt/$gte/$lte). Count-from-index fast path. Predicate cache. HNSW MaxHeap optimized. Incremental index rebuild on tail/watch/undo. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints. Blob storage via StorageBackend (filesystem + S3). Declarative schemas with defineSchema().
 
 ## Commands
 
@@ -40,6 +40,7 @@ agentdb/mcp      — MCP server adapter (stdio + HTTP/Streamable transport)
 src/
   index.ts              # Core exports
   auth-context.ts       # Shared auth identity (AsyncLocalStorage) — used by tools + mcp
+  schema.ts             # defineSchema() — declarative collection definitions with field validation
   agentdb.ts            # AgentDB class: collection manager, lazy loading, LRU, memory monitor
   collection.ts         # Collection: CRUD, middleware, search, views, TTL, tailing (~1130 lines)
   collection-helpers.ts # Pure utilities: stripMeta, isExpired, applyUpdate, compositeKey, filter cache
@@ -63,7 +64,7 @@ src/
     http.ts             # Custom HTTP embedding provider
     quantize.ts         # Int8 quantization for vector storage
     index.ts            # Provider factory
-  tools/index.ts        # 26 tool definitions with zod schemas + safe() wrapper (28 total with db_subscribe/db_unsubscribe on HTTP)
+  tools/index.ts        # 30 tool definitions with zod schemas + safe() wrapper (32 total with db_subscribe/db_unsubscribe on HTTP)
   mcp/index.ts          # MCP server (stdio + HTTP/Streamable transport)
   mcp/auth.ts           # Auth middleware (bearer token, rate limiter, audit logger)
   mcp/jwt.ts            # JWT validation with jose

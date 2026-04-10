@@ -1602,4 +1602,54 @@ describe("Collection", () => {
       await col2.close();
     });
   });
+
+  describe("upsertMany", () => {
+    it("inserts multiple new records atomically", async () => {
+      const results = await col.upsertMany([
+        { _id: "u1", name: "Alice" },
+        { _id: "u2", name: "Bob" },
+      ]);
+      expect(results).toHaveLength(2);
+      expect(results[0]).toEqual({ id: "u1", action: "inserted" });
+      expect(results[1]).toEqual({ id: "u2", action: "inserted" });
+    });
+
+    it("updates existing records", async () => {
+      await col.insert({ _id: "u1", name: "Alice", v: 1 });
+      const results = await col.upsertMany([
+        { _id: "u1", name: "Alice Updated", v: 2 },
+        { _id: "u2", name: "Bob", v: 1 },
+      ]);
+      expect(results[0].action).toBe("updated");
+      expect(results[1].action).toBe("inserted");
+      expect(col.findOne("u1")?.v).toBe(2);
+    });
+
+    it("requires _id on each doc", async () => {
+      await expect(col.upsertMany([{ name: "no id" }])).rejects.toThrow("_id");
+    });
+  });
+
+  describe("$text in find()", () => {
+    it("combines text search with attribute filter", async () => {
+      const textStore = new Store<Record<string, unknown>>();
+      const textCol = new Collection("text-test", textStore, { textSearch: true });
+      const textDir = tmpDir + "-text";
+      await textCol.open(textDir, { checkpointThreshold: 1000 });
+
+      await textCol.insert({ _id: "a", title: "Authentication system", status: "open" });
+      await textCol.insert({ _id: "b", title: "Payment gateway", status: "open" });
+      await textCol.insert({ _id: "c", title: "Authentication bug", status: "closed" });
+
+      const result = textCol.find({ filter: { $text: "authentication", status: "open" } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0]._id).toBe("a");
+
+      await textCol.close();
+    });
+
+    it("$text throws without textSearch enabled", () => {
+      expect(() => col.find({ filter: { $text: "test" } })).toThrow("Text search not enabled");
+    });
+  });
 });

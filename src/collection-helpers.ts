@@ -61,13 +61,14 @@ export function resolveFilter(
   filter: Filter,
   virtualFilters?: Record<string, VirtualFilterFn>,
   getter?: (id: string) => Record<string, unknown> | undefined,
+  tagField?: string,
 ): (record: Record<string, unknown>) => boolean {
   if (filter === null || filter === undefined) return () => true;
 
   let filterObj: Record<string, unknown>;
   if (typeof filter === "string") {
     if (filter.trim() === "") return () => true;
-    filterObj = parseCompactFilter(filter);
+    filterObj = parseCompactFilter(filter, tagField);
   } else {
     filterObj = filter;
   }

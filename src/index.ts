@@ -1,6 +1,8 @@
 import pkg from "../package.json" with { type: "json" };
 export const VERSION = pkg.version;
 
+export { defineSchema } from "./schema.js";
+export type { SchemaDefinition, CollectionSchema, FieldDef, SchemaHooks } from "./schema.js";
 export { compileFilter } from "./filter.js";
 export type { Predicate } from "./filter.js";
 

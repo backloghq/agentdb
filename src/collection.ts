@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { Store } from "@backloghq/opslog";
+import { Store, FsBackend } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
 import { getNestedValue } from "./filter.js";
 // parseCompactFilter used by IndexManager (imported there directly)
@@ -72,6 +72,8 @@ export interface CollectionOptions {
   virtualFilters?: Record<string, VirtualFilterFn>;
   /** Enable full-text search index. Automatically indexes all string fields. */
   textSearch?: boolean;
+  /** Array field name for +tag/-tag compact filter syntax. Default: "tags". */
+  tagField?: string;
 }
 
 /** Change event emitted after mutations. */
@@ -96,6 +98,8 @@ export class Collection {
   private views = new ViewManager();
   private hnswIdx: HnswIndex | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
+  private backend: StorageBackend = new FsBackend();
+  private blobPrefix = "";
   private emitter = new EventEmitter();
   private indexes = new IndexManager();
   private _hasTTL = false; // Tracks if any record has been inserted with TTL
@@ -239,7 +243,7 @@ export class Collection {
 
   /** Resolve a filter with virtual filter support. */
   private resolve(filter: Filter): (record: Record<string, unknown>) => boolean {
-    return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter());
+    return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter(), this.opts.tagField);
   }
 
   /** Whether the underlying store is open. */
@@ -257,6 +261,16 @@ export class Collection {
   async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
+    if (options?.backend) {
+      this.backend = options.backend;
+    } else {
+      // Create a per-collection FsBackend initialized with the collection dir
+      // so blob paths resolve relative to the collection, not CWD
+      const blobBackend = new FsBackend();
+      await blobBackend.initialize(dir, { readOnly: !!options?.readOnly });
+      this.backend = blobBackend;
+    }
+    this.blobPrefix = "blobs";
     // Single pass: detect TTL, build text index, load HNSW embeddings
     for (const [id, record] of this.store.entries()) {
       if (record[META_EXPIRES]) this._hasTTL = true;
@@ -366,17 +380,38 @@ export class Collection {
     const useSummary = opts?.summary ?? false;
     const maxTokens = opts?.maxTokens;
 
+    // Extract $text from filter for combined text + attribute search
+    let textQuery: string | undefined;
+    let attrFilter = opts?.filter;
+    if (attrFilter && typeof attrFilter === "object" && "$text" in attrFilter) {
+      textQuery = attrFilter.$text as string;
+      const { $text: _textVal, ...rest } = attrFilter;
+      void _textVal;
+      attrFilter = Object.keys(rest).length > 0 ? rest : undefined;
+    }
+
     // Track queried fields for index suggestions
-    this.trackQueryFields(opts?.filter);
+    this.trackQueryFields(attrFilter);
 
-    const predicate = this.resolve(opts?.filter);
+    const predicate = this.resolve(attrFilter);
 
-    // Try to use B-tree index for initial candidate narrowing.
-    // Predicate runs on raw records (meta fields don't interfere with user filters).
-    // stripMeta only applied to output records below.
-    const candidateIds = this.indexedCandidates(opts?.filter);
+    // If $text is present, intersect text search with attribute filter
+    let textMatchIds: Set<string> | null = null;
+    if (textQuery) {
+      if (!this.textIdx) throw new Error("Text search not enabled. Set textSearch: true in collection options.");
+      textMatchIds = new Set(this.textIdx.search(textQuery));
+    }
+
+    const candidateIds = this.indexedCandidates(attrFilter);
     let records: StoredRecord[];
-    if (candidateIds) {
+    if (textMatchIds) {
+      // Text search narrows candidates, then attribute filter applied
+      records = [];
+      for (const id of textMatchIds) {
+        const value = this.store.get(id);
+        if (value && !isExpired(value) && predicate(value)) records.push(value);
+      }
+    } else if (candidateIds) {
       records = [];
       for (const id of candidateIds) {
         const value = this.store.get(id);
@@ -568,6 +603,7 @@ export class Collection {
     this.store.delete(id);
     if (this.textIdx) this.textIdx.remove(id);
     this.updateBTreeIndexes(id, record, undefined);
+    if (record._blobs) this.deleteBlobsForRecord(id).catch(() => {});
     this.emitChange("delete", [id], opts?.agent);
     return true;
   }
@@ -595,6 +631,44 @@ export class Collection {
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("upsert", [id], opts?.agent);
     return { id, action: existing ? "updated" : "inserted" };
+  }
+
+  /**
+   * Upsert multiple records atomically.
+   * Each doc must have an _id field. Returns array of results.
+   */
+  async upsertMany(docs: Array<Record<string, unknown>>, opts?: MutationOpts): Promise<Array<{ id: string; action: "inserted" | "updated" }>> {
+    const results: Array<{ id: string; action: "inserted" | "updated" }> = [];
+    const prepared: Array<{ id: string; stored: StoredRecord; oldRecord: StoredRecord | undefined; existing: boolean }> = [];
+
+    for (const doc of docs) {
+      const id = doc._id as string;
+      if (!id) throw new Error("upsertMany: each document must have an _id field");
+      const oldRecord = this.store.get(id);
+      const existing = oldRecord !== undefined;
+      const stored: StoredRecord = { ...doc, _id: id };
+      if (opts?.agent) stored[META_AGENT] = opts.agent;
+      if (opts?.reason) stored[META_REASON] = opts.reason;
+      if (opts?.ttl) { stored[META_EXPIRES] = Date.now() + opts.ttl * 1000; this._hasTTL = true; }
+      this.validateRecord(stored);
+      this.stampVersion(stored, id);
+      prepared.push({ id, stored, oldRecord, existing });
+    }
+
+    await this.store.batch(() => {
+      for (const { id, stored } of prepared) {
+        this.store.set(id, stored);
+      }
+    });
+
+    for (const { id, stored, oldRecord, existing } of prepared) {
+      if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+      this.updateBTreeIndexes(id, oldRecord, stored);
+      results.push({ id, action: existing ? "updated" : "inserted" });
+    }
+
+    this.emitChange("upsert", prepared.map(p => p.id), opts?.agent);
+    return results;
   }
 
   /**
@@ -638,6 +712,7 @@ export class Collection {
     }
     for (const { id, record } of oldRecords) {
       if (record) this.updateBTreeIndexes(id, record, undefined);
+      if (record?._blobs) this.deleteBlobsForRecord(id).catch(() => {});
     }
     this.emitChange("delete", toDelete, opts?.agent);
 
@@ -1050,6 +1125,61 @@ export class Collection {
     }
 
     return { records, scores };
+  }
+
+  // --- Blob storage ---
+
+  private static readonly BLOB_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+  private blobPath(recordId: string, name?: string): string {
+    if (recordId.includes("..") || recordId.includes("/") || recordId.includes("\\")) {
+      throw new Error(`Invalid record ID for blob operation: '${recordId}'`);
+    }
+    if (name !== undefined && (!Collection.BLOB_NAME_RE.test(name) || name.includes(".."))) {
+      throw new Error(`Invalid blob name '${name}'`);
+    }
+    return name ? `${this.blobPrefix}/${recordId}/${name}` : `${this.blobPrefix}/${recordId}`;
+  }
+
+  /** Store a blob (text or binary) associated with a record. Backed by StorageBackend. */
+  async writeBlob(recordId: string, name: string, content: Buffer | string): Promise<void> {
+    const path = this.blobPath(recordId, name); // validates recordId + name
+    const record = this.store.get(recordId);
+    if (!record) throw new Error(`Record '${recordId}' not found`);
+
+    const buf = typeof content === "string" ? Buffer.from(content, "utf-8") : content;
+    await this.backend.writeBlob(path, buf);
+
+    // Update _blobs metadata
+    const blobs = (record._blobs as string[]) ?? [];
+    if (!blobs.includes(name)) {
+      await this.store.set(recordId, { ...record, _blobs: [...blobs, name] });
+    }
+  }
+
+  /** Read a blob. Returns a Buffer. Backed by StorageBackend. */
+  async readBlob(recordId: string, name: string): Promise<Buffer> {
+    return this.backend.readBlob(this.blobPath(recordId, name));
+  }
+
+  /** List blob names for a record. Backed by StorageBackend. */
+  async listBlobs(recordId: string): Promise<string[]> {
+    return this.backend.listBlobs(this.blobPath(recordId));
+  }
+
+  /** Delete a blob. Backed by StorageBackend. */
+  async deleteBlob(recordId: string, name: string): Promise<void> {
+    await this.backend.deleteBlob(this.blobPath(recordId, name));
+    const record = this.store.get(recordId);
+    if (record && Array.isArray(record._blobs)) {
+      const blobs = (record._blobs as string[]).filter((b) => b !== name);
+      await this.store.set(recordId, { ...record, _blobs: blobs.length > 0 ? blobs : undefined });
+    }
+  }
+
+  /** Delete all blobs for a record. Called on record deletion for cascade cleanup. */
+  async deleteBlobsForRecord(recordId: string): Promise<void> {
+    await this.backend.deleteBlobDir(this.blobPath(recordId));
   }
 
   /** Get collection stats. */
