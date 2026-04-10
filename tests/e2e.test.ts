@@ -456,4 +456,43 @@ describe("E2E: MCP Server", () => {
     expect(insertOp.data?._agent).toBe("e2e-test");
     expect(insertOp.data?._reason).toBe("seeding");
   });
+
+  // --- Vector tools ---
+
+  it("db_vector_upsert stores a vector", async () => {
+    const result = await client.call("db_vector_upsert", {
+      collection: "vectors",
+      id: "v1",
+      vector: [1, 0, 0],
+      metadata: { label: "x-axis" },
+    }) as { id: string };
+    expect(result.id).toBe("v1");
+  });
+
+  it("db_vector_upsert stores more vectors", async () => {
+    await client.call("db_vector_upsert", { collection: "vectors", id: "v2", vector: [0, 1, 0], metadata: { label: "y-axis" } });
+    await client.call("db_vector_upsert", { collection: "vectors", id: "v3", vector: [0.9, 0.1, 0], metadata: { label: "near-x" } });
+  });
+
+  it("db_vector_search returns similar vectors", async () => {
+    const result = await client.call("db_vector_search", {
+      collection: "vectors",
+      vector: [1, 0, 0],
+      limit: 3,
+    }) as { records: Record<string, unknown>[]; scores: number[] };
+    expect(result.records.length).toBe(3);
+    // Most similar to [1,0,0] should be v1 or v3
+    expect(result.scores[0]).toBeGreaterThan(result.scores[2]);
+  });
+
+  it("db_vector_search with filter", async () => {
+    const result = await client.call("db_vector_search", {
+      collection: "vectors",
+      vector: [1, 0, 0],
+      filter: { label: "y-axis" },
+      limit: 10,
+    }) as { records: Record<string, unknown>[]; scores: number[] };
+    expect(result.records.length).toBe(1);
+    expect(result.records[0].label).toBe("y-axis");
+  });
 });

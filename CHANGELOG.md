@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **HNSW MaxHeap** — search queue uses binary MaxHeap (O(log n) extract) instead of sorted array + shift (O(n log n + n)). Candidates use binary insert. Preserves >70% recall quality.
 
 ### Added
+- **NOTIFY/LISTEN** — real-time change notifications via `db_subscribe(collection)` and `db_unsubscribe(collection)` tools. Subscribers receive MCP logging notifications when records are inserted, updated, or deleted. SubscriptionManager wires Collection change events to per-session MCP servers. Subscriptions cleaned up on session disconnect.
 - **Explicit vector API** — `insertVector(id, vector, metadata?)` stores pre-computed vectors without an embedding provider. `searchByVector(vector, opts?)` searches by raw vector with filter/limit support. HNSW auto-initializes from stored vectors on collection open.
 - **`db_vector_upsert` tool** — store a vector with metadata via MCP.
 - **`db_vector_search` tool** — search by raw vector via MCP.

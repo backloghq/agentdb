@@ -351,6 +351,22 @@ MCP tools: `db_vector_upsert`, `db_vector_search`, `db_semantic_search`, `db_emb
 npx agentdb --http --auth-token secret --rate-limit 100 --cors https://app.example.com
 ```
 
+### Real-time notifications (NOTIFY/LISTEN)
+
+Agents can subscribe to collection changes and receive push notifications via MCP:
+
+```
+db_subscribe({ collection: "tasks" })       → subscribes to all changes
+db_unsubscribe({ collection: "tasks" })     → stops notifications
+```
+
+When another agent inserts/updates/deletes a record, subscribers receive a logging notification:
+```json
+{ "event": "db_change", "collection": "tasks", "type": "insert", "ids": ["abc"], "agent": "planner" }
+```
+
+Available on HTTP MCP transport. Subscriptions are per-session, cleaned up on disconnect.
+
 ## Docker
 
 ```bash

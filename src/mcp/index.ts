@@ -11,8 +11,10 @@ import { getTools } from "../tools/index.js";
 import type { AgentDBOptions } from "../agentdb.js";
 import { createAuthMiddleware, RateLimiter, AuditLogger, authContext, getCurrentAuth } from "./auth.js";
 import type { TokenMap, AuthFn } from "./auth.js";
+import { SubscriptionManager } from "./subscriptions.js";
 
 export { createAuthMiddleware, RateLimiter, AuditLogger, authContext, getCurrentAuth };
+export { SubscriptionManager } from "./subscriptions.js";
 export type { TokenMap, AuthFn, AuthIdentity, AuthenticatedRequest, AuditEntry } from "./auth.js";
 export { createJwtAuth } from "./jwt.js";
 export type { JwtAuthOptions } from "./jwt.js";
@@ -23,10 +25,13 @@ export { McpServer, StdioServerTransport, StreamableHTTPServerTransport };
  * Create an MCP server that exposes all AgentDB tools.
  * Returns the server instance (not yet connected to a transport).
  */
-export function createMcpServer(db: AgentDB): McpServer {
+export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager, sessionId?: string): McpServer {
   const server = new McpServer(
     { name: "agentdb", version: VERSION },
-    { instructions: "AgentDB — AI-first embedded database. Use db_collections to discover data, db_find with filters to query, db_schema to inspect record shapes." },
+    {
+      instructions: "AgentDB — AI-first embedded database. Use db_collections to discover data, db_find with filters to query, db_schema to inspect record shapes.",
+      capabilities: { logging: {} },
+    },
   );
 
   const tools = getTools(db);
@@ -44,6 +49,41 @@ export function createMcpServer(db: AgentDB): McpServer {
       async (args) => {
         const result = await tool.execute(args);
         return { ...result };
+      },
+    );
+  }
+
+  // Subscribe/unsubscribe tools (require subscription manager + session context)
+  if (subscriptions && sessionId) {
+    server.registerTool(
+      "db_subscribe",
+      {
+        title: "Subscribe to Changes",
+        description: "Subscribe to real-time change notifications on a collection. When records are inserted, updated, or deleted, you'll receive a logging notification with the change details.",
+        inputSchema: z.object({
+          collection: z.string().describe("Collection to subscribe to"),
+        }) as z.ZodObject<z.ZodRawShape>,
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async (args) => {
+        await subscriptions.subscribe(sessionId, args.collection as string, server);
+        return { content: [{ type: "text" as const, text: JSON.stringify({ subscribed: true, collection: args.collection }) }] };
+      },
+    );
+
+    server.registerTool(
+      "db_unsubscribe",
+      {
+        title: "Unsubscribe from Changes",
+        description: "Stop receiving change notifications for a collection.",
+        inputSchema: z.object({
+          collection: z.string().describe("Collection to unsubscribe from"),
+        }) as z.ZodObject<z.ZodRawShape>,
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async (args) => {
+        subscriptions.unsubscribe(sessionId, args.collection as string);
+        return { content: [{ type: "text" as const, text: JSON.stringify({ unsubscribed: true, collection: args.collection }) }] };
       },
     );
   }
@@ -152,6 +192,9 @@ export async function startHttp(
   });
 
 
+  // Subscription manager for NOTIFY/LISTEN
+  const subscriptions = new SubscriptionManager(db);
+
   // Session management with limits and idle timeout
   const MAX_SESSIONS = 100;
   const SESSION_IDLE_MS = 30 * 60 * 1000; // 30 minutes
@@ -170,6 +213,7 @@ export async function startHttp(
         if (transport) transport.close();
         const server = mcpServers.get(sid);
         if (server) server.close();
+        subscriptions.removeSession(sid);
         transports.delete(sid);
         mcpServers.delete(sid);
         sessionLastActive.delete(sid);
@@ -191,10 +235,11 @@ export async function startHttp(
         res.status(503).json({ error: `Max sessions (${MAX_SESSIONS}) reached. Try again later.` });
         return;
       }
-      // New session
-      const server = createMcpServer(db);
+      // New session — pre-generate ID so we can pass it to createMcpServer
+      const newSessionId = randomUUID();
+      const server = createMcpServer(db, subscriptions, newSessionId);
       const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
+        sessionIdGenerator: () => newSessionId,
         onsessioninitialized: (sid) => {
           transports.set(sid, transport);
           mcpServers.set(sid, server);
@@ -203,6 +248,7 @@ export async function startHttp(
       });
       transport.onclose = () => {
         if (transport.sessionId) {
+          subscriptions.removeSession(transport.sessionId);
           transports.delete(transport.sessionId);
           mcpServers.delete(transport.sessionId);
           sessionLastActive.delete(transport.sessionId);
@@ -232,6 +278,7 @@ export async function startHttp(
     if (sessionId && transports.has(sessionId)) {
       const transport = transports.get(sessionId)!;
       await transport.handleRequest(req, res);
+      subscriptions.removeSession(sessionId);
       transports.delete(sessionId);
       const server = mcpServers.get(sessionId);
       if (server) { await server.close(); mcpServers.delete(sessionId); }
@@ -253,6 +300,7 @@ export async function startHttp(
 
   const close = async () => {
     clearInterval(cleanupInterval);
+    subscriptions.destroy();
     for (const transport of transports.values()) {
       await transport.close();
     }
