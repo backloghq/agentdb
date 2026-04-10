@@ -2,14 +2,13 @@ import { randomUUID } from "node:crypto";
 import { Store } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
 import { getNestedValue } from "./filter.js";
-import { parseCompactFilter } from "./compact-filter.js";
+// parseCompactFilter used by IndexManager (imported there directly)
 import { TextIndex } from "./text-index.js";
 import { ViewManager } from "./view.js";
 import type { ViewDefinition } from "./view.js";
 import { EventEmitter } from "node:events";
 import { HnswIndex } from "./hnsw.js";
-import { BTreeIndex, QueryFrequencyTracker } from "./btree.js";
-import { BloomFilter } from "./bloom.js";
+import { IndexManager } from "./collection-indexes.js";
 import type { EmbeddingProvider } from "./embeddings/types.js";
 import { quantize, serializeQuantized, deserializeQuantized } from "./embeddings/quantize.js";
 import {
@@ -19,7 +18,7 @@ import {
   type UpdateOps,
   META_AGENT, META_REASON, META_EXPIRES, META_EMBEDDING, META_VERSION,
   resolveFilter, stripMeta, isExpired, summarize, estimateTokens,
-  applyUpdate, compositeKey, compositeIndexKey, extractTextFromRecord, summarizeValue,
+  applyUpdate, extractTextFromRecord, summarizeValue,
 } from "./collection-helpers.js";
 
 // Re-export types and helpers that external consumers depend on
@@ -98,10 +97,7 @@ export class Collection {
   private hnswIdx: HnswIndex | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
   private emitter = new EventEmitter();
-  private btreeIndexes = new Map<string, BTreeIndex>();
-  private compositeIndexes = new Map<string, { fields: string[]; idx: BTreeIndex }>();
-  private bloomFilters = new Map<string, BloomFilter>();
-  private queryTracker = new QueryFrequencyTracker();
+  private indexes = new IndexManager();
   private _hasTTL = false; // Tracks if any record has been inserted with TTL
 
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
@@ -147,30 +143,9 @@ export class Collection {
     this.emitter.emit("change", { type, collection: this.name, ids, agent } satisfies ChangeEvent);
   }
 
-  /** Update B-tree indexes (single-field + composite) for a record change. */
+  /** Update indexes for a record change. Delegates to IndexManager. */
   private updateBTreeIndexes(id: string, oldRecord: StoredRecord | undefined, newRecord: StoredRecord | undefined): void {
-    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0) return;
-    // Strip meta once per record, reuse across all indexes
-    const oldClean = oldRecord ? stripMeta(oldRecord) : undefined;
-    const newClean = newRecord && !isExpired(newRecord) ? stripMeta(newRecord) : undefined;
-    for (const [field, idx] of this.btreeIndexes) {
-      if (oldClean) {
-        const oldVal = getNestedValue(oldClean, field);
-        if (oldVal !== undefined) idx.remove(oldVal, id);
-      }
-      if (newClean) {
-        const newVal = getNestedValue(newClean, field);
-        if (newVal !== undefined) idx.add(newVal, id);
-      }
-    }
-    for (const [, { fields, idx }] of this.compositeIndexes) {
-      if (oldClean) {
-        idx.remove(compositeKey(fields.map((f) => getNestedValue(oldClean, f))), id);
-      }
-      if (newClean) {
-        idx.add(compositeKey(fields.map((f) => getNestedValue(newClean, f))), id);
-      }
-    }
+    this.indexes.updateIndexes(id, oldRecord, newRecord);
   }
 
   /** Rebuild the full text index from current store contents. */
@@ -182,22 +157,9 @@ export class Collection {
     }
   }
 
-  /** Rebuild all B-tree indexes (single-field + composite) from current store contents. Single pass. */
+  /** Rebuild all indexes from current store contents. Delegates to IndexManager. */
   private rebuildBTreeIndexes(): void {
-    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0) return;
-    for (const [, idx] of this.btreeIndexes) idx.clear();
-    for (const [, { idx }] of this.compositeIndexes) idx.clear();
-    for (const [id, record] of this.store.entries()) {
-      if (isExpired(record)) continue;
-      const clean = stripMeta(record);
-      for (const [field, idx] of this.btreeIndexes) {
-        const value = getNestedValue(clean, field);
-        if (value !== undefined) idx.add(value, id);
-      }
-      for (const [, { fields, idx }] of this.compositeIndexes) {
-        idx.add(compositeKey(fields.map((f) => getNestedValue(clean, f))), id);
-      }
-    }
+    this.indexes.rebuildAll(this.store.entries());
   }
 
   /**
@@ -206,27 +168,11 @@ export class Collection {
    * B-tree indexes are fully rebuilt (cheap — just field lookups, no tokenization).
    */
   private incrementalIndexUpdate(affectedIds: string[]): void {
-    for (const id of affectedIds) {
-      const record = this.store.get(id);
-      const active = record && !isExpired(record);
-      const clean = active ? stripMeta(record) : undefined; // strip once per record
-
-      if (this.textIdx) {
+    const cleanRecords = this.indexes.incrementalUpdate(affectedIds, (id) => this.store.get(id));
+    if (this.textIdx) {
+      for (const [id, clean] of cleanRecords) {
         if (clean) this.textIdx.add(id, clean);
         else this.textIdx.remove(id);
-      }
-      for (const [field, idx] of this.btreeIndexes) {
-        idx.removeById(id);
-        if (clean) {
-          const value = getNestedValue(clean, field);
-          if (value !== undefined) idx.add(value, id);
-        }
-      }
-      for (const [, { fields, idx }] of this.compositeIndexes) {
-        idx.removeById(id);
-        if (clean) {
-          idx.add(compositeKey(fields.map((f) => getNestedValue(clean, f))), id);
-        }
       }
     }
   }
@@ -277,158 +223,18 @@ export class Collection {
     return oldText !== newText;
   }
 
-  /**
-   * Try to narrow candidates using B-tree indexes.
-   * Extracts simple equality conditions from the filter and looks up indexed fields.
-   * Returns a Set of candidate IDs if an index was used, or null for full scan.
-   */
+  // --- Index delegation (all state in IndexManager) ---
+
   private indexedCandidates(filter: Filter): Set<string> | null {
-    if (!filter || (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0)) return null;
-
-    let filterObj: Record<string, unknown>;
-    if (typeof filter === "string") {
-      try { filterObj = parseCompactFilter(filter); } catch { return null; }
-    } else {
-      filterObj = filter;
-    }
-
-    // Try composite indexes first (more selective)
-    const compositeResult = this.compositeIndexedCandidates(filterObj);
-    if (compositeResult) return compositeResult;
-
-    // Fall back to single-field indexes
-    for (const [key, value] of Object.entries(filterObj)) {
-      if (key.startsWith("$") || key.startsWith("+")) continue;
-      const idx = this.btreeIndexes.get(key);
-      if (!idx) continue;
-
-      // Simple equality: { field: value }
-      if (value === null || typeof value !== "object") {
-        return idx.eq(value);
-      }
-
-      // Range operators: { field: { $gt: v, $lte: v, ... } }
-      if (!Array.isArray(value)) {
-        const ops = value as Record<string, unknown>;
-        const opKeys = Object.keys(ops);
-        if (opKeys.length === 0 || !opKeys.every((k) => k === "$gt" || k === "$gte" || k === "$lt" || k === "$lte")) continue;
-
-        const hasGt = "$gt" in ops;
-        const hasGte = "$gte" in ops;
-        const hasLt = "$lt" in ops;
-        const hasLte = "$lte" in ops;
-
-        // Combined range: both lower and upper bound
-        if ((hasGt || hasGte) && (hasLt || hasLte)) {
-          const lo = hasGt ? ops.$gt : ops.$gte;
-          const hi = hasLt ? ops.$lt : ops.$lte;
-          const candidates = idx.range(lo, hi);
-          if (hasGt) {
-            for (const id of idx.eq(lo)) candidates.delete(id);
-          }
-          if (hasLt) {
-            for (const id of idx.eq(hi)) candidates.delete(id);
-          }
-          return candidates;
-        }
-
-        if (hasGt) return idx.gt(ops.$gt);
-        if (hasGte) return idx.gte(ops.$gte);
-        if (hasLt) return idx.lt(ops.$lt);
-        if (hasLte) return idx.lte(ops.$lte);
-      }
-    }
-
-    return null; // No indexed field found
+    return this.indexes.indexedCandidates(filter);
   }
 
-  /** Check if a value is a range operator object (all keys are $gt/$gte/$lt/$lte). */
-  private static isRangeOp(value: unknown): value is Record<string, unknown> {
-    if (value === null || value === undefined || typeof value !== "object" || Array.isArray(value)) return false;
-    const keys = Object.keys(value as Record<string, unknown>);
-    return keys.length > 0 && keys.every((k) => k === "$gt" || k === "$gte" || k === "$lt" || k === "$lte");
-  }
-
-  /**
-   * Try to resolve a filter using a composite index.
-   * Eligible when filter has equality on all leading fields and equality or range on the trailing field.
-   */
-  private compositeIndexedCandidates(filterObj: Record<string, unknown>): Set<string> | null {
-    if (this.compositeIndexes.size === 0) return null;
-
-    for (const [, { fields, idx }] of this.compositeIndexes) {
-      // Check all fields are present in the filter
-      const values: unknown[] = [];
-      let eligible = true;
-      let trailingRange: Record<string, unknown> | null = null;
-
-      for (let i = 0; i < fields.length; i++) {
-        const fval = filterObj[fields[i]];
-        if (fval === undefined) { eligible = false; break; }
-
-        if (i < fields.length - 1) {
-          // Leading fields: must be simple equality
-          if (fval !== null && typeof fval === "object") { eligible = false; break; }
-          values.push(fval);
-        } else {
-          // Trailing field: equality or range
-          if (fval === null || typeof fval !== "object") {
-            values.push(fval);
-          } else if (Collection.isRangeOp(fval)) {
-            trailingRange = fval as Record<string, unknown>;
-          } else {
-            eligible = false; break;
-          }
-        }
-      }
-
-      if (!eligible) continue;
-
-      // Only use composite index for all-equality filters.
-      // Mixed equality+range is faster via single-field index + predicate scan
-      // (avoids composite key serialization overhead on every comparison).
-      if (!trailingRange) {
-        return idx.eq(compositeKey(values));
-      }
-    }
-
-    return null;
-  }
-
-  /**
-   * Check if a filter is fully covered by a single index (no extra conditions).
-   * Used by count() fast path to skip record fetches entirely.
-   */
   private isFullyCoveredByIndex(filter: Filter): boolean {
-    if (!filter || this.btreeIndexes.size === 0) return false;
-
-    let filterObj: Record<string, unknown>;
-    if (typeof filter === "string") {
-      try { filterObj = parseCompactFilter(filter); } catch { return false; }
-    } else {
-      filterObj = filter;
-    }
-
-    const fieldKeys = Object.keys(filterObj).filter((k) => !k.startsWith("$") && !k.startsWith("+"));
-    // Must be exactly one field condition, and it must be indexed
-    if (fieldKeys.length !== 1) return false;
-    return this.btreeIndexes.has(fieldKeys[0]);
+    return this.indexes.isFullyCoveredByIndex(filter);
   }
 
-  /** Track which fields are queried for index suggestions. */
   private trackQueryFields(filter: Filter): void {
-    if (!filter) return;
-    let obj: Record<string, unknown>;
-    if (typeof filter === "string") {
-      try { obj = parseCompactFilter(filter); } catch { return; }
-    } else {
-      obj = filter;
-    }
-    for (const key of Object.keys(obj)) {
-      if (!key.startsWith("$") && !key.startsWith("+")) {
-        this.queryTracker.track(key);
-      }
-    }
+    this.indexes.trackQueryFields(filter);
   }
 
   /** Resolve a filter with virtual filter support. */
@@ -1080,86 +886,17 @@ export class Collection {
 
   // --- Indexes ---
 
-  /**
-   * Create a B-tree index on a field for fast equality and range lookups.
-   * Builds immediately from existing records.
-   */
-  createIndex(field: string): void {
-    if (this.btreeIndexes.has(field)) return;
-    const idx = new BTreeIndex(field);
-    for (const [id, record] of this.store.entries()) {
-      if (isExpired(record)) continue;
-      const clean = stripMeta(record);
-      const value = getNestedValue(clean, field);
-      if (value !== undefined) idx.add(value, id);
-    }
-    this.btreeIndexes.set(field, idx);
-  }
+  // --- Index public API (delegates to IndexManager) ---
 
-  /** Remove a B-tree index. */
-  dropIndex(field: string): boolean {
-    return this.btreeIndexes.delete(field);
-  }
-
-  /** List indexed fields. */
-  listIndexes(): string[] {
-    return [...this.btreeIndexes.keys()];
-  }
-
-  /**
-   * Create a composite index on multiple fields for fast compound lookups.
-   * Supports equality on all fields, or equality on leading fields + range on trailing field.
-   * Builds immediately from existing records.
-   */
-  createCompositeIndex(fields: string[]): void {
-    if (fields.length < 2) throw new Error("Composite index requires at least 2 fields");
-    const key = compositeIndexKey(fields);
-    if (this.compositeIndexes.has(key)) return;
-    const idx = new BTreeIndex(key);
-    for (const [id, record] of this.store.entries()) {
-      if (isExpired(record)) continue;
-      const clean = stripMeta(record);
-      const ck = compositeKey(fields.map((f) => getNestedValue(clean, f)));
-      idx.add(ck, id);
-    }
-    this.compositeIndexes.set(key, { fields, idx });
-  }
-
-  /** Remove a composite index. */
-  dropCompositeIndex(fields: string[]): boolean {
-    return this.compositeIndexes.delete(compositeIndexKey(fields));
-  }
-
-  /** List composite indexes (each as an array of field names). */
-  listCompositeIndexes(): string[][] {
-    return [...this.compositeIndexes.values()].map((c) => c.fields);
-  }
-
-  /**
-   * Create a bloom filter for a field for fast existence checks.
-   */
-  createBloomFilter(field: string, expectedItems = 10000): void {
-    const bf = new BloomFilter(expectedItems);
-    for (const [, record] of this.store.entries()) {
-      if (isExpired(record)) continue;
-      const clean = stripMeta(record);
-      const value = getNestedValue(clean, field);
-      if (value !== undefined) bf.add(String(value));
-    }
-    this.bloomFilters.set(field, bf);
-  }
-
-  /** Fast probabilistic check: might any record have field=value? */
-  mightHave(field: string, value: string): boolean {
-    const bf = this.bloomFilters.get(field);
-    if (!bf) return true; // No bloom filter = can't say no
-    return bf.has(value);
-  }
-
-  /** Get query frequency suggestions for index creation. */
-  suggestIndexes(threshold = 100): Array<{ field: string; count: number }> {
-    return this.queryTracker.suggest(threshold);
-  }
+  createIndex(field: string): void { this.indexes.createIndex(field, this.store.entries()); }
+  dropIndex(field: string): boolean { return this.indexes.dropIndex(field); }
+  listIndexes(): string[] { return this.indexes.listIndexes(); }
+  createCompositeIndex(fields: string[]): void { this.indexes.createCompositeIndex(fields, this.store.entries()); }
+  dropCompositeIndex(fields: string[]): boolean { return this.indexes.dropCompositeIndex(fields); }
+  listCompositeIndexes(): string[][] { return this.indexes.listCompositeIndexes(); }
+  createBloomFilter(field: string, expectedItems = 10000): void { this.indexes.createBloomFilter(field, this.store.entries(), expectedItems); }
+  mightHave(field: string, value: string): boolean { return this.indexes.mightHave(field, value); }
+  suggestIndexes(threshold = 100): Array<{ field: string; count: number }> { return this.indexes.suggestIndexes(threshold); }
 
   /**
    * Semantic search — find records similar to the query text.
@@ -1360,7 +1097,7 @@ export class Collection {
    */
   distinct(field: string): { field: string; values: unknown[]; count: number } {
     // Fast path: use B-tree index if available (O(k) instead of O(n))
-    const idx = this.btreeIndexes.get(field);
+    const idx = this.indexes.getBTreeIndex(field);
     if (idx && !this._hasTTL) {
       const values = idx.allValues();
       return { field, values, count: values.length };

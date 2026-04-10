@@ -40,8 +40,9 @@ agentdb/mcp      — MCP server adapter (stdio + HTTP/Streamable transport)
 src/
   index.ts              # Core exports
   agentdb.ts            # AgentDB class: collection manager, lazy loading, LRU, memory monitor
-  collection.ts         # Collection: CRUD, middleware, indexes, search, views, TTL, tailing
+  collection.ts         # Collection: CRUD, middleware, search, views, TTL, tailing (~1130 lines)
   collection-helpers.ts # Pure utilities: stripMeta, isExpired, applyUpdate, compositeKey, filter cache
+  collection-indexes.ts # IndexManager: B-tree, composite, bloom filter indexes + query planning
   filter.ts             # JSON filter compiler (14 operators, dot-notation)
   compact-filter.ts     # Compact string parser (role:admin age.gt:18)
   hnsw.ts               # HNSW index for approximate nearest neighbor search
