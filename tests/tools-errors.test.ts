@@ -210,6 +210,11 @@ describe("Tool Error Branches", () => {
     });
 
     it("db_blob_list returns blob names", async () => {
+      // Write a blob first (each test gets a fresh db)
+      await tool("db_insert").execute({ collection: "blobs", record: { _id: "doc1", title: "Test" } });
+      const content = Buffer.from("data").toString("base64");
+      await tool("db_blob_write").execute({ collection: "blobs", recordId: "doc1", name: "spec.md", content });
+
       const result = await tool("db_blob_list").execute({
         collection: "blobs", recordId: "doc1",
       });
@@ -217,6 +222,10 @@ describe("Tool Error Branches", () => {
     });
 
     it("db_blob_delete removes the blob", async () => {
+      await tool("db_insert").execute({ collection: "blobs", record: { _id: "doc1", title: "Test" } });
+      const content = Buffer.from("data").toString("base64");
+      await tool("db_blob_write").execute({ collection: "blobs", recordId: "doc1", name: "spec.md", content });
+
       await tool("db_blob_delete").execute({
         collection: "blobs", recordId: "doc1", name: "spec.md",
       });

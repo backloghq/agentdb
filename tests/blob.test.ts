@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "@backloghq/opslog";
@@ -90,6 +90,14 @@ describe("Blob storage", () => {
     await expect(col.readBlob("../../etc/passwd", "file.txt")).rejects.toThrow("Invalid record ID");
     await expect(col.listBlobs("foo/../../bar")).rejects.toThrow("Invalid record ID");
     await expect(col.deleteBlob("a\\b", "file.txt")).rejects.toThrow("Invalid record ID");
+  });
+
+  it("stores blobs inside collection directory, not CWD", async () => {
+    await col.writeBlob("doc1", "location-test.txt", "hello");
+    // Blob should exist inside the collection tmpDir
+    const blobFile = join(tmpDir, "blobs", "doc1", "location-test.txt");
+    const s = await stat(blobFile);
+    expect(s.isFile()).toBe(true);
   });
 
   it("cascade: deleteById removes blobs", async () => {

@@ -261,7 +261,15 @@ export class Collection {
   async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
-    this.backend = options?.backend ?? new FsBackend();
+    if (options?.backend) {
+      this.backend = options.backend;
+    } else {
+      // Create a per-collection FsBackend initialized with the collection dir
+      // so blob paths resolve relative to the collection, not CWD
+      const blobBackend = new FsBackend();
+      await blobBackend.initialize(dir, { readOnly: !!options?.readOnly });
+      this.backend = blobBackend;
+    }
     this.blobPrefix = "blobs";
     // Single pass: detect TTL, build text index, load HNSW embeddings
     for (const [id, record] of this.store.entries()) {

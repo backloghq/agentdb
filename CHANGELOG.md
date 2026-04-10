@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Compact filter thread safety** — removed module-level mutable `_tagField` state; `tagField` is now threaded as a parameter through the parser.
 - **Schema hook listener accumulation** — schema `afterUpdate`/`afterDelete` hooks merged into a single change listener with memory tracking; properly cleaned up on LRU eviction and close.
 - **`resolve()` error handling** — field resolve functions now wrapped in try-catch with clear error messages and `cause` chain; prevents uncaught throws from bypassing validation.
+- **Blob path resolution** — Collection now initializes its own FsBackend with the collection directory. Previously blobs were written to CWD instead of inside the collection directory, breaking multi-collection isolation.
 
 ## [1.0.0] - 2026-04-10
 
