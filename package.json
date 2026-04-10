@@ -46,14 +46,14 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@backloghq/opslog": "file:../opslog",
+    "@backloghq/opslog": "^0.6.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "express": "^5.2.1",
     "jose": "^6.2.2",
     "zod": "^4.3.6"
   },
   "optionalDependencies": {
-    "@backloghq/opslog-s3": "file:../opslog-s3"
+    "@backloghq/opslog-s3": "^0.2.0"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.1028.0",

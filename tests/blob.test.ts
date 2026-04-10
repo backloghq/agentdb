@@ -65,4 +65,28 @@ describe("Blob storage", () => {
     const blobs = await col.listBlobs("empty-doc");
     expect(blobs).toEqual([]);
   });
+
+  it("cascade: deleting a record removes its blobs", async () => {
+    await col.insert({ _id: "cascade1", title: "Cascade test" });
+    await col.writeBlob("cascade1", "spec.md", "content");
+    await col.writeBlob("cascade1", "notes.txt", "notes");
+    expect((await col.listBlobs("cascade1")).length).toBe(2);
+
+    await col.remove({ _id: "cascade1" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const blobs = await col.listBlobs("cascade1");
+    expect(blobs).toEqual([]);
+  });
+
+  it("cascade: deleteById removes blobs", async () => {
+    await col.insert({ _id: "cascade2", title: "Another" });
+    await col.writeBlob("cascade2", "file.txt", "data");
+
+    await col.deleteById("cascade2");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const blobs = await col.listBlobs("cascade2");
+    expect(blobs).toEqual([]);
+  });
 });

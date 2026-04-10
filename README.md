@@ -113,7 +113,7 @@ npx agentdb --path ./data              # stdio (single client)
 npx agentdb --path ./data --http       # HTTP (multiple clients)
 ```
 
-All 26 tools exposed as MCP tools (28 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
+All 30 tools exposed as MCP tools (32 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
 
 ```json
 {
@@ -248,7 +248,7 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 
 ## Tool Definitions
 
-`getTools(db)` returns 26 tools:
+`getTools(db)` returns 30 tools:
 
 | Tool | Description |
 |------|-------------|
@@ -276,6 +276,10 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 | `db_embed` | Manually trigger embedding |
 | `db_vector_upsert` | Store a pre-computed vector with metadata |
 | `db_vector_search` | Search by raw vector (no embedding provider needed) |
+| `db_blob_write` | Attach a file (base64) to a record |
+| `db_blob_read` | Read an attached file |
+| `db_blob_list` | List files attached to a record |
+| `db_blob_delete` | Delete an attached file |
 | `db_export` | Export collections as JSON backup |
 | `db_import` | Import from a JSON backup |
 

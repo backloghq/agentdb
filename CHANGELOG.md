@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Hook context** — lifecycle hooks receive `{ collection }` for side effects (recurrence, cascading updates).
 - **`upsertMany()`** — atomic bulk create-or-update. Each doc must have `_id`.
 - **Blob storage** — `writeBlob(id, name, content)`, `readBlob()`, `listBlobs()`, `deleteBlob()`. Stores files outside the WAL via StorageBackend — works on both filesystem and S3 transparently. Cascade delete: blobs auto-cleaned when records are deleted. For attaching code, images, PDFs to records.
+- **MCP blob tools** — `db_blob_write` (base64 content), `db_blob_read`, `db_blob_list`, `db_blob_delete`. 32 tools total (30 core + 2 HTTP-only).
 
 ## [1.0.0] - 2026-04-10
 

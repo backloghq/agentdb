@@ -184,4 +184,53 @@ describe("Tool Error Branches", () => {
       expect(result.structuredContent).toHaveProperty("collections");
     });
   });
+
+  describe("blob tools", () => {
+    // Helper to parse tool response
+    function parse(result: Record<string, unknown>): Record<string, unknown> {
+      const content = result.content as Array<{ text: string }>;
+      return JSON.parse(content[0].text);
+    }
+
+    it("db_blob_write + db_blob_read round-trip", async () => {
+      await tool("db_insert").execute({ collection: "blobs", record: { _id: "doc1", title: "Test" } });
+
+      const content = Buffer.from("Hello blob!").toString("base64");
+      const writeResult = await tool("db_blob_write").execute({
+        collection: "blobs", recordId: "doc1", name: "spec.md", content,
+      });
+      expect(parse(writeResult).written).toBe(true);
+
+      const readResult = await tool("db_blob_read").execute({
+        collection: "blobs", recordId: "doc1", name: "spec.md",
+      });
+      const parsed = parse(readResult);
+      expect(Buffer.from(parsed.content as string, "base64").toString("utf-8")).toBe("Hello blob!");
+      expect(parsed.size).toBe(11);
+    });
+
+    it("db_blob_list returns blob names", async () => {
+      const result = await tool("db_blob_list").execute({
+        collection: "blobs", recordId: "doc1",
+      });
+      expect((parse(result).blobs as string[])).toContain("spec.md");
+    });
+
+    it("db_blob_delete removes the blob", async () => {
+      await tool("db_blob_delete").execute({
+        collection: "blobs", recordId: "doc1", name: "spec.md",
+      });
+      const result = await tool("db_blob_list").execute({
+        collection: "blobs", recordId: "doc1",
+      });
+      expect((parse(result).blobs as string[])).not.toContain("spec.md");
+    });
+
+    it("db_blob_write with invalid name returns isError", async () => {
+      const result = await tool("db_blob_write").execute({
+        collection: "blobs", recordId: "doc1", name: "../evil", content: "aGFjaw==",
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
 });
