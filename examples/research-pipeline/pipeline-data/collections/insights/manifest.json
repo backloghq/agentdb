@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "currentSnapshot": "snapshots/snap-1775819952659.json",
+  "activeOps": "ops/ops-1775819952659.jsonl",
+  "archiveSegments": [],
+  "stats": {
+    "activeRecords": 0,
+    "archivedRecords": 0,
+    "opsCount": 0,
+    "created": "2026-04-10T11:19:12.659Z",
+    "lastCheckpoint": "2026-04-10T11:19:12.659Z"
+  }
+}
