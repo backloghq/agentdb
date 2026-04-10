@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **tsconfig** — removed redundant `esModuleInterop` (TS 6.0 default), added `resolveJsonModule`.
 
 ### Added
+- **5 runnable demos** — multi-agent task board, RAG knowledge base, research pipeline, live dashboard, multi-model code review (Gemini + Ollama).
 - **NOTIFY/LISTEN** — real-time change notifications via `db_subscribe(collection)` and `db_unsubscribe(collection)` tools. Subscribers receive MCP logging notifications when records are inserted, updated, or deleted. SubscriptionManager wires Collection change events to per-session MCP servers. Subscriptions cleaned up on session disconnect.
 - **Explicit vector API** — `insertVector(id, vector, metadata?)` stores pre-computed vectors without an embedding provider. `searchByVector(vector, opts?)` searches by raw vector with filter/limit support. HNSW auto-initializes from stored vectors on collection open.
 - **`db_vector_upsert` tool** — store a vector with metadata via MCP.

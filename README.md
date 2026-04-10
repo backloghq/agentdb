@@ -432,6 +432,7 @@ See [examples/](./examples/) for runnable demos powered by Ollama:
 - **[Multi-Agent Task Board](./examples/multi-agent/)** — Agents collaborate on a shared task board. Event-driven via NOTIFY/LISTEN.
 - **[RAG Knowledge Base](./examples/rag-knowledge-base/)** — Ingest docs, embed with Ollama, answer questions via semantic search.
 - **[Research Pipeline](./examples/research-pipeline/)** — 3-stage AI pipeline: Researcher → Analyst → Writer. Each stage triggers the next.
+- **[Multi-Model Code Review](./examples/code-review/)** — Gemini generates code, Ollama reviews locally, Gemini writes tests. Multi-provider orchestration.
 - **[Live Dashboard](./examples/live-dashboard/)** — Real-time CLI view of any running demo's collections.
 
 ## Development

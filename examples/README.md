@@ -58,6 +58,18 @@ cd live-dashboard && npx tsx dashboard.ts ../multi-agent/taskboard-data
 
 ---
 
+### [code-review/](./code-review/) — Multi-Model Code Review
+
+Three agents from two providers (Gemini + Ollama) collaborate on a code review pipeline. Gemini generates code, Ollama reviews locally, Gemini writes tests. Real files output to disk.
+
+**Shows:** multi-provider orchestration, structured JSON output, NOTIFY/LISTEN pipeline, file generation
+
+```bash
+GEMINI_API_KEY=... cd code-review && ./run.sh "Implement JWT auth middleware"
+```
+
+---
+
 ## Prerequisites
 
 All examples require:
@@ -68,3 +80,6 @@ All examples require:
 Models needed:
 - `ollama pull llama3.2` — chat model (all demos)
 - `ollama pull nomic-embed-text` — embedding model (RAG demo)
+
+API keys (for code-review demo):
+- `GEMINI_API_KEY` — free from https://aistudio.google.com/apikey
