@@ -416,9 +416,12 @@ See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed deployment guidance:
 
 ## Examples
 
-See [examples/](./examples/) for runnable demos:
+See [examples/](./examples/) for runnable demos powered by Ollama:
 
-- **[Multi-Agent Task Board](./examples/multi-agent/)** — Multiple AI agents (Ollama) collaborate on a shared task board via HTTP MCP. Event-driven with NOTIFY/LISTEN, optimistic locking, per-agent auth.
+- **[Multi-Agent Task Board](./examples/multi-agent/)** — Agents collaborate on a shared task board. Event-driven via NOTIFY/LISTEN.
+- **[RAG Knowledge Base](./examples/rag-knowledge-base/)** — Ingest docs, embed with Ollama, answer questions via semantic search.
+- **[Research Pipeline](./examples/research-pipeline/)** — 3-stage AI pipeline: Researcher → Analyst → Writer. Each stage triggers the next.
+- **[Live Dashboard](./examples/live-dashboard/)** — Real-time CLI view of any running demo's collections.
 
 ## Development
 

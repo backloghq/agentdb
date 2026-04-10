@@ -269,7 +269,7 @@ export class Collection {
       if (stored) {
         const q = deserializeQuantized(stored);
         const vec = Array.from(q.data).map((v) => v / q.scale);
-        if (!this.hnswIdx) {
+        if (!this.hnswIdx || this.hnswIdx.dims === 0) {
           this.hnswIdx = new HnswIndex({ dimensions: vec.length });
         }
         this.hnswIdx.add(id, vec);
@@ -991,8 +991,8 @@ export class Collection {
     if (!Array.isArray(vector) || vector.length === 0) {
       throw new Error("Vector must be a non-empty number array");
     }
-    // Initialize HNSW if needed
-    if (!this.hnswIdx) {
+    // Initialize HNSW if needed, or reinitialize if dimensions were unknown (0)
+    if (!this.hnswIdx || this.hnswIdx.dims === 0) {
       this.hnswIdx = new HnswIndex({ dimensions: vector.length });
     }
     // Validate dimensions
