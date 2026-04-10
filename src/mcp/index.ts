@@ -314,8 +314,17 @@ export async function startHttp(
     await db.close();
   };
 
-  process.once("SIGINT", async () => { await close(); process.exit(0); });
-  process.once("SIGTERM", async () => { await close(); process.exit(0); });
+  const onSigint = async () => { await close(); process.exit(0); };
+  const onSigterm = async () => { await close(); process.exit(0); };
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
 
-  return { app, close, auditLog, port: actualPort };
+  const originalClose = close;
+  const cleanClose = async () => {
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
+    await originalClose();
+  };
+
+  return { app, close: cleanClose, auditLog, port: actualPort };
 }
