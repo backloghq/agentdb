@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Full scan warning** — `console.warn` emitted when disk-mode find() does unindexed scan on >10K records.
 - **DiskStore dirty tracking** — mutations (insert/update/delete) now mark DiskStore dirty via `emitChange()`, ensuring `close()` compacts to Parquet. Previously records were lost after close/reopen in disk mode.
 - **Programmatic index cardinality** — `saveIndexes()` computes cardinality from B-tree data for all indexed fields (not just schema `extractColumns`). Fixes cardinality being empty for programmatic indexes on reopen.
+- **Bulk mutation regression** — `emitChange()` no longer calls `cacheWrite()` per mutation ID. Uses `markDirty()` once instead. Records are in the opslog Map during the session — cache is only for Parquet reads on reopen. Restores bulk insert throughput.
 
 ### Performance
 - **Column-only Parquet scan** — `count()` with a simple equality filter on an extracted column reads only that column from Parquet, skipping `_data` deserialization entirely. ~1MB vs ~50MB at 100K records.
