@@ -246,12 +246,21 @@ export class DiskStore {
 
   // --- Index persistence ---
 
-  /** Save index data to disk. */
+  /** Save index data to disk. Also updates cardinality for all indexed fields. */
   async saveIndexes(indexManager: IndexManager, textIndex?: TextIndex | null): Promise<void> {
     const indexDir = join(this.dir, "indexes");
     await mkdir(indexDir, { recursive: true });
 
     const { btree, array } = indexManager.serializeIndexes();
+    // Update cardinality from all B-tree indexes (covers programmatic + schema indexes)
+    if (this.compactionMeta) {
+      const cardinality = { ...this.compactionMeta.columnCardinality };
+      for (const { data } of btree) {
+        cardinality[data.field] = data.entries.length; // number of unique values
+      }
+      this.compactionMeta.columnCardinality = cardinality;
+      await writeCompactionMeta(this.dir, this.compactionMeta);
+    }
     for (const { data } of btree) {
       await writeFile(join(indexDir, `btree-${data.field}.json`), JSON.stringify(data));
     }
