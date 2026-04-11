@@ -289,6 +289,32 @@ describe("Disk-backed mode", () => {
       expect(ds.isDirty).toBe(false);
       await db.close();
     });
+
+    it("programmatic index persists across reopens", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection("prog-idx");
+      col.createIndex("status");
+      await col.insert({ _id: "p1", title: "A", status: "open" });
+      await col.insert({ _id: "p2", title: "B", status: "closed" });
+      await col.insert({ _id: "p3", title: "C", status: "open" });
+      expect(await col.count({ status: "open" })).toBe(2);
+      await db.close();
+
+      // Reopen — programmatic index should be loaded from persisted btree
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection("prog-idx");
+      col2.createIndex("status"); // re-declare programmatic index
+
+      expect(col2.listIndexes()).toContain("status");
+      expect(await col2.count({ status: "open" })).toBe(2);
+      expect(await col2.count({ status: "closed" })).toBe(1);
+      expect(await col2.count()).toBe(3);
+
+      const found = await col2.find({ filter: { status: "open" } });
+      expect(found.records).toHaveLength(2);
+    });
   });
 
   describe("hybrid index — cardinality-based", () => {
