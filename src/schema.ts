@@ -71,6 +71,8 @@ export interface SchemaDefinition {
   textSearch?: boolean;
   /** Array field name for +tag/-tag compact filter syntax. Default: "tags". */
   tagField?: string;
+  /** Storage mode override: "memory", "disk", or "auto". */
+  storageMode?: "memory" | "disk" | "auto";
 }
 
 // --- Compiled schema ---
@@ -128,6 +130,7 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     virtualFilters: def.virtualFilters,
     textSearch: def.textSearch,
     tagField: def.tagField,
+    storageMode: def.storageMode,
   };
 
   return {

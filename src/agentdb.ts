@@ -11,6 +11,7 @@ import type { AgentPermissions } from "./permissions.js";
 import type { CollectionSchema } from "./schema.js";
 import { MemoryMonitor } from "./memory.js";
 import type { MemoryStats } from "./memory.js";
+import { DiskStore } from "./disk-store.js";
 
 const META_DIR = "meta";
 const COLLECTIONS_DIR = "collections";
@@ -46,6 +47,14 @@ export interface AgentDBOptions {
   groupCommitMs?: number;
   /** Open in read-only mode. Skips write locks, rejects mutations. Safe to run alongside a writer. */
   readOnly?: boolean;
+  /** Storage mode: "memory" (default, all records in RAM), "disk" (Parquet-backed with LRU cache), "auto" (switch to disk when record count exceeds diskThreshold). */
+  storageMode?: "memory" | "disk" | "auto";
+  /** Record count threshold for auto mode (default: 10000). */
+  diskThreshold?: number;
+  /** LRU cache size for disk mode (max records, default: 10000). */
+  cacheSize?: number;
+  /** Parquet row group size for disk mode (default: 5000). */
+  rowGroupSize?: number;
 }
 
 export interface CollectionInfo {
@@ -95,6 +104,10 @@ export class AgentDB {
       groupCommitSize: opts?.groupCommitSize,
       groupCommitMs: opts?.groupCommitMs,
       readOnly: opts?.readOnly,
+      storageMode: opts?.storageMode,
+      diskThreshold: opts?.diskThreshold,
+      cacheSize: opts?.cacheSize,
+      rowGroupSize: opts?.rowGroupSize,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -192,6 +205,14 @@ export class AgentDB {
     if (this.embeddingProvider) {
       col.setEmbeddingProvider(this.embeddingProvider);
     }
+
+    // Determine storage mode for this collection
+    const schema = this.schemas.get(name);
+    const mode = schema?.collectionOptions?.storageMode ?? this.opts.storageMode ?? "memory";
+    const useDisk = mode === "disk" ||
+      (mode === "auto" && await this.shouldUseDiskMode(colDir));
+
+    // Open collection (all modes load into memory for now — disk mode adds Parquet persistence + faster open)
     await col.open(colDir, {
       checkpointThreshold: this.opts.checkpointThreshold,
       backend: this.opts.backend,
@@ -202,8 +223,18 @@ export class AgentDB {
       readOnly: this.opts.readOnly,
     });
 
+    if (useDisk) {
+      // Disk mode: set up DiskStore for Parquet persistence + persistent indexes
+      const diskStore = new DiskStore(colDir, {
+        cacheSize: this.opts.cacheSize ?? 10_000,
+        rowGroupSize: this.opts.rowGroupSize ?? 5000,
+        extractColumns: schema?.indexes ?? [],
+      });
+      await diskStore.load();
+      col.setDiskStore(diskStore);
+    }
+
     // Apply schema features: auto-create indexes, init counters, register hooks
-    const schema = this.schemas.get(name);
     if (schema) {
       for (const field of schema.indexes) col.createIndex(field);
       for (const fields of schema.compositeIndexes) col.createCompositeIndex(fields);
@@ -433,6 +464,12 @@ export class AgentDB {
     for (const [name, col] of this.open) {
       const listener = this.collectionListeners.get(name);
       if (listener) col.off("change", listener);
+      // Disk mode: compact to Parquet + save indexes before closing
+      const ds = col.getDiskStore();
+      if (ds) {
+        await ds.compact(col.find({ limit: 100_000 }).records.map((r) => [r._id as string, r]));
+        await ds.saveIndexes(col.getIndexManager(), col.getTextIndex());
+      }
       await col.close();
     }
     this.open.clear();
@@ -451,6 +488,22 @@ export class AgentDB {
   private removeLru(name: string): void {
     const idx = this.lru.indexOf(name);
     if (idx !== -1) this.lru.splice(idx, 1);
+  }
+
+  /** Check if a collection should use disk mode based on snapshot record count. */
+  private async shouldUseDiskMode(colDir: string): Promise<boolean> {
+    const threshold = this.opts.diskThreshold ?? 10_000;
+    try {
+      const { readCompactionMeta } = await import("./parquet.js");
+      const meta = await readCompactionMeta(colDir);
+      if (meta && meta.rowCount >= threshold) return true;
+      // Check manifest stats for record count
+      const { readFile } = await import("node:fs/promises");
+      const manifest = JSON.parse(await readFile(join(colDir, "manifest.json"), "utf-8"));
+      return (manifest?.stats?.activeRecords ?? 0) >= threshold;
+    } catch {
+      return false;
+    }
   }
 
   private async evictLru(): Promise<void> {

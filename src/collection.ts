@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Store, FsBackend } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
+import type { DiskStore } from "./disk-store.js";
 import { getNestedValue } from "./filter.js";
 // parseCompactFilter used by IndexManager (imported there directly)
 import { TextIndex } from "./text-index.js";
@@ -74,6 +75,8 @@ export interface CollectionOptions {
   textSearch?: boolean;
   /** Array field name for +tag/-tag compact filter syntax. Default: "tags". */
   tagField?: string;
+  /** Storage mode override for this collection. */
+  storageMode?: "memory" | "disk" | "auto";
 }
 
 /** Change event emitted after mutations. */
@@ -103,6 +106,19 @@ export class Collection {
   private emitter = new EventEmitter();
   private indexes = new IndexManager();
   private _hasTTL = false; // Tracks if any record has been inserted with TTL
+  private _diskStore: DiskStore | null = null;
+
+  /** Set disk store for disk-backed mode. Called by AgentDB during open. */
+  setDiskStore(ds: DiskStore): void { this._diskStore = ds; }
+
+  /** Get disk store (if in disk mode). */
+  getDiskStore(): DiskStore | null { return this._diskStore; }
+
+  /** Get the index manager (for persistence). */
+  getIndexManager(): IndexManager { return this.indexes; }
+
+  /** Get the text index (for persistence). */
+  getTextIndex(): TextIndex | null { return this.textIdx; }
 
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
@@ -258,7 +274,7 @@ export class Collection {
   }
 
   /** Open the underlying opslog store at the given directory. */
-  async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean }): Promise<void> {
+  async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean; skipLoad?: boolean }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
     if (options?.backend) {
