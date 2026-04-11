@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Programmatic index cardinality** — `saveIndexes()` computes cardinality from B-tree data for all indexed fields (not just schema `extractColumns`). Fixes cardinality being empty for programmatic indexes on reopen.
 - **Bulk mutation regression** — `emitChange()` no longer calls `cacheWrite()` per mutation ID. Uses `markDirty()` once instead. Records are in the opslog Map during the session — cache is only for Parquet reads on reopen. Restores bulk insert throughput.
 - **S3 support for disk mode** — all Parquet and DiskStore I/O routed through `StorageBackend` (writeBlob/readBlob/listBlobs/deleteBlob). Disk mode works on both filesystem (FsBackend) and S3 (S3Backend) transparently. Verified with real S3 integration test.
+- **Parquet buffer caching** — Parquet file read once on first query, cached as ArrayBuffer for all subsequent reads. Eliminates per-query file I/O. Cleared on compaction.
 
 ### Performance
 - **Column-only Parquet scan** — `count()` with a simple equality filter on an extracted column reads only that column from Parquet, skipping `_data` deserialization entirely. ~1MB vs ~50MB at 100K records.
