@@ -812,6 +812,9 @@ export class Collection {
     const results: Array<{ id: string; action: "inserted" | "updated" }> = [];
     const prepared: Array<{ id: string; stored: StoredRecord; oldRecord: StoredRecord | undefined; existing: boolean }> = [];
 
+    // Hydrate existing records from DiskStore for correct old/new deltas
+    await this.hydrateManyFromDisk(docs.map((d) => d._id as string).filter(Boolean));
+
     for (const doc of docs) {
       const id = doc._id as string;
       if (!id) throw new Error("upsertMany: each document must have an _id field");
