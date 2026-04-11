@@ -673,12 +673,28 @@ export class Collection {
    */
   /**
    * Hydrate a record from DiskStore into the opslog Map (for mutations in skipLoad mode).
-   * If the record is in DiskStore but not in the Map, loads it so store.get/set/delete work.
    */
   private async hydrateFromDisk(id: string): Promise<void> {
     if (this.store.has(id) || !this._diskStore) return;
     const record = await this._diskStore.get(id);
     if (record) await this.store.set(id, record as StoredRecord);
+  }
+
+  /**
+   * Batch-hydrate multiple records from DiskStore into the Map.
+   * Filters to only IDs not already in Map, then does parallel JSONL reads.
+   */
+  private async hydrateManyFromDisk(ids: Iterable<string>): Promise<void> {
+    if (!this._diskStore) return;
+    const needed: string[] = [];
+    for (const id of ids) {
+      if (!this.store.has(id)) needed.push(id);
+    }
+    if (needed.length === 0) return;
+    const records = await this._diskStore.getMany(needed);
+    for (const [id, record] of records) {
+      await this.store.set(id, record as StoredRecord);
+    }
   }
 
   async update(filter: Filter, update: UpdateOps, opts?: MutationOpts): Promise<number> {
@@ -697,10 +713,7 @@ export class Collection {
       const candidateIds = this.indexedCandidates(filter);
       const predicate = this.resolve(filter);
       if (candidateIds) {
-        // Hydrate candidates from DiskStore
-        for (const id of candidateIds) {
-          await this.hydrateFromDisk(id);
-        }
+        await this.hydrateManyFromDisk(candidateIds);
         for (const id of candidateIds) {
           const value = this.store.get(id);
           if (value && !isExpired(value) && predicate(value)) matches.push([id, value]);
@@ -847,7 +860,7 @@ export class Collection {
       const candidateIds = this.indexedCandidates(filter);
       const predicate = this.resolve(filter);
       if (candidateIds) {
-        for (const id of candidateIds) await this.hydrateFromDisk(id);
+        await this.hydrateManyFromDisk(candidateIds);
         for (const id of candidateIds) {
           const value = this.store.get(id);
           if (value && !isExpired(value) && predicate(value)) toDelete.push(id);
