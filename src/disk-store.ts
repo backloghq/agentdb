@@ -181,29 +181,49 @@ export class DiskStore {
    * Reads only the target column — no _data deserialization.
    * Returns null if column not available (fall back to full scan).
    */
+  /** Get all Parquet files (base + incremental). */
+  private getAllParquetFiles(): string[] {
+    if (!this.compactionMeta) return [];
+    return [this.compactionMeta.parquetFile, ...(this.compactionMeta.parquetFiles ?? [])];
+  }
+
+  /** Get all JSONL files (base + incremental). */
+  private getAllJsonlFiles(): string[] {
+    if (!this.compactionMeta?.jsonlFile) return [];
+    return [this.compactionMeta.jsonlFile, ...(this.compactionMeta.jsonlFiles ?? [])];
+  }
+
   async countByColumn(field: string, value: unknown): Promise<number | null> {
     if (!this.compactionMeta) return null;
-    const pqBuf = await this.getParquetBuffer();
-    return countByColumn(this.backend, this.compactionMeta.parquetFile, field, value, pqBuf);
+    // Union count across all Parquet files
+    let total = 0;
+    for (const pqFile of this.getAllParquetFiles()) {
+      const result = await countByColumn(this.backend, pqFile, field, value);
+      if (result === null) return null; // column not available
+      total += result;
+    }
+    return total;
   }
 
-  /**
-   * Scan an extracted column and return matching _ids.
-   * Returns null if column not available.
-   */
   async scanColumn(field: string, predicate: (value: unknown) => boolean): Promise<string[] | null> {
     if (!this.compactionMeta) return null;
-    const pqBuf = await this.getParquetBuffer();
-    return scanColumn(this.backend, this.compactionMeta.parquetFile, field, predicate, pqBuf);
+    const allIds: string[] = [];
+    for (const pqFile of this.getAllParquetFiles()) {
+      const ids = await scanColumn(this.backend, pqFile, field, predicate);
+      if (ids === null) return null;
+      allIds.push(...ids);
+    }
+    return allIds;
   }
 
-  /** Iterate all records from JSONL. */
+  /** Iterate all records from all JSONL files. */
   async *entries(): AsyncGenerator<[string, Record<string, unknown>]> {
-    if (!this.compactionMeta?.jsonlFile) return;
-    const all = await readAllFromJsonl(this.backend, this.compactionMeta.jsonlFile);
-    for (const [id, record] of all) {
-      this.cache.set(id, record);
-      yield [id, record];
+    for (const jsonlFile of this.getAllJsonlFiles()) {
+      const all = await readAllFromJsonl(this.backend, jsonlFile);
+      for (const [id, record] of all) {
+        this.cache.set(id, record);
+        yield [id, record];
+      }
     }
   }
 
@@ -237,24 +257,53 @@ export class DiskStore {
     this.cache.clear();
   }
 
+  /** Max incremental files before triggering a full merge. */
+  private static readonly MERGE_THRESHOLD = 10;
+
   // --- Compaction ---
 
+  /**
+   * Compact: incremental if possible, full if first time or merge threshold reached.
+   * - Incremental: writes only newRecords to new JSONL + Parquet files, appends to file list.
+   * - Full: rewrites all records into single JSONL + Parquet files.
+   */
   async compact(
     allRecords: AsyncIterable<[string, Record<string, unknown>]> | Iterable<[string, Record<string, unknown>]>,
+    newRecords?: Array<[string, Record<string, unknown>]>,
   ): Promise<void> {
-    // Collect records (needed by both Parquet columnar writer and JSONL writer)
+    const fileCount = (this.compactionMeta?.parquetFiles?.length ?? 0) + 1;
+    const shouldMerge = !this.compactionMeta || fileCount >= DiskStore.MERGE_THRESHOLD || !newRecords;
+
+    if (shouldMerge) {
+      await this._compactFull(allRecords);
+    } else {
+      await this._compactIncremental(newRecords);
+    }
+  }
+
+  /** Full compaction: rewrite everything into single JSONL + Parquet. */
+  private async _compactFull(
+    allRecords: AsyncIterable<[string, Record<string, unknown>]> | Iterable<[string, Record<string, unknown>]>,
+  ): Promise<void> {
     const collected: Array<[string, Record<string, unknown>]> = [];
     for await (const entry of allRecords) collected.push(entry);
 
-    // Write Parquet (for column scans + count)
     const options: CompactionOptions = {
       rowGroupSize: this.rowGroupSize,
       extractColumns: this.extractColumns,
     };
     const { file, offsetIndex, columnCardinality } = await compactToParquet(this.backend, collected, options);
-
-    // Write JSONL record store (for O(1) point lookups)
     const { path: jsonlPath, offsetIndex: recordOffsets } = await writeRecordStore(this.backend, collected);
+
+    // Clean up ALL old files before updating meta
+    if (this.compactionMeta) {
+      const keepParquet = new Set([file.path]);
+      const keepJsonl = new Set([jsonlPath]);
+      for (const f of this.compactionMeta.parquetFiles ?? []) keepParquet.add(f);
+      for (const f of this.compactionMeta.jsonlFiles ?? []) keepJsonl.add(f);
+    }
+    await cleanupOldParquetFiles(this.backend, file.path);
+    await cleanupOldJsonlFiles(this.backend, jsonlPath);
 
     this.offsetIndex = offsetIndex;
     this.recordOffsetIndex = recordOffsets;
@@ -262,7 +311,9 @@ export class DiskStore {
     this.compactionMeta = {
       lastTimestamp: new Date().toISOString(),
       parquetFile: file.path,
+      parquetFiles: [],
       jsonlFile: jsonlPath,
+      jsonlFiles: [],
       rowCount: file.rowCount,
       rowGroups: file.rowGroups,
       columnCardinality,
@@ -271,8 +322,51 @@ export class DiskStore {
     await writeOffsetIndex(this.backend, offsetIndex);
     await writeRecordOffsetIndex(this.backend, recordOffsets);
     await writeCompactionMeta(this.backend, this.compactionMeta);
-    await cleanupOldParquetFiles(this.backend, file.path);
-    await cleanupOldJsonlFiles(this.backend, jsonlPath);
+
+    this.cache.clear();
+    this._parquetBuffer = null;
+    this._dirty = false;
+  }
+
+  /** Incremental compaction: write only new records, append to file lists. */
+  private async _compactIncremental(
+    newRecords: Array<[string, Record<string, unknown>]>,
+  ): Promise<void> {
+    if (newRecords.length === 0) { this._dirty = false; return; }
+
+    const options: CompactionOptions = {
+      rowGroupSize: this.rowGroupSize,
+      extractColumns: this.extractColumns,
+    };
+    const { file, offsetIndex: newPqOffset, columnCardinality } = await compactToParquet(this.backend, newRecords, options);
+    const { path: jsonlPath, offsetIndex: newRecordOffsets } = await writeRecordStore(this.backend, newRecords);
+
+    // Merge into existing offset indexes
+    for (const [id, entry] of newPqOffset) this.offsetIndex.set(id, entry);
+    for (const [id, entry] of newRecordOffsets) this.recordOffsetIndex.set(id, entry);
+    this._recordCount = this.recordOffsetIndex.size;
+
+    // Append files to lists
+    const parquetFiles = [...(this.compactionMeta?.parquetFiles ?? []), file.path];
+    const jsonlFiles = [...(this.compactionMeta?.jsonlFiles ?? []), jsonlPath];
+
+    // Merge cardinality
+    const mergedCardinality = { ...this.compactionMeta?.columnCardinality, ...columnCardinality };
+
+    this.compactionMeta = {
+      lastTimestamp: new Date().toISOString(),
+      parquetFile: this.compactionMeta!.parquetFile, // keep original base file
+      parquetFiles,
+      jsonlFile: this.compactionMeta!.jsonlFile!, // keep original base file
+      jsonlFiles,
+      rowCount: this._recordCount,
+      rowGroups: (this.compactionMeta?.rowGroups ?? 0) + file.rowGroups,
+      columnCardinality: mergedCardinality,
+    };
+
+    await writeOffsetIndex(this.backend, this.offsetIndex);
+    await writeRecordOffsetIndex(this.backend, this.recordOffsetIndex);
+    await writeCompactionMeta(this.backend, this.compactionMeta);
 
     this.cache.clear();
     this._parquetBuffer = null;

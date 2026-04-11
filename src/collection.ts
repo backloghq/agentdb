@@ -123,6 +123,9 @@ export class Collection {
   /** Get the storage backend (for DiskStore I/O). */
   getBackend(): import("@backloghq/opslog").StorageBackend { return this.backend; }
 
+  /** Get the opslog store (for accessing session writes in disk mode). */
+  getStore(): Store<StoredRecord> { return this.store; }
+
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
     this.store = store;
@@ -668,18 +671,36 @@ export class Collection {
   /**
    * Update records matching a filter. Returns number of modified records.
    */
+  /**
+   * Hydrate a record from DiskStore into the opslog Map (for mutations in skipLoad mode).
+   * If the record is in DiskStore but not in the Map, loads it so store.get/set/delete work.
+   */
+  private async hydrateFromDisk(id: string): Promise<void> {
+    if (this.store.has(id) || !this._diskStore) return;
+    const record = await this._diskStore.get(id);
+    if (record) await this.store.set(id, record as StoredRecord);
+  }
+
   async update(filter: Filter, update: UpdateOps, opts?: MutationOpts): Promise<number> {
     // Fast path: { _id: value } → direct lookup instead of linear scan
     const directId = this.extractDirectId(filter);
     const matches: [string, StoredRecord][] = [];
 
+    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
+
     if (directId) {
+      // Hydrate from DiskStore if not in Map (skipLoad mode)
+      await this.hydrateFromDisk(directId);
       const value = this.store.get(directId);
       if (value && !isExpired(value)) matches.push([directId, value]);
     } else {
       const candidateIds = this.indexedCandidates(filter);
       const predicate = this.resolve(filter);
       if (candidateIds) {
+        // Hydrate candidates from DiskStore
+        for (const id of candidateIds) {
+          await this.hydrateFromDisk(id);
+        }
         for (const id of candidateIds) {
           const value = this.store.get(id);
           if (value && !isExpired(value) && predicate(value)) matches.push([id, value]);
@@ -753,6 +774,7 @@ export class Collection {
     doc: Record<string, unknown>,
     opts?: MutationOpts,
   ): Promise<{ id: string; action: "inserted" | "updated" }> {
+    await this.hydrateFromDisk(id);
     const oldRecord = this.store.get(id);
     const existing = oldRecord !== undefined;
     this.checkVersion(id, opts?.expectedVersion);
@@ -815,13 +837,17 @@ export class Collection {
     const directId = this.extractDirectId(filter);
     const toDelete: string[] = [];
 
+    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
+
     if (directId) {
+      await this.hydrateFromDisk(directId);
       const value = this.store.get(directId);
       if (value && !isExpired(value)) toDelete.push(directId);
     } else {
       const candidateIds = this.indexedCandidates(filter);
       const predicate = this.resolve(filter);
       if (candidateIds) {
+        for (const id of candidateIds) await this.hydrateFromDisk(id);
         for (const id of candidateIds) {
           const value = this.store.get(id);
           if (value && !isExpired(value) && predicate(value)) toDelete.push(id);

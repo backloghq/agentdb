@@ -526,8 +526,13 @@ export class AgentDB {
       const ds = col.getDiskStore();
       if (ds) {
         if (ds.isDirty) {
+          // Incremental: pass session writes (from Map) as newRecords
+          const mapRecords = col.getStore().entries().map(([id, r]) => [id, r] as [string, Record<string, unknown>]);
           const allRecords = await col.findAll();
-          await ds.compact(allRecords.map((r) => [r._id as string, r]));
+          await ds.compact(
+            allRecords.map((r) => [r._id as string, r]),
+            mapRecords.length > 0 ? mapRecords : undefined,
+          );
         }
         await ds.saveIndexes(col.getIndexManager(), col.getTextIndex());
       }

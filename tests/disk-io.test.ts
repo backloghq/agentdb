@@ -266,26 +266,27 @@ describe("Parquet compaction and reader", () => {
     it("binary offset index handles variable-length IDs", async () => {
       const { writeRecordOffsetIndex, readRecordOffsetIndex } = await import("../src/disk-io.js");
 
+      const f = "data/records-test.jsonl";
       const offsetIndex = new Map([
-        ["short", { offset: 0, length: 100 }],
-        ["a-much-longer-custom-id-string", { offset: 101, length: 200 }],
-        ["x", { offset: 302, length: 50 }],
+        ["short", { file: f, offset: 0, length: 100 }],
+        ["a-much-longer-custom-id-string", { file: f, offset: 101, length: 200 }],
+        ["x", { file: f, offset: 302, length: 50 }],
       ]);
       await writeRecordOffsetIndex(backend, offsetIndex);
 
       const loaded = await readRecordOffsetIndex(backend);
       expect(loaded.size).toBe(3);
-      expect(loaded.get("short")).toEqual({ offset: 0, length: 100 });
-      expect(loaded.get("a-much-longer-custom-id-string")).toEqual({ offset: 101, length: 200 });
-      expect(loaded.get("x")).toEqual({ offset: 302, length: 50 });
+      expect(loaded.get("short")).toEqual({ file: f, offset: 0, length: 100 });
+      expect(loaded.get("a-much-longer-custom-id-string")).toEqual({ file: f, offset: 101, length: 200 });
+      expect(loaded.get("x")).toEqual({ file: f, offset: 302, length: 50 });
     });
 
     it("binary offset index handles large offsets (uint48)", async () => {
       const { writeRecordOffsetIndex, readRecordOffsetIndex } = await import("../src/disk-io.js");
 
-      const largeOffset = 500_000_000_000; // 500GB — beyond uint32 range
+      const largeOffset = 500_000_000_000;
       const offsetIndex = new Map([
-        ["big", { offset: largeOffset, length: 1000 }],
+        ["big", { file: "data/records.jsonl", offset: largeOffset, length: 1000 }],
       ]);
       await writeRecordOffsetIndex(backend, offsetIndex);
 

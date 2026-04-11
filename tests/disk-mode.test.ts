@@ -599,4 +599,62 @@ describe("Disk-backed mode", () => {
       expect(all.total).toBe(50);
     });
   });
+
+  describe("incremental compaction", () => {
+    it("multi-session inserts accumulate correctly", async () => {
+      // Session 1: insert 10 records
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      let col = await db.collection("incr-test");
+      for (let i = 0; i < 10; i++) {
+        await col.insert({ _id: `s1-${i}`, title: `Session1 ${i}` });
+      }
+      await db.close();
+
+      // Session 2: insert 10 more
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      col = await db.collection("incr-test");
+      for (let i = 0; i < 10; i++) {
+        await col.insert({ _id: `s2-${i}`, title: `Session2 ${i}` });
+      }
+      await db.close();
+
+      // Session 3: verify all 20 records
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      col = await db.collection("incr-test");
+
+      expect(await col.count()).toBe(20);
+      expect((await col.findOne("s1-0"))?.title).toBe("Session1 0");
+      expect((await col.findOne("s2-9"))?.title).toBe("Session2 9");
+
+      const all = await col.find({ limit: 100 });
+      expect(all.total).toBe(20);
+    });
+
+    it("updates in later session override earlier records", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      let col = await db.collection("incr-update");
+      await col.insert({ _id: "u1", title: "Original", status: "open" });
+      await db.close();
+
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      col = await db.collection("incr-update");
+      await col.update({ _id: "u1" }, { $set: { status: "closed" } });
+      await col.insert({ _id: "u2", title: "New" });
+      await db.close();
+
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      col = await db.collection("incr-update");
+
+      expect(await col.count()).toBe(2);
+      const r = await col.findOne("u1");
+      expect(r?.status).toBe("closed");
+      expect((await col.findOne("u2"))?.title).toBe("New");
+    });
+  });
 });

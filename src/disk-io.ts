@@ -147,8 +147,12 @@ export async function readOffsetIndex(backend: StorageBackend): Promise<Map<stri
 export interface CompactionMeta {
   lastTimestamp: string;
   parquetFile: string;
+  /** Additional Parquet files from incremental compactions. */
+  parquetFiles?: string[];
   /** JSONL record store for point lookups. */
   jsonlFile?: string;
+  /** Additional JSONL files from incremental compactions. */
+  jsonlFiles?: string[];
   rowCount: number;
   rowGroups: number;
   /** Cardinality per extracted column. Used to decide in-memory vs Parquet-only index. */
@@ -338,6 +342,8 @@ export async function cleanupOldParquetFiles(backend: StorageBackend, keepFile: 
 // --- JSONL Record Store ---
 
 export interface RecordOffsetEntry {
+  /** JSONL file this record lives in. */
+  file: string;
   offset: number;
   length: number;
 }
@@ -360,7 +366,7 @@ export async function writeRecordStore(
   for await (const [id, record] of records) {
     const line = JSON.stringify(record);
     const lineBytes = Buffer.byteLength(line, "utf-8");
-    offsetIndex.set(id, { offset, length: lineBytes });
+    offsetIndex.set(id, { file: relativePath, offset, length: lineBytes });
     chunks.push(Buffer.from(line + "\n", "utf-8"));
     offset += lineBytes + 1;
   }
@@ -374,10 +380,10 @@ export async function writeRecordStore(
  */
 export async function readRecordByOffset(
   backend: StorageBackend,
-  jsonlPath: string,
+  _jsonlPath: string, // deprecated — file now in entry.file
   entry: RecordOffsetEntry,
 ): Promise<Record<string, unknown>> {
-  const buf = await backend.readBlobRange(jsonlPath, entry.offset, entry.length);
+  const buf = await backend.readBlobRange(entry.file, entry.offset, entry.length);
   return JSON.parse(buf.toString("utf-8"));
 }
 
@@ -448,18 +454,18 @@ export async function readAllFromJsonl(
  *   Per entry:
  *     Bytes 0-1:  ID length (uint16 LE)
  *     Bytes 2-N:  ID as UTF-8 bytes
- *     Bytes N-N+5: file offset (uint48 LE, max 256TB)
- *     Bytes N+6-N+9: record length (uint32 LE, max 4GB)
- *
- * 3.6x faster to load than JSON at 1M entries (~300ms vs ~1000ms).
+ *     Bytes N-N+1: file path length (uint16 LE)
+ *     Bytes N+2-M: file path as UTF-8 bytes
+ *     Bytes M-M+5: file offset (uint48 LE)
+ *     Bytes M+6-M+9: record length (uint32 LE)
  */
 export async function writeRecordOffsetIndex(
   backend: StorageBackend,
   offsetIndex: Map<string, RecordOffsetEntry>,
 ): Promise<void> {
-  let totalSize = 4; // count
-  for (const [id] of offsetIndex) {
-    totalSize += 2 + Buffer.byteLength(id, "utf-8") + 10; // id_len + id + offset(6) + length(4)
+  let totalSize = 4;
+  for (const [id, entry] of offsetIndex) {
+    totalSize += 2 + Buffer.byteLength(id, "utf-8") + 2 + Buffer.byteLength(entry.file, "utf-8") + 10;
   }
   const buf = Buffer.alloc(totalSize);
   buf.writeUInt32LE(offsetIndex.size, 0);
@@ -468,9 +474,12 @@ export async function writeRecordOffsetIndex(
     const idBytes = Buffer.byteLength(id, "utf-8");
     buf.writeUInt16LE(idBytes, pos);
     buf.write(id, pos + 2, idBytes, "utf-8");
-    buf.writeUIntLE(entry.offset, pos + 2 + idBytes, 6);
-    buf.writeUInt32LE(entry.length, pos + 2 + idBytes + 6);
-    pos += 2 + idBytes + 10;
+    const fileBytes = Buffer.byteLength(entry.file, "utf-8");
+    buf.writeUInt16LE(fileBytes, pos + 2 + idBytes);
+    buf.write(entry.file, pos + 2 + idBytes + 2, fileBytes, "utf-8");
+    buf.writeUIntLE(entry.offset, pos + 2 + idBytes + 2 + fileBytes, 6);
+    buf.writeUInt32LE(entry.length, pos + 2 + idBytes + 2 + fileBytes + 6);
+    pos += 2 + idBytes + 2 + fileBytes + 10;
   }
   await backend.writeBlob("indexes/record-offsets.bin", buf);
 }
@@ -489,10 +498,12 @@ export async function readRecordOffsetIndex(
     for (let i = 0; i < count; i++) {
       const idLen = buf.readUInt16LE(pos);
       const id = buf.subarray(pos + 2, pos + 2 + idLen).toString("utf-8");
-      const offset = buf.readUIntLE(pos + 2 + idLen, 6);
-      const length = buf.readUInt32LE(pos + 2 + idLen + 6);
-      index.set(id, { offset, length });
-      pos += 2 + idLen + 10;
+      const fileLen = buf.readUInt16LE(pos + 2 + idLen);
+      const file = buf.subarray(pos + 2 + idLen + 2, pos + 2 + idLen + 2 + fileLen).toString("utf-8");
+      const offset = buf.readUIntLE(pos + 2 + idLen + 2 + fileLen, 6);
+      const length = buf.readUInt32LE(pos + 2 + idLen + 2 + fileLen + 6);
+      index.set(id, { file, offset, length });
+      pos += 2 + idLen + 2 + fileLen + 10;
     }
     return index;
   } catch {
