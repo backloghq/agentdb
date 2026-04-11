@@ -13,7 +13,7 @@ import {
   cleanupOldParquetFiles,
   countByColumn,
   scanColumn,
-} from "../src/parquet.js";
+} from "../src/disk-io.js";
 
 describe("Parquet compaction and reader", () => {
   let tmpDir: string;
@@ -221,7 +221,7 @@ describe("Parquet compaction and reader", () => {
         ["id-2", { _id: "id-2", title: "Third", status: "open" }],
       ];
 
-      const { writeRecordStore, readRecordByOffset, readRecordsByOffsets, readAllFromJsonl } = await import("../src/parquet.js");
+      const { writeRecordStore, readRecordByOffset, readRecordsByOffsets, readAllFromJsonl } = await import("../src/disk-io.js");
 
       const { path, offsetIndex } = await writeRecordStore(backend, records);
       expect(path).toMatch(/^data\/records-\d+\.jsonl$/);
@@ -248,7 +248,7 @@ describe("Parquet compaction and reader", () => {
     });
 
     it("offset index persistence round-trip", async () => {
-      const { writeRecordStore, writeRecordOffsetIndex, readRecordOffsetIndex } = await import("../src/parquet.js");
+      const { writeRecordStore, writeRecordOffsetIndex, readRecordOffsetIndex } = await import("../src/disk-io.js");
 
       const records: Array<[string, Record<string, unknown>]> = [
         ["a", { _id: "a", val: 1 }],

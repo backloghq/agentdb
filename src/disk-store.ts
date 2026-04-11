@@ -26,7 +26,7 @@ import {
   type RecordOffsetEntry,
   type CompactionMeta,
   type CompactionOptions,
-} from "./parquet.js";
+} from "./disk-io.js";
 import type { IndexManager } from "./collection-indexes.js";
 import type { TextIndex } from "./text-index.js";
 import type { StorageBackend } from "@backloghq/opslog";

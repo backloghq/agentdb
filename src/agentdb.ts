@@ -251,7 +251,7 @@ export class AgentDB {
         }
       } else {
         // Replay WAL since last compaction into DiskStore cache (skip if Parquet is fresh)
-        const { readCompactionMeta } = await import("./parquet.js");
+        const { readCompactionMeta } = await import("./disk-io.js");
         const compactionMeta = await readCompactionMeta(col.getBackend());
         if (compactionMeta) {
           let walOpsReplayed = 0;
@@ -559,7 +559,7 @@ export class AgentDB {
       const { FsBackend } = await import("@backloghq/opslog");
       const tmpBackend = new FsBackend();
       await tmpBackend.initialize(colDir, { readOnly: true });
-      const { readCompactionMeta } = await import("./parquet.js");
+      const { readCompactionMeta } = await import("./disk-io.js");
       const meta = await readCompactionMeta(tmpBackend);
       if (meta && meta.rowCount >= threshold) return true;
       // Check manifest stats for record count
