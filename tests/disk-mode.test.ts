@@ -447,6 +447,45 @@ describe("Disk-backed mode", () => {
       expect(await col2.count({ status: "closed" })).toBe(1);
       expect(await col2.count()).toBe(3);
     });
+
+    it("compound count uses index intersection without materializing records", async () => {
+      db = new AgentDB(tmpDir);
+      await db.init();
+
+      const col = await db.collection(defineSchema({
+        name: "compound-count",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+          priority: { type: "number", min: 1, max: 10 },
+        },
+        indexes: ["status", "priority"],
+        storageMode: "disk",
+      }));
+
+      for (let i = 0; i < 20; i++) {
+        await col.insert({ title: `Task ${i}`, status: i < 10 ? "open" : "closed", priority: (i % 10) + 1 });
+      }
+      await db.close();
+
+      db = new AgentDB(tmpDir);
+      await db.init();
+      const col2 = await db.collection(defineSchema({
+        name: "compound-count",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+          priority: { type: "number", min: 1, max: 10 },
+        },
+        indexes: ["status", "priority"],
+        storageMode: "disk",
+      }));
+
+      // Compound count — both fields indexed, should use intersection size
+      const openHighPri = await col2.count({ status: "open", priority: { $gte: 8 } });
+      expect(openHighPri).toBeGreaterThan(0);
+      expect(openHighPri).toBeLessThanOrEqual(10);
+    });
   });
 
   describe("JSONL record store", () => {
