@@ -133,4 +133,47 @@ describe("RecordCache", () => {
     expect(cache.get("key-199")).toEqual({ v: 199 });
     expect(cache.stats().evictions).toBe(100);
   });
+
+  it("handles null and undefined values", () => {
+    const cache = new RecordCache(10);
+    cache.set("n", { val: null });
+    cache.set("u", { val: undefined });
+    expect(cache.get("n")).toEqual({ val: null });
+    expect(cache.get("u")).toEqual({ val: undefined });
+    expect(cache.size).toBe(2);
+  });
+
+  it("handles empty object values", () => {
+    const cache = new RecordCache(10);
+    cache.set("empty", {});
+    expect(cache.get("empty")).toEqual({});
+  });
+
+  it("delete on nonexistent key is no-op", () => {
+    const cache = new RecordCache(10);
+    cache.delete("nonexistent");
+    expect(cache.size).toBe(0);
+  });
+
+  it("set same key multiple times doesn't grow size", () => {
+    const cache = new RecordCache(10);
+    cache.set("a", { v: 1 });
+    cache.set("a", { v: 2 });
+    cache.set("a", { v: 3 });
+    expect(cache.size).toBe(1);
+    expect(cache.get("a")).toEqual({ v: 3 });
+    expect(cache.stats().evictions).toBe(0);
+  });
+
+  it("works correctly after clear and reuse", () => {
+    const cache = new RecordCache(3);
+    cache.set("a", { v: 1 });
+    cache.set("b", { v: 2 });
+    cache.clear();
+    cache.set("c", { v: 3 });
+    cache.set("d", { v: 4 });
+    expect(cache.size).toBe(2);
+    expect(cache.get("a")).toBeUndefined();
+    expect(cache.get("c")).toEqual({ v: 3 });
+  });
 });

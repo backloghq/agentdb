@@ -238,6 +238,40 @@ describe("Disk-backed mode", () => {
       await col.insert({ title: "Test" });
       expect(col.getDiskStore()).not.toBeNull();
     });
+
+    it("stays in memory below threshold", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "auto", diskThreshold: 10 });
+      await db.init();
+      const col = await db.collection("auto-below");
+      for (let i = 0; i < 9; i++) {
+        await col.insert({ title: `Record ${i}` });
+      }
+      await db.close();
+
+      // 9 records < threshold 10 → stays in memory
+      db = new AgentDB(tmpDir, { storageMode: "auto", diskThreshold: 10 });
+      await db.init();
+      const col2 = await db.collection("auto-below");
+      expect(col2.getDiskStore()).toBeNull();
+      expect(await col2.count()).toBe(9);
+    });
+
+    it("switches at exactly the threshold (>=)", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "auto", diskThreshold: 10 });
+      await db.init();
+      const col = await db.collection("auto-exact");
+      for (let i = 0; i < 10; i++) {
+        await col.insert({ title: `Record ${i}` });
+      }
+      await db.close();
+
+      // 10 records >= threshold → disk mode
+      db = new AgentDB(tmpDir, { storageMode: "auto", diskThreshold: 10 });
+      await db.init();
+      const col2 = await db.collection("auto-exact");
+      expect(col2.getDiskStore()).not.toBeNull();
+      expect(await col2.count()).toBe(10);
+    });
   });
 
   describe("mutations in disk mode", () => {
