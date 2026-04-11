@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Persistent text index serialization** — `TextIndex.toJSON()`/`fromJSON()` for disk persistence.
 - **Persistent array index serialization** — `ArrayIndex.toJSON()`/`fromJSON()` for disk persistence.
 - **`hyparquet` + `hyparquet-writer`** — pure JS Parquet read/write for disk-backed storage.
-- **opslog v0.7.0** — `skipLoad`, `streamSnapshot()`, `getWalOps()`, `getManifest()`, JSONL snapshots.
+- **opslog v0.7.1** — `skipLoad`, `streamSnapshot()`, `getWalOps()`, `getManifest()`, JSONL snapshots, streaming snapshot write (fixes V8 string limit at 1M+ records).
 - **Disk-backed storage mode** — `storageMode: "disk"` compacts collections to Parquet on close, persists indexes to disk, loads both on next open. Configurable globally or per-collection via `defineSchema({ storageMode })`.
 - **`DiskStore`** — disk-backed record storage with LRU cache, offset index, Parquet compaction lifecycle, persistent index save/load.
 - **Parquet compaction** — `compactToParquet()` writes records as Parquet files via hyparquet-writer with configurable row groups and extracted columns for skip-scanning.
