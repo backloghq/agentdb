@@ -178,25 +178,29 @@ export async function readCompactionMeta(backend: StorageBackend): Promise<Compa
 // --- Reader ---
 
 /** Helper: read a Parquet file as ArrayBuffer via backend. */
-async function readParquetBuffer(backend: StorageBackend, parquetPath: string): Promise<ArrayBuffer> {
+export async function readParquetBuffer(backend: StorageBackend, parquetPath: string): Promise<ArrayBuffer> {
   const buf = await backend.readBlob(parquetPath);
-  // Copy to a clean ArrayBuffer (buf.buffer may be SharedArrayBuffer or oversized)
   const ab = new ArrayBuffer(buf.byteLength);
   new Uint8Array(ab).set(buf);
   return ab;
 }
 
-/** Helper: create an AsyncBuffer for hyparquet from backend. */
-async function getAsyncBuffer(backend: StorageBackend, parquetPath: string) {
-  const ab = await readParquetBuffer(backend, parquetPath);
+/** Create an AsyncBuffer from an ArrayBuffer. */
+function asyncBufferFrom(ab: ArrayBuffer) {
   return { byteLength: ab.byteLength, slice: (start: number, end?: number) => Promise.resolve(ab.slice(start, end)) };
+}
+
+/** Helper: get AsyncBuffer — use cached buffer if provided, otherwise read from backend. */
+async function getAsyncBuffer(backend: StorageBackend, parquetPath: string, cached?: ArrayBuffer) {
+  const ab = cached ?? await readParquetBuffer(backend, parquetPath);
+  return asyncBufferFrom(ab);
 }
 
 /**
  * Read all records from a Parquet file.
  */
-export async function readAllFromParquet(backend: StorageBackend, parquetPath: string): Promise<Map<string, Record<string, unknown>>> {
-  const file = await getAsyncBuffer(backend, parquetPath);
+export async function readAllFromParquet(backend: StorageBackend, parquetPath: string, cached?: ArrayBuffer): Promise<Map<string, Record<string, unknown>>> {
+  const file = await getAsyncBuffer(backend, parquetPath, cached);
   const rows = await parquetReadObjects({ file }) as Array<{ _id: string; _data: string }>;
   const records = new Map<string, Record<string, unknown>>();
   for (const row of rows) {
@@ -215,10 +219,11 @@ export async function readByIds(
   ids: string[],
   offsetIndex: Map<string, OffsetEntry>,
   rowGroupSize: number,
+  cached?: ArrayBuffer,
 ): Promise<Map<string, Record<string, unknown>>> {
   if (ids.length === 0) return new Map();
 
-  const file = await getAsyncBuffer(backend, parquetPath);
+  const file = await getAsyncBuffer(backend, parquetPath, cached);
   const results = new Map<string, Record<string, unknown>>();
 
   // Group IDs by row group
@@ -256,8 +261,8 @@ export async function readByIds(
 /**
  * Get Parquet file metadata (row group stats) for skip-scanning.
  */
-export async function getParquetMetadata(backend: StorageBackend, parquetPath: string): Promise<FileMetaData> {
-  const ab = await readParquetBuffer(backend, parquetPath);
+export async function getParquetMetadata(backend: StorageBackend, parquetPath: string, cached?: ArrayBuffer): Promise<FileMetaData> {
+  const ab = cached ?? await readParquetBuffer(backend, parquetPath);
   return parquetMetadata(ab);
 }
 
@@ -271,8 +276,9 @@ export async function countByColumn(
   parquetPath: string,
   field: string,
   value: unknown,
+  cached?: ArrayBuffer,
 ): Promise<number | null> {
-  const ab = await readParquetBuffer(backend, parquetPath);
+  const ab = cached ?? await readParquetBuffer(backend, parquetPath);
   const metadata = parquetMetadata(ab);
   const columns = metadata.row_groups[0]?.columns.map(
     (c) => c.meta_data?.path_in_schema?.[0],
@@ -297,8 +303,9 @@ export async function scanColumn(
   parquetPath: string,
   field: string,
   predicate: (value: unknown) => boolean,
+  cached?: ArrayBuffer,
 ): Promise<string[] | null> {
-  const ab = await readParquetBuffer(backend, parquetPath);
+  const ab = cached ?? await readParquetBuffer(backend, parquetPath);
   const metadata = parquetMetadata(ab);
   const columns = metadata.row_groups[0]?.columns.map(
     (c) => c.meta_data?.path_in_schema?.[0],

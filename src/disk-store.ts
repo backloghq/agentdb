@@ -9,6 +9,7 @@ import {
   compactToParquet,
   readAllFromParquet,
   readByIds,
+  readParquetBuffer,
   countByColumn,
   scanColumn,
   writeOffsetIndex,
@@ -42,6 +43,8 @@ export class DiskStore {
   private extractColumns: string[];
   private _recordCount = 0;
   private _dirty = false;
+  /** Cached Parquet file buffer — read once, reused for all queries. Cleared on compaction. */
+  private _parquetBuffer: ArrayBuffer | null = null;
 
   constructor(backend: StorageBackend, options?: DiskStoreOptions) {
     this.backend = backend;
@@ -95,6 +98,15 @@ export class DiskStore {
     return this.cache.stats();
   }
 
+  /** Get or lazily load the cached Parquet file buffer. */
+  private async getParquetBuffer(): Promise<ArrayBuffer | undefined> {
+    if (!this.compactionMeta) return undefined;
+    if (!this._parquetBuffer) {
+      this._parquetBuffer = await readParquetBuffer(this.backend, this.compactionMeta.parquetFile);
+    }
+    return this._parquetBuffer;
+  }
+
   // --- Read operations ---
 
   /** Get a record by ID. Checks cache first, then Parquet. */
@@ -104,8 +116,9 @@ export class DiskStore {
 
     if (!this.compactionMeta || !this.offsetIndex.has(id)) return undefined;
 
+    const pqBuf = await this.getParquetBuffer();
     const results = await readByIds(
-      this.backend, this.compactionMeta.parquetFile, [id], this.offsetIndex, this.rowGroupSize,
+      this.backend, this.compactionMeta.parquetFile, [id], this.offsetIndex, this.rowGroupSize, pqBuf,
     );
     const record = results.get(id);
     if (record) this.cache.set(id, record);
@@ -132,8 +145,9 @@ export class DiskStore {
     }
 
     if (uncached.length > 0 && this.compactionMeta) {
+      const pqBuf = await this.getParquetBuffer();
       const fromParquet = await readByIds(
-        this.backend, this.compactionMeta.parquetFile, uncached, this.offsetIndex, this.rowGroupSize,
+        this.backend, this.compactionMeta.parquetFile, uncached, this.offsetIndex, this.rowGroupSize, pqBuf,
       );
       for (const [id, record] of fromParquet) {
         this.cache.set(id, record);
@@ -151,7 +165,8 @@ export class DiskStore {
    */
   async countByColumn(field: string, value: unknown): Promise<number | null> {
     if (!this.compactionMeta) return null;
-    return countByColumn(this.backend, this.compactionMeta.parquetFile, field, value);
+    const pqBuf = await this.getParquetBuffer();
+    return countByColumn(this.backend, this.compactionMeta.parquetFile, field, value, pqBuf);
   }
 
   /**
@@ -160,13 +175,15 @@ export class DiskStore {
    */
   async scanColumn(field: string, predicate: (value: unknown) => boolean): Promise<string[] | null> {
     if (!this.compactionMeta) return null;
-    return scanColumn(this.backend, this.compactionMeta.parquetFile, field, predicate);
+    const pqBuf = await this.getParquetBuffer();
+    return scanColumn(this.backend, this.compactionMeta.parquetFile, field, predicate, pqBuf);
   }
 
   /** Iterate all records (reads from Parquet). */
   async *entries(): AsyncGenerator<[string, Record<string, unknown>]> {
     if (!this.compactionMeta) return;
-    const all = await readAllFromParquet(this.backend, this.compactionMeta.parquetFile);
+    const pqBuf = await this.getParquetBuffer();
+    const all = await readAllFromParquet(this.backend, this.compactionMeta.parquetFile, pqBuf);
     for (const [id, record] of all) {
       this.cache.set(id, record);
       yield [id, record];
@@ -229,6 +246,7 @@ export class DiskStore {
     await cleanupOldParquetFiles(this.backend, file.path);
 
     this.cache.clear();
+    this._parquetBuffer = null; // invalidate cached buffer — new Parquet file
     this._dirty = false;
   }
 
