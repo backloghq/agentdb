@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Parquet is now a column index** — `_data` column removed from Parquet. Full records live in JSONL only. Parquet stores `_id` + extracted columns for count/column-scan. Reduces storage duplication.
 - **find() short-circuit at limit** — disk mode fetches candidates in batches of 2x limit, stops when enough found. `find({ status: "open" }, limit: 10)` with 30K candidates now fetches ~20 records instead of 30K.
 - **Sorted JSONL reads** — byte-range reads sorted by offset for sequential I/O locality. Small batches parallel, larger batches sequential.
+- **Lazy index loading** — B-tree/array/text indexes discovered on open but deserialized on first query. Cold open loads only offset index + metadata, skipping heavy JSON parsing.
 - **opslog v0.8.0** — `readBlobRange(path, offset, length)` for byte-range reads on StorageBackend.
 
 ### Performance
