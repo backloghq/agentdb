@@ -37,11 +37,11 @@ describe("Disk-backed mode", () => {
       const id2 = await col.insert({ title: "Second task" });
 
       // Read via disk store (cache hit since just written)
-      expect(col.findOne(id1)?.title).toBe("First task");
-      expect(col.findOne(id2)?.status).toBe("open");
+      expect((await col.findOne(id1))?.title).toBe("First task");
+      expect((await col.findOne(id2))?.status).toBe("open");
 
       // Find works
-      const all = col.find();
+      const all = await col.find();
       expect(all.records.length).toBeGreaterThanOrEqual(2);
     });
 
@@ -68,7 +68,7 @@ describe("Disk-backed mode", () => {
         storageMode: "disk",
       }));
 
-      const all = col2.find();
+      const all = await col2.find();
       expect(all.records.some((r) => r.title === "Persisted record")).toBe(true);
     });
   });
@@ -80,7 +80,7 @@ describe("Disk-backed mode", () => {
 
       const col = await db.collection("global-disk");
       await col.insert({ _id: "t1", title: "Test" });
-      expect(col.findOne("t1")?.title).toBe("Test");
+      expect((await col.findOne("t1"))?.title).toBe("Test");
 
       // DiskStore should be set
       expect(col.getDiskStore()).not.toBeNull();
@@ -94,7 +94,7 @@ describe("Disk-backed mode", () => {
 
       const col = await db.collection("memory-default");
       await col.insert({ _id: "m1", title: "Memory record" });
-      expect(col.findOne("m1")?.title).toBe("Memory record");
+      expect((await col.findOne("m1"))?.title).toBe("Memory record");
       expect(col.getDiskStore()).toBeNull();
     });
   });
@@ -120,12 +120,12 @@ describe("Disk-backed mode", () => {
       await col.insert({ title: "Feature", status: "closed", tags: ["feature"] });
 
       // Indexed query
-      const openTasks = col.find({ filter: { status: "open" } });
+      const openTasks = await col.find({ filter: { status: "open" } });
       expect(openTasks.records).toHaveLength(1);
       expect(openTasks.records[0].title).toBe("Bug fix");
 
       // Array index query
-      const bugs = col.find({ filter: { tags: { $contains: "bug" } } });
+      const bugs = await col.find({ filter: { tags: { $contains: "bug" } } });
       expect(bugs.records).toHaveLength(1);
     });
   });

@@ -79,9 +79,9 @@ describe("Tool Error Branches", () => {
       expect(parsed.operations).toBe(2);
 
       // Verify updates were applied
-      const r1 = col.findOne("r1");
+      const r1 = await col.findOne("r1");
       expect(r1?.score).toBe(99);
-      const r2 = col.findOne("r2");
+      const r2 = await col.findOne("r2");
       expect(r2?.score).toBe(25);
     });
 
@@ -104,7 +104,7 @@ describe("Tool Error Branches", () => {
       expect(parsed.operations).toBe(3);
 
       const col = await db.collection("batch-mix");
-      const r = col.findOne("m1");
+      const r = await col.findOne("m1");
       expect(r?.val).toBe(100);
     });
   });

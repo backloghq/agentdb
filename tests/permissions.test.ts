@@ -95,6 +95,6 @@ describe("AgentDB with permissions", () => {
     await col.insert({ name: "Alice" }, { agent: "reader" });
     // This succeeds because Collection doesn't enforce permissions
     // (enforcement happens in the tool layer)
-    expect(col.count()).toBe(1);
+    expect(await col.count()).toBe(1);
   });
 });

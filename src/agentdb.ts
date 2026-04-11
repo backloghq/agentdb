@@ -242,7 +242,7 @@ export class AgentDB {
       // Initialize auto-increment counters from existing records (sorted desc, limit 1)
       if (schema.autoIncrementFields.length > 0) {
         for (const field of schema.autoIncrementFields) {
-          const top = col.find({ sort: `-${field}`, limit: 1 });
+          const top = await col.find({ sort: `-${field}`, limit: 1 });
           if (top.records.length > 0) {
             const val = top.records[0][field];
             if (typeof val === "number") schema.counters.set(field, val);
@@ -276,7 +276,7 @@ export class AgentDB {
         const ids = await originalInsertMany(processed, opts);
         if (schema.hooks.afterInsert) {
           for (let i = 0; i < ids.length; i++) {
-            const record = col.findOne(ids[i]);
+            const record = await col.findOne(ids[i]);
             if (record) schema.hooks.afterInsert(ids[i], record, ctx);
           }
         }
@@ -297,7 +297,7 @@ export class AgentDB {
         if (schema.hooks.afterInsert) {
           for (const r of results) {
             if (r.action === "inserted") {
-              const record = col.findOne(r.id);
+              const record = await col.findOne(r.id);
               if (record) schema.hooks.afterInsert(r.id, record, ctx);
             }
           }
@@ -395,7 +395,7 @@ export class AgentDB {
     const infos: CollectionInfo[] = [];
     for (const name of this.meta.collections) {
       const col = await this.collection(name);
-      infos.push({ name, recordCount: col.count() });
+      infos.push({ name, recordCount: await col.count() });
     }
     return infos;
   }
@@ -412,7 +412,7 @@ export class AgentDB {
     let totalRecords = 0;
     for (const name of this.meta.collections) {
       const col = await this.collection(name);
-      totalRecords += col.count();
+      totalRecords += await col.count();
     }
     return { collections: this.meta.collections.length, totalRecords };
   }
@@ -430,7 +430,7 @@ export class AgentDB {
     };
     for (const name of names) {
       const col = await this.collection(name);
-      data.collections[name] = { records: col.findAll() };
+      data.collections[name] = { records: await col.findAll() };
     }
     return data;
   }
@@ -449,7 +449,7 @@ export class AgentDB {
         if (opts?.overwrite) {
           await col.upsert(id, record);
         } else {
-          if (!col.findOne(id)) {
+          if (!(await col.findOne(id))) {
             await col.insert(record);
           }
         }
@@ -467,7 +467,7 @@ export class AgentDB {
       // Disk mode: compact to Parquet + save indexes before closing
       const ds = col.getDiskStore();
       if (ds) {
-        await ds.compact(col.find({ limit: 100_000 }).records.map((r) => [r._id as string, r]));
+        await ds.compact((await col.find({ limit: 100_000 })).records.map((r) => [r._id as string, r]));
         await ds.saveIndexes(col.getIndexManager(), col.getTextIndex());
       }
       await col.close();

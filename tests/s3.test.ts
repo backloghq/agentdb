@@ -105,7 +105,7 @@ describe.skipIf(!runS3)("S3 backend benchmarks", () => {
     }, N);
 
     console.log(`  ${result.name}: ${result.totalMs}ms (${result.opsPerSec} ops/sec, ${result.avgMs}ms/op)`);
-    expect(col.count()).toBe(N);
+    expect(await col.count()).toBe(N);
     await col.close();
   }, 120000);
 
@@ -122,7 +122,7 @@ describe.skipIf(!runS3)("S3 backend benchmarks", () => {
     }, N);
 
     console.log(`  ${result.name}: ${result.totalMs}ms (${result.opsPerSec} ops/sec)`);
-    expect(col.count()).toBe(N);
+    expect(await col.count()).toBe(N);
     await col.close();
   }, 60000);
 
@@ -137,7 +137,7 @@ describe.skipIf(!runS3)("S3 backend benchmarks", () => {
     const QUERIES = 100;
     const start = performance.now();
     for (let i = 0; i < QUERIES; i++) {
-      col.find({ filter: { role: "admin", active: true } });
+      await col.find({ filter: { role: "admin", active: true } });
     }
     const elapsed = performance.now() - start;
 
@@ -161,7 +161,7 @@ describe.skipIf(!runS3)("S3 backend benchmarks", () => {
       const store2 = new Store<Record<string, unknown>>();
       const col2 = new Collection("bench", store2);
       await col2.open("s3", { checkpointThreshold: 5000, backend: backend2 });
-      expect(col2.count()).toBe(100);
+      expect(await col2.count()).toBe(100);
       await col2.close();
     });
 
@@ -186,7 +186,7 @@ describe.skipIf(!runS3)("S3 backend benchmarks", () => {
     }, N);
 
     console.log(`  ${result.name}: ${result.avgMs}ms/undo (${result.opsPerSec} ops/sec)`);
-    expect(col.count()).toBe(0);
+    expect(await col.count()).toBe(0);
     await col.close();
   }, 60000);
 

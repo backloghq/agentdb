@@ -183,7 +183,7 @@ export function getTools(db: AgentDB): AgentTool[] {
       annotations: READ,
       execute: safe("db_find", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
-        return col.find({
+        return await col.find({
           filter: args.filter as Record<string, unknown> | undefined,
           limit: args.limit as number,
           offset: args.offset as number,
@@ -206,7 +206,7 @@ export function getTools(db: AgentDB): AgentTool[] {
       annotations: READ,
       execute: safe("db_find_one", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
-        const record = col.findOne(args.id as string);
+        const record = await col.findOne(args.id as string);
         if (!record) return { record: null, message: "Record not found" };
         return { record };
       }),
@@ -348,7 +348,7 @@ export function getTools(db: AgentDB): AgentTool[] {
       annotations: READ,
       execute: safe("db_count", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
-        return { count: col.count(args.filter as Record<string, unknown> | undefined) };
+        return { count: await col.count(args.filter as Record<string, unknown> | undefined) };
       }),
     },
 

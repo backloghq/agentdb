@@ -57,8 +57,8 @@ describe("AgentDB", () => {
       await users.insert({ name: "Alice" });
       await tasks.insert({ title: "Task 1" });
 
-      expect(users.count()).toBe(1);
-      expect(tasks.count()).toBe(1);
+      expect(await users.count()).toBe(1);
+      expect(await tasks.count()).toBe(1);
 
       const list = await db.listCollections();
       expect(list).toHaveLength(2);
@@ -72,7 +72,7 @@ describe("AgentDB", () => {
       const db2 = new AgentDB(tmpDir);
       await db2.init();
       const users2 = await db2.collection("users");
-      expect(users2.findOne("a")?.name).toBe("Alice");
+      expect((await users2.findOne("a"))?.name).toBe("Alice");
       await db2.close();
     });
 
@@ -108,7 +108,7 @@ describe("AgentDB", () => {
 
       // col1 was evicted but data persists — reopen it
       const col1Again = await dbLru.collection("col1");
-      expect(col1Again.findOne("a")?.name).toBe("A");
+      expect((await col1Again.findOne("a"))?.name).toBe("A");
 
       await dbLru.close();
       await rm(lruDir, { recursive: true, force: true });
@@ -220,8 +220,8 @@ describe("AgentDB", () => {
       expect(result.records).toBe(2);
 
       const users2 = await db2.collection("users");
-      expect(users2.findOne("a")?.name).toBe("Alice");
-      expect(users2.findOne("b")?.name).toBe("Bob");
+      expect((await users2.findOne("a"))?.name).toBe("Alice");
+      expect((await users2.findOne("b"))?.name).toBe("Bob");
       await db2.close();
       await rm(freshDir, { recursive: true, force: true });
     });
@@ -236,7 +236,7 @@ describe("AgentDB", () => {
         collections: { users: { records: [{ _id: "a", name: "Imported" }] } },
       };
       await db.import(data);
-      expect(users.findOne("a")?.name).toBe("Original"); // not overwritten
+      expect((await users.findOne("a"))?.name).toBe("Original"); // not overwritten
     });
 
     it("import with overwrite replaces existing records", async () => {
@@ -249,7 +249,7 @@ describe("AgentDB", () => {
         collections: { users: { records: [{ _id: "a", name: "Imported" }] } },
       };
       await db.import(data, { overwrite: true });
-      expect(users.findOne("a")?.name).toBe("Imported");
+      expect((await users.findOne("a"))?.name).toBe("Imported");
     });
   });
 
@@ -261,7 +261,7 @@ describe("AgentDB", () => {
 
       const col = await agentDb.collection("test");
       await col.insert({ _id: "a", name: "Alice" });
-      expect(col.findOne("a")?.name).toBe("Alice");
+      expect((await col.findOne("a"))?.name).toBe("Alice");
 
       await agentDb.close();
       await rm(agentDir, { recursive: true, force: true });
@@ -307,8 +307,8 @@ describe("AgentDB", () => {
       await reader.init();
 
       const items = await reader.collection("items");
-      expect(items.count()).toBe(2);
-      expect(items.findOne("a")?.name).toBe("Alice");
+      expect(await items.count()).toBe(2);
+      expect((await items.findOne("a"))?.name).toBe("Alice");
 
       await reader.close();
 
@@ -343,15 +343,15 @@ describe("AgentDB", () => {
       const reader = new AgentDB(tmpDir, { readOnly: true });
       await reader.init();
       const readerCol = await reader.collection("items");
-      expect(readerCol.count()).toBe(1);
+      expect(await readerCol.count()).toBe(1);
 
       // Writer adds more
       await col.insert({ _id: "b", name: "Bob" });
 
       // Reader tails
       await readerCol.tail();
-      expect(readerCol.count()).toBe(2);
-      expect(readerCol.findOne("b")?.name).toBe("Bob");
+      expect(await readerCol.count()).toBe(2);
+      expect((await readerCol.findOne("b"))?.name).toBe("Bob");
 
       await reader.close();
     });

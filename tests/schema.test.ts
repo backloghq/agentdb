@@ -123,7 +123,7 @@ describe("defineSchema", () => {
       }));
 
       const id = await col.insert({ title: "Hello" }); // priority is undefined, that's ok
-      expect(col.findOne(id)?.title).toBe("Hello");
+      expect((await col.findOne(id))?.title).toBe("Hello");
     });
   });
 
@@ -138,7 +138,7 @@ describe("defineSchema", () => {
       }));
 
       const id = await col.insert({ title: "Fix bug" });
-      expect(col.findOne(id)?.status).toBe("pending");
+      expect((await col.findOne(id))?.status).toBe("pending");
     });
 
     it("applies function defaults on insert", async () => {
@@ -150,7 +150,7 @@ describe("defineSchema", () => {
       }));
 
       const id = await col.insert({ name: "test" });
-      expect(col.findOne(id)?.createdAt).toBeTruthy();
+      expect((await col.findOne(id))?.createdAt).toBeTruthy();
     });
 
     it("does not overwrite provided values", async () => {
@@ -162,7 +162,7 @@ describe("defineSchema", () => {
       }));
 
       const id = await col.insert({ status: "done" });
-      expect(col.findOne(id)?.status).toBe("done");
+      expect((await col.findOne(id))?.status).toBe("done");
     });
   });
 
@@ -206,7 +206,7 @@ describe("defineSchema", () => {
       }));
 
       const id = await col.insert({ title: "Fix the login bug" });
-      expect(col.findOne(id)?.wordCount).toBe(4);
+      expect((await col.findOne(id))?.wordCount).toBe(4);
     });
   });
 
@@ -226,7 +226,7 @@ describe("defineSchema", () => {
       await col.insert({ title: "A", done: true });
       await col.insert({ title: "B", done: false });
 
-      const pending = col.find({ filter: { "+PENDING": true } });
+      const pending = await col.find({ filter: { "+PENDING": true } });
       expect(pending.records).toHaveLength(1);
       expect(pending.records[0].title).toBe("B");
     });
@@ -243,7 +243,7 @@ describe("defineSchema", () => {
       }));
 
       const id = await col.insert({ title: "hello" });
-      expect(col.findOne(id)?.title).toBe("HELLO");
+      expect((await col.findOne(id))?.title).toBe("HELLO");
     });
 
     it("afterInsert fires with id and record", async () => {
@@ -311,7 +311,7 @@ describe("defineSchema", () => {
       await col.insert({ title: "Update docs", score: 30 });
 
       // Defaults applied
-      const all = col.find();
+      const all = await col.find();
       expect(all.records.every((r) => r.status === "pending")).toBe(true);
       expect(all.records[1].priority).toBe("M");
 
@@ -320,14 +320,14 @@ describe("defineSchema", () => {
       expect(all.records[1].isHighPriority).toBe(false);
 
       // Virtual filter
-      const high = col.find({ filter: { "+HIGH": true } });
+      const high = await col.find({ filter: { "+HIGH": true } });
       expect(high.records).toHaveLength(1);
 
       // Index used
       expect(col.listIndexes()).toContain("status");
 
       // Text search
-      const results = col.search("critical");
+      const results = await col.search("critical");
       expect(results.records).toHaveLength(1);
     });
   });
@@ -352,13 +352,13 @@ describe("defineSchema", () => {
       ]);
 
       // Defaults applied
-      expect(col.findOne(ids[0])?.status).toBe("open");
-      expect(col.findOne(ids[1])?.status).toBe("open");
+      expect((await col.findOne(ids[0]))?.status).toBe("open");
+      expect((await col.findOne(ids[1]))?.status).toBe("open");
 
       // Auto-increment applied
-      expect(col.findOne(ids[0])?.id).toBe(1);
-      expect(col.findOne(ids[1])?.id).toBe(2);
-      expect(col.findOne(ids[2])?.id).toBe(3);
+      expect((await col.findOne(ids[0]))?.id).toBe(1);
+      expect((await col.findOne(ids[1]))?.id).toBe(2);
+      expect((await col.findOne(ids[2]))?.id).toBe(3);
 
       // Hooks fired
       expect(afterFn).toHaveBeenCalledTimes(3);
@@ -394,8 +394,8 @@ describe("defineSchema", () => {
       ]);
 
       // Defaults applied
-      expect(col.findOne("u1")?.status).toBe("open");
-      expect(col.findOne("u2")?.status).toBe("open");
+      expect((await col.findOne("u1"))?.status).toBe("open");
+      expect((await col.findOne("u2"))?.status).toBe("open");
 
       // Hooks fired
       expect(afterFn).toHaveBeenCalledTimes(2);
@@ -428,9 +428,9 @@ describe("defineSchema", () => {
       const id2 = await col.insert({ title: "Second" });
       const id3 = await col.insert({ title: "Third" });
 
-      expect(col.findOne(id1)?.id).toBe(1);
-      expect(col.findOne(id2)?.id).toBe(2);
-      expect(col.findOne(id3)?.id).toBe(3);
+      expect((await col.findOne(id1))?.id).toBe(1);
+      expect((await col.findOne(id2))?.id).toBe(2);
+      expect((await col.findOne(id3))?.id).toBe(3);
     });
 
     it("continues from max on reopen", async () => {
@@ -449,7 +449,7 @@ describe("defineSchema", () => {
         fields: { id: { type: "autoIncrement" }, title: { type: "string" } },
       }));
       const id3 = await col2.insert({ title: "Third" });
-      expect(col2.findOne(id3)?.id).toBe(3);
+      expect((await col2.findOne(id3))?.id).toBe(3);
       await db2.close();
 
       // Reopen for afterEach cleanup
@@ -492,7 +492,7 @@ describe("defineSchema", () => {
       }));
 
       const id = await col.insert({ due: "tomorrow" });
-      const record = col.findOne(id);
+      const record = await col.findOne(id);
       // Should be an ISO date string, not "tomorrow"
       expect(record?.due).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       expect(record?.due).not.toBe("tomorrow");
@@ -513,7 +513,7 @@ describe("defineSchema", () => {
 
       // String "42" gets resolved to number 42 before validation
       const id = await col.insert({ score: "42" });
-      expect(col.findOne(id)?.score).toBe(42);
+      expect((await col.findOne(id))?.score).toBe(42);
     });
 
     it("resolve does not run on undefined/null values", async () => {
@@ -546,7 +546,7 @@ describe("defineSchema", () => {
 
       // The tagField is on the schema — verify it's set
       // (compact filter uses it when parsing +tag syntax)
-      const all = col.find({ filter: { labels: { $contains: "bug" } } });
+      const all = await col.find({ filter: { labels: { $contains: "bug" } } });
       expect(all.records).toHaveLength(1);
       expect(all.records[0].title).toBe("Bug");
     });
@@ -565,12 +565,12 @@ describe("defineSchema", () => {
       await col.insert({ title: "Feature", labels: ["feature"] });
 
       // +bug compact string filter should query "labels" field, not "tags"
-      const results = col.find({ filter: "+bug" });
+      const results = await col.find({ filter: "+bug" });
       expect(results.records).toHaveLength(1);
       expect(results.records[0].title).toBe("Bug");
 
       // -bug should exclude
-      const excluded = col.find({ filter: "-bug" });
+      const excluded = await col.find({ filter: "-bug" });
       expect(excluded.records).toHaveLength(1);
       expect(excluded.records[0].title).toBe("Feature");
     });
@@ -591,7 +591,7 @@ describe("defineSchema", () => {
       await col.insert({ title: "Feature req", tags: ["feature"] });
       await col.insert({ title: "Bug fix", tags: ["bug", "fixed"] });
 
-      const results = col.find({ filter: { tags: { $contains: "bug" } } });
+      const results = await col.find({ filter: { tags: { $contains: "bug" } } });
       expect(results.records).toHaveLength(2);
       expect(results.records.map((r) => r.title).sort()).toEqual(["Bug fix", "Bug report"]);
 
@@ -610,16 +610,16 @@ describe("defineSchema", () => {
       }));
 
       const id = await col.insert({ title: "Test", tags: ["alpha"] });
-      expect(col.find({ filter: { tags: { $contains: "alpha" } } }).records).toHaveLength(1);
+      expect((await col.find({ filter: { tags: { $contains: "alpha" } } })).records).toHaveLength(1);
 
       // Update tags
       await col.update({ _id: id }, { $set: { tags: ["beta"] } });
-      expect(col.find({ filter: { tags: { $contains: "alpha" } } }).records).toHaveLength(0);
-      expect(col.find({ filter: { tags: { $contains: "beta" } } }).records).toHaveLength(1);
+      expect((await col.find({ filter: { tags: { $contains: "alpha" } } })).records).toHaveLength(0);
+      expect((await col.find({ filter: { tags: { $contains: "beta" } } })).records).toHaveLength(1);
 
       // Delete
       await col.remove({ _id: id });
-      expect(col.find({ filter: { tags: { $contains: "beta" } } }).records).toHaveLength(0);
+      expect((await col.find({ filter: { tags: { $contains: "beta" } } })).records).toHaveLength(0);
     });
   });
 });

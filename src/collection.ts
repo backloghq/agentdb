@@ -370,8 +370,15 @@ export class Collection {
    * Find a single record by ID.
    * Returns the record or undefined.
    */
-  findOne(id: string): Record<string, unknown> | undefined {
-    const record = this.store.get(id);
+  async findOne(id: string): Promise<Record<string, unknown> | undefined> {
+    let record: StoredRecord | undefined;
+    if (this._diskStore) {
+      record = await this._diskStore.get(id) as StoredRecord | undefined;
+    }
+    // Fall back to in-memory Map (covers both memory mode and disk mode write-through)
+    if (!record) {
+      record = this.store.get(id);
+    }
     if (!record || isExpired(record)) return undefined;
     const clean = stripMeta(record);
     return this.opts.computed ? this.applyComputed(clean, this.allCleanRecords()) : clean;
@@ -381,7 +388,14 @@ export class Collection {
    * Find records matching a filter with pagination and summary mode.
    */
   /** Return all non-expired records (no limit, no pagination). For internal use (export, etc). */
-  findAll(): Record<string, unknown>[] {
+  async findAll(): Promise<Record<string, unknown>[]> {
+    if (this._diskStore) {
+      const result: Record<string, unknown>[] = [];
+      for await (const [, record] of this._diskStore.entries()) {
+        if (!isExpired(record as StoredRecord)) result.push(stripMeta(record as StoredRecord));
+      }
+      return result;
+    }
     const result: Record<string, unknown>[] = [];
     for (const [, record] of this.store.entries()) {
       if (!isExpired(record)) result.push(stripMeta(record));
@@ -389,7 +403,7 @@ export class Collection {
     return result;
   }
 
-  find(opts?: FindOpts): FindResult {
+  async find(opts?: FindOpts): Promise<FindResult> {
     const MAX_LIMIT = 10000;
     const limit = Math.min(opts?.limit ?? 50, MAX_LIMIT);
     const offset = opts?.offset ?? 0;
@@ -420,8 +434,11 @@ export class Collection {
 
     const candidateIds = this.indexedCandidates(attrFilter);
     let records: StoredRecord[];
+
+    // Read from in-memory Map (both memory and disk mode — disk mode uses Map during session,
+    // DiskStore is for persistence on close. True skipLoad reads from DiskStore will be added when
+    // the full async read path is wired with skipLoad.)
     if (textMatchIds) {
-      // Text search narrows candidates, then attribute filter applied
       records = [];
       for (const id of textMatchIds) {
         const value = this.store.get(id);
@@ -510,13 +527,19 @@ export class Collection {
   /**
    * Count records matching a filter.
    */
-  count(filter?: Filter): number {
+  async count(filter?: Filter): Promise<number> {
     const candidateIds = this.indexedCandidates(filter);
 
     // Fast path: if index covers the entire filter and no TTL records exist,
     // the index size IS the count — no record fetches needed.
     if (candidateIds && !this._hasTTL && this.isFullyCoveredByIndex(filter)) {
       return candidateIds.size;
+    }
+
+    if (this._diskStore) {
+      if (!filter) return this._diskStore.recordCount;
+      const result = await this.find({ filter, limit: 100_000 });
+      return result.total;
     }
 
     const predicate = this.resolve(filter);
@@ -909,7 +932,7 @@ export class Collection {
    * Requires textSearch: true in collection options.
    * Returns records matching ALL query terms (AND semantics).
    */
-  search(query: string, opts?: { limit?: number; offset?: number; summary?: boolean }): FindResult {
+  async search(query: string, opts?: { limit?: number; offset?: number; summary?: boolean }): Promise<FindResult> {
     if (!this.textIdx) {
       throw new Error("Full-text search not enabled. Set textSearch: true in collection options.");
     }
@@ -923,7 +946,12 @@ export class Collection {
     let skipped = 0;
     let total = 0;
     for (const id of matchIds) {
-      const record = this.store.get(id);
+      let record: StoredRecord | undefined;
+      if (this._diskStore) {
+        record = await this._diskStore.get(id) as StoredRecord | undefined;
+      } else {
+        record = this.store.get(id);
+      }
       if (record && !isExpired(record)) {
         total++;
         if (skipped < offset) { skipped++; continue; }
@@ -960,7 +988,7 @@ export class Collection {
   }
 
   /** Execute a named view. Returns cached results if available. */
-  queryView(name: string, overrides?: Omit<FindOpts, "filter">): FindResult {
+  async queryView(name: string, overrides?: Omit<FindOpts, "filter">): Promise<FindResult> {
     const def = this.views.get(name);
     if (!def) throw new Error(`View '${name}' not found`);
 
@@ -969,7 +997,7 @@ export class Collection {
     if (cached && !overrides) return cached;
 
     // Execute query
-    const result = this.find({ filter: def.filter, ...def.opts, ...overrides });
+    const result = await this.find({ filter: def.filter, ...def.opts, ...overrides });
     if (!overrides) this.views.setCache(name, result);
     return result;
   }
