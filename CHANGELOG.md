@@ -50,7 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Batched-parallel JSONL reads** — byte-range reads in groups of 20, sorted by offset for disk locality.
 - **Incremental compaction** — close writes only new records to new JSONL + Parquet files instead of rewriting everything. Auto-merges at 10 files. Multi-session growth is O(K) per close instead of O(N).
 - **Hydrate-from-disk** — `update()`, `remove()`, `upsert()` load records from DiskStore into the Map before mutating. Batch hydration via `getMany` for filter-based updates.
-- **Opslog checkpoints disabled in disk mode** — prevents quadratic snapshot growth (~29GB WAL debris at 1M records). Persistence is via JSONL + Parquet compaction on close.
+- **Opslog checkpoints disabled in disk mode** — prevents quadratic snapshot growth (~29GB WAL debris at 1M records). Persistence is via JSONL + Parquet compaction on close. WAL ops file cleaned up after close.
 - **opslog v0.8.0** — `readBlobRange(path, offset, length)` for byte-range reads on StorageBackend.
 
 ### Performance

@@ -266,10 +266,11 @@ const db = new AgentDB("./data", {
 });
 ```
 
-On close, compaction writes:
+On close, incremental compaction writes only new records:
 - `records.jsonl` — full records, one per line. Point lookups via byte-range seek.
 - `data.parquet` — `_id` + extracted columns. For count/column-scan.
 - Persisted B-tree/array/text indexes. Lazy-loaded on first query.
+- WAL ops file cleaned up after compaction. No snapshot accumulation.
 
 Works on both filesystem and S3.
 

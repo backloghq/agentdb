@@ -672,9 +672,14 @@ describe("Disk-backed mode", () => {
       // Check that no checkpoint snapshots were written (only the initial empty one)
       const backend = col.getBackend();
       const snaps = await backend.listBlobs("snapshots");
-      expect(snaps.length).toBeLessThanOrEqual(1); // at most the initial empty snapshot
+      expect(snaps.length).toBeLessThanOrEqual(1);
 
       await db.close();
+
+      // WAL ops file should be cleaned up after close
+      let opsAfterClose: string[] = [];
+      try { opsAfterClose = await backend.listBlobs("ops"); } catch { /* empty */ }
+      expect(opsAfterClose.length).toBe(0);
 
       // Verify data survived via JSONL compaction
       db = new AgentDB(tmpDir, { storageMode: "disk" });
