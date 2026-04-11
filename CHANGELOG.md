@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.2.0] - 2026-04-11
+
+### Added
+- **`RecordCache`** — LRU cache with Map insertion-order eviction, configurable max size, hit/miss/eviction stats. For disk-backed collections.
+- **`ArrayIndex`** — inverted element index for O(1) `$contains` lookups on array fields. `createArrayIndex("tags")` makes `+tag`/`-tag` and `{ tags: { $contains: "bug" } }` queries use O(1) Set lookup instead of O(n) full scan.
+- **`defineSchema({ arrayIndexes })` option** — auto-create array indexes on collection open.
+- **Persistent B-tree serialization** — `BTreeIndex.toJSON()`/`fromJSON()` for disk persistence. Load indexes on open without full record scan.
+- **Persistent text index serialization** — `TextIndex.toJSON()`/`fromJSON()` for disk persistence.
+- **Persistent array index serialization** — `ArrayIndex.toJSON()`/`fromJSON()` for disk persistence.
+- **`hyparquet` + `hyparquet-writer`** — pure JS Parquet read/write for disk-backed storage.
+- **opslog v0.7.0** — `skipLoad`, `streamSnapshot()`, `getWalOps()`, `getManifest()`, JSONL snapshots.
+
 ## [1.1.1] - 2026-04-11
 
 ### Fixed

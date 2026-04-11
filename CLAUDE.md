@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** All phases complete. 674 tests, 32 tools (30 core + db_subscribe/db_unsubscribe on HTTP). 5 runnable demos. Auth + security hardened. Group commit ~12x faster writes. Sorted-array indexed queries with range support ($gt/$lt/$gte/$lte). Count-from-index fast path. Predicate cache. HNSW MaxHeap optimized. Incremental index rebuild on tail/watch/undo. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints. Blob storage via StorageBackend (filesystem + S3). Declarative schemas with defineSchema().
+**Status:** v1.2 in progress. 698 tests, 32 tools (30 core + db_subscribe/db_unsubscribe on HTTP). 5 runnable demos. Auth + security hardened. Group commit ~12x faster writes. Sorted-array indexed queries with range support ($gt/$lt/$gte/$lte). Count-from-index fast path. Predicate cache. HNSW MaxHeap optimized. Incremental index rebuild on tail/watch/undo. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints. Blob storage via StorageBackend (filesystem + S3). Declarative schemas with defineSchema(). RecordCache LRU, ArrayIndex for O(1) $contains, persistent index serialization. Disk-backed storage via hyparquet (Parquet).
 
 ## Commands
 
@@ -44,7 +44,9 @@ src/
   agentdb.ts            # AgentDB class: collection manager, lazy loading, LRU, memory monitor
   collection.ts         # Collection: CRUD, middleware, search, views, TTL, tailing (~1130 lines)
   collection-helpers.ts # Pure utilities: stripMeta, isExpired, applyUpdate, compositeKey, filter cache
-  collection-indexes.ts # IndexManager: B-tree, composite, bloom filter indexes + query planning
+  collection-indexes.ts # IndexManager: B-tree, composite, array, bloom filter indexes + query planning
+  record-cache.ts       # LRU cache for disk-backed mode (Map insertion-order eviction)
+  array-index.ts        # Inverted element index for O(1) $contains on arrays
   filter.ts             # JSON filter compiler (14 operators, dot-notation)
   compact-filter.ts     # Compact string parser (role:admin age.gt:18)
   hnsw.ts               # HNSW index for approximate nearest neighbor search

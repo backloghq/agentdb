@@ -62,6 +62,7 @@ const tasks = await db.collection(defineSchema({
     tags: { type: "string[]" },
   },
   indexes: ["status", "priority"],
+  arrayIndexes: ["tags"],           // O(1) $contains lookups
   computed: {
     isUrgent: (r) => r.priority === "H" && r.status === "pending",
   },
