@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Index file size validation** — index files capped at 256MB to prevent DoS via crafted JSON.
 - **Parquet path traversal** — `readCompactionMeta()` rejects `..` and absolute paths in `parquetFile` field.
 - **Full scan warning** — `console.warn` emitted when disk-mode find() does unindexed scan on >10K records.
+- **DiskStore dirty tracking** — mutations (insert/update/delete) now mark DiskStore dirty via `emitChange()`, ensuring `close()` compacts to Parquet. Previously records were lost after close/reopen in disk mode.
+- **Programmatic index cardinality** — `saveIndexes()` computes cardinality from B-tree data for all indexed fields (not just schema `extractColumns`). Fixes cardinality being empty for programmatic indexes on reopen.
 
 ### Performance
 - **Column-only Parquet scan** — `count()` with a simple equality filter on an extracted column reads only that column from Parquet, skipping `_data` deserialization entirely. ~1MB vs ~50MB at 100K records.
