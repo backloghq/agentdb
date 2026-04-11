@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`storageMode: "auto"`** — auto-detect disk mode when collection exceeds `diskThreshold` records (default: 10K).
 - **`cacheSize` / `rowGroupSize` options** — configurable LRU cache size and Parquet row group size.
 
+### Changed (BREAKING)
+- **Async Collection read methods** — `findOne`, `find`, `findAll`, `count`, `search`, `queryView` now return Promises. All callers must `await` them. Enables disk-backed reads without loading all records into memory. `searchByVector` stays synchronous.
+
 ## [1.1.1] - 2026-04-11
 
 ### Fixed

@@ -270,10 +270,10 @@ const col = await db.collection("tasks");
 const id = await col.insert(doc, opts?);
 const ids = await col.insertMany(docs, opts?);
 
-// Read
-const record = col.findOne(id);
-const result = col.find({ filter?, limit?, offset?, summary?, sort?, maxTokens? });
-const n = col.count(filter?);
+// Read (async)
+const record = await col.findOne(id);
+const result = await col.find({ filter?, limit?, offset?, summary?, sort?, maxTokens? });
+const n = await col.count(filter?);
 
 // Update
 const modified = await col.update(filter, { $set?, $unset?, $inc?, $push? }, opts?);
