@@ -17,7 +17,15 @@ import {
   writeCompactionMeta,
   readCompactionMeta,
   cleanupOldParquetFiles,
+  writeRecordStore,
+  readRecordByOffset,
+  readRecordsByOffsets,
+  readAllFromJsonl,
+  writeRecordOffsetIndex,
+  readRecordOffsetIndex,
+  cleanupOldJsonlFiles,
   type OffsetEntry,
+  type RecordOffsetEntry,
   type CompactionMeta,
   type CompactionOptions,
 } from "./parquet.js";
@@ -38,6 +46,7 @@ export class DiskStore {
   private backend: StorageBackend;
   private cache: RecordCache<Record<string, unknown>>;
   private offsetIndex: Map<string, OffsetEntry> = new Map();
+  private recordOffsetIndex: Map<string, RecordOffsetEntry> = new Map();
   private compactionMeta: CompactionMeta | null = null;
   private rowGroupSize: number;
   private extractColumns: string[];
@@ -53,11 +62,17 @@ export class DiskStore {
     this.extractColumns = options?.extractColumns ?? [];
   }
 
-  /** Load persisted state: offset index + compaction metadata. */
+  /** Load persisted state: offset index + compaction metadata + JSONL offsets. */
   async load(): Promise<void> {
     this.offsetIndex = await readOffsetIndex(this.backend);
+    this.recordOffsetIndex = await readRecordOffsetIndex(this.backend);
     this.compactionMeta = await readCompactionMeta(this.backend);
-    this._recordCount = this.offsetIndex.size;
+    this._recordCount = this.recordOffsetIndex.size || this.offsetIndex.size;
+  }
+
+  /** Whether a JSONL record store exists. */
+  get hasJsonlStore(): boolean {
+    return this.compactionMeta?.jsonlFile !== undefined;
   }
 
   /** Whether a Parquet file exists from a previous compaction. */
@@ -109,13 +124,23 @@ export class DiskStore {
 
   // --- Read operations ---
 
-  /** Get a record by ID. Checks cache first, then Parquet. */
+  /** Get a record by ID. Checks cache → JSONL (byte seek) → Parquet (row group parse). */
   async get(id: string): Promise<Record<string, unknown> | undefined> {
     const cached = this.cache.get(id);
     if (cached !== undefined) return cached;
 
-    if (!this.compactionMeta || !this.offsetIndex.has(id)) return undefined;
+    if (!this.compactionMeta) return undefined;
 
+    // JSONL path: O(1) byte-range read
+    const jsonlEntry = this.recordOffsetIndex.get(id);
+    if (jsonlEntry && this.compactionMeta.jsonlFile) {
+      const record = await readRecordByOffset(this.backend, this.compactionMeta.jsonlFile, jsonlEntry);
+      this.cache.set(id, record);
+      return record;
+    }
+
+    // Parquet fallback (for collections compacted before JSONL support)
+    if (!this.offsetIndex.has(id)) return undefined;
     const pqBuf = await this.getParquetBuffer();
     const results = await readByIds(
       this.backend, this.compactionMeta.parquetFile, [id], this.offsetIndex, this.rowGroupSize, pqBuf,
@@ -125,12 +150,12 @@ export class DiskStore {
     return record;
   }
 
-  /** Check if a record exists (by offset index, no Parquet read). */
+  /** Check if a record exists (by offset index, no I/O). */
   has(id: string): boolean {
-    return this.cache.has(id) || this.offsetIndex.has(id);
+    return this.cache.has(id) || this.recordOffsetIndex.has(id) || this.offsetIndex.has(id);
   }
 
-  /** Get multiple records by ID. Batched Parquet reads. */
+  /** Get multiple records by ID. Uses JSONL byte seeks (parallel), falls back to Parquet. */
   async getMany(ids: string[]): Promise<Map<string, Record<string, unknown>>> {
     const results = new Map<string, Record<string, unknown>>();
     const uncached: string[] = [];
@@ -139,19 +164,43 @@ export class DiskStore {
       const cached = this.cache.get(id);
       if (cached !== undefined) {
         results.set(id, cached);
-      } else if (this.offsetIndex.has(id)) {
+      } else if (this.recordOffsetIndex.has(id) || this.offsetIndex.has(id)) {
         uncached.push(id);
       }
     }
 
     if (uncached.length > 0 && this.compactionMeta) {
-      const pqBuf = await this.getParquetBuffer();
-      const fromParquet = await readByIds(
-        this.backend, this.compactionMeta.parquetFile, uncached, this.offsetIndex, this.rowGroupSize, pqBuf,
-      );
-      for (const [id, record] of fromParquet) {
-        this.cache.set(id, record);
-        results.set(id, record);
+      // JSONL path: parallel byte-range reads
+      if (this.compactionMeta.jsonlFile) {
+        const entries = uncached
+          .map((id) => ({ id, entry: this.recordOffsetIndex.get(id)! }))
+          .filter((e) => e.entry);
+        if (entries.length > 0) {
+          const fromJsonl = await readRecordsByOffsets(this.backend, this.compactionMeta.jsonlFile, entries);
+          for (const [id, record] of fromJsonl) {
+            this.cache.set(id, record);
+            results.set(id, record);
+          }
+          // Remove fetched IDs from uncached list
+          const fetchedIds = new Set(fromJsonl.keys());
+          const remaining = uncached.filter((id) => !fetchedIds.has(id));
+          if (remaining.length === 0) return results;
+          // Fall through to Parquet for any remaining
+          uncached.length = 0;
+          uncached.push(...remaining);
+        }
+      }
+
+      // Parquet fallback for remaining IDs
+      if (uncached.length > 0) {
+        const pqBuf = await this.getParquetBuffer();
+        const fromParquet = await readByIds(
+          this.backend, this.compactionMeta.parquetFile, uncached, this.offsetIndex, this.rowGroupSize, pqBuf,
+        );
+        for (const [id, record] of fromParquet) {
+          this.cache.set(id, record);
+          results.set(id, record);
+        }
       }
     }
 
@@ -179,11 +228,13 @@ export class DiskStore {
     return scanColumn(this.backend, this.compactionMeta.parquetFile, field, predicate, pqBuf);
   }
 
-  /** Iterate all records (reads from Parquet). */
+  /** Iterate all records (reads from JSONL if available, falls back to Parquet). */
   async *entries(): AsyncGenerator<[string, Record<string, unknown>]> {
     if (!this.compactionMeta) return;
-    const pqBuf = await this.getParquetBuffer();
-    const all = await readAllFromParquet(this.backend, this.compactionMeta.parquetFile, pqBuf);
+    // Prefer JSONL (lighter than Parquet for full reads)
+    const all = this.compactionMeta.jsonlFile
+      ? await readAllFromJsonl(this.backend, this.compactionMeta.jsonlFile)
+      : await readAllFromParquet(this.backend, this.compactionMeta.parquetFile, await this.getParquetBuffer());
     for (const [id, record] of all) {
       this.cache.set(id, record);
       yield [id, record];
@@ -204,14 +255,15 @@ export class DiskStore {
     this._dirty = true;
   }
 
-  /** Evict from cache and offset index after a delete. */
+  /** Evict from cache and offset indexes after a delete. */
   cacheDelete(id: string): void {
     this.cache.delete(id);
     this._dirty = true;
+    this.recordOffsetIndex.delete(id);
     if (this.offsetIndex.has(id)) {
       this.offsetIndex.delete(id);
-      this._recordCount--;
     }
+    this._recordCount = this.recordOffsetIndex.size || this.offsetIndex.size;
   }
 
   /** Clear cache (e.g., after compaction when offsets change). */
@@ -224,29 +276,40 @@ export class DiskStore {
   async compact(
     allRecords: AsyncIterable<[string, Record<string, unknown>]> | Iterable<[string, Record<string, unknown>]>,
   ): Promise<void> {
+    // Collect records (needed by both Parquet columnar writer and JSONL writer)
+    const collected: Array<[string, Record<string, unknown>]> = [];
+    for await (const entry of allRecords) collected.push(entry);
+
+    // Write Parquet (for column scans + count)
     const options: CompactionOptions = {
       rowGroupSize: this.rowGroupSize,
       extractColumns: this.extractColumns,
     };
+    const { file, offsetIndex, columnCardinality } = await compactToParquet(this.backend, collected, options);
 
-    const { file, offsetIndex, columnCardinality } = await compactToParquet(this.backend, allRecords, options);
+    // Write JSONL record store (for O(1) point lookups)
+    const { path: jsonlPath, offsetIndex: recordOffsets } = await writeRecordStore(this.backend, collected);
 
     this.offsetIndex = offsetIndex;
-    this._recordCount = offsetIndex.size;
+    this.recordOffsetIndex = recordOffsets;
+    this._recordCount = recordOffsets.size;
     this.compactionMeta = {
       lastTimestamp: new Date().toISOString(),
       parquetFile: file.path,
+      jsonlFile: jsonlPath,
       rowCount: file.rowCount,
       rowGroups: file.rowGroups,
       columnCardinality,
     };
 
     await writeOffsetIndex(this.backend, offsetIndex);
+    await writeRecordOffsetIndex(this.backend, recordOffsets);
     await writeCompactionMeta(this.backend, this.compactionMeta);
     await cleanupOldParquetFiles(this.backend, file.path);
+    await cleanupOldJsonlFiles(this.backend, jsonlPath);
 
     this.cache.clear();
-    this._parquetBuffer = null; // invalidate cached buffer — new Parquet file
+    this._parquetBuffer = null;
     this._dirty = false;
   }
 

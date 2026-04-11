@@ -247,4 +247,55 @@ describe("Parquet compaction and reader", () => {
       expect(result).toBeNull();
     });
   });
+
+  describe("JSONL record store", () => {
+    it("writes and reads records by byte offset", async () => {
+      const records: Array<[string, Record<string, unknown>]> = [
+        ["id-0", { _id: "id-0", title: "First", status: "open" }],
+        ["id-1", { _id: "id-1", title: "Second", status: "closed" }],
+        ["id-2", { _id: "id-2", title: "Third", status: "open" }],
+      ];
+
+      const { writeRecordStore, readRecordByOffset, readRecordsByOffsets, readAllFromJsonl } = await import("../src/parquet.js");
+
+      const { path, offsetIndex } = await writeRecordStore(backend, records);
+      expect(path).toMatch(/^data\/records-\d+\.jsonl$/);
+      expect(offsetIndex.size).toBe(3);
+
+      // Read single record by offset
+      const r1 = await readRecordByOffset(backend, path, offsetIndex.get("id-1")!);
+      expect(r1.title).toBe("Second");
+      expect(r1._id).toBe("id-1");
+
+      // Read multiple by offset (parallel)
+      const entries = [
+        { id: "id-0", entry: offsetIndex.get("id-0")! },
+        { id: "id-2", entry: offsetIndex.get("id-2")! },
+      ];
+      const multi = await readRecordsByOffsets(backend, path, entries);
+      expect(multi.size).toBe(2);
+      expect(multi.get("id-0")?.title).toBe("First");
+      expect(multi.get("id-2")?.title).toBe("Third");
+
+      // Read all from JSONL
+      const all = await readAllFromJsonl(backend, path);
+      expect(all.size).toBe(3);
+    });
+
+    it("offset index persistence round-trip", async () => {
+      const { writeRecordStore, writeRecordOffsetIndex, readRecordOffsetIndex } = await import("../src/parquet.js");
+
+      const records: Array<[string, Record<string, unknown>]> = [
+        ["a", { _id: "a", val: 1 }],
+        ["b", { _id: "b", val: 2 }],
+      ];
+      const { offsetIndex } = await writeRecordStore(backend, records);
+      await writeRecordOffsetIndex(backend, offsetIndex);
+
+      const loaded = await readRecordOffsetIndex(backend);
+      expect(loaded.size).toBe(2);
+      expect(loaded.get("a")).toEqual(offsetIndex.get("a"));
+      expect(loaded.get("b")).toEqual(offsetIndex.get("b"));
+    });
+  });
 });

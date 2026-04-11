@@ -151,6 +151,8 @@ export async function readOffsetIndex(backend: StorageBackend): Promise<Map<stri
 export interface CompactionMeta {
   lastTimestamp: string;
   parquetFile: string;
+  /** JSONL record store for point lookups. */
+  jsonlFile?: string;
   rowCount: number;
   rowGroups: number;
   /** Cardinality per extracted column. Used to decide in-memory vs Parquet-only index. */
@@ -329,6 +331,130 @@ export async function cleanupOldParquetFiles(backend: StorageBackend, keepFile: 
     const files = await backend.listBlobs("data");
     for (const f of files) {
       if (f.endsWith(".parquet") && `data/${f}` !== keepFile) {
+        await backend.deleteBlob(`data/${f}`);
+      }
+    }
+  } catch {
+    // data dir may not exist yet
+  }
+}
+
+// --- JSONL Record Store ---
+
+export interface RecordOffsetEntry {
+  offset: number;
+  length: number;
+}
+
+/**
+ * Write a JSONL record store alongside Parquet.
+ * One JSON object per line, newline-terminated. Returns byte-offset index.
+ */
+export async function writeRecordStore(
+  backend: StorageBackend,
+  records: Iterable<[string, Record<string, unknown>]> | AsyncIterable<[string, Record<string, unknown>]>,
+): Promise<{ path: string; offsetIndex: Map<string, RecordOffsetEntry> }> {
+  const filename = `records-${Date.now()}.jsonl`;
+  const relativePath = `data/${filename}`;
+
+  const offsetIndex = new Map<string, RecordOffsetEntry>();
+  const chunks: Buffer[] = [];
+  let offset = 0;
+
+  for await (const [id, record] of records) {
+    const line = JSON.stringify(record);
+    const lineBytes = Buffer.byteLength(line, "utf-8");
+    offsetIndex.set(id, { offset, length: lineBytes });
+    chunks.push(Buffer.from(line + "\n", "utf-8"));
+    offset += lineBytes + 1;
+  }
+
+  await backend.writeBlob(relativePath, Buffer.concat(chunks));
+  return { path: relativePath, offsetIndex };
+}
+
+/**
+ * Read a single record from JSONL by byte offset.
+ */
+export async function readRecordByOffset(
+  backend: StorageBackend,
+  jsonlPath: string,
+  entry: RecordOffsetEntry,
+): Promise<Record<string, unknown>> {
+  const buf = await backend.readBlobRange(jsonlPath, entry.offset, entry.length);
+  return JSON.parse(buf.toString("utf-8"));
+}
+
+/**
+ * Read multiple records from JSONL by byte offsets. Batched.
+ */
+export async function readRecordsByOffsets(
+  backend: StorageBackend,
+  jsonlPath: string,
+  entries: Array<{ id: string; entry: RecordOffsetEntry }>,
+): Promise<Map<string, Record<string, unknown>>> {
+  const results = new Map<string, Record<string, unknown>>();
+  // Parallel reads for better S3 latency (sequential for filesystem is fine too)
+  await Promise.all(entries.map(async ({ id, entry }) => {
+    const record = await readRecordByOffset(backend, jsonlPath, entry);
+    results.set(id, record);
+  }));
+  return results;
+}
+
+/**
+ * Read all records from JSONL file sequentially.
+ */
+export async function readAllFromJsonl(
+  backend: StorageBackend,
+  jsonlPath: string,
+): Promise<Map<string, Record<string, unknown>>> {
+  const buf = await backend.readBlob(jsonlPath);
+  const content = buf.toString("utf-8");
+  const records = new Map<string, Record<string, unknown>>();
+  for (const line of content.split("\n")) {
+    if (!line.trim()) continue;
+    const record = JSON.parse(line) as Record<string, unknown>;
+    records.set(record._id as string, record);
+  }
+  return records;
+}
+
+/**
+ * Write record offset index to storage.
+ */
+export async function writeRecordOffsetIndex(
+  backend: StorageBackend,
+  offsetIndex: Map<string, RecordOffsetEntry>,
+): Promise<void> {
+  const entries: Record<string, RecordOffsetEntry> = {};
+  for (const [id, entry] of offsetIndex) entries[id] = entry;
+  await backend.writeBlob("indexes/record-offsets.json", Buffer.from(JSON.stringify({ version: 2, entries })));
+}
+
+/**
+ * Read record offset index from storage.
+ */
+export async function readRecordOffsetIndex(
+  backend: StorageBackend,
+): Promise<Map<string, RecordOffsetEntry>> {
+  try {
+    const buf = await backend.readBlob("indexes/record-offsets.json");
+    const data = JSON.parse(buf.toString("utf-8")) as { entries: Record<string, RecordOffsetEntry> };
+    return new Map(Object.entries(data.entries));
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * Clean up old JSONL record store files (keeps only the specified file).
+ */
+export async function cleanupOldJsonlFiles(backend: StorageBackend, keepFile: string): Promise<void> {
+  try {
+    const files = await backend.listBlobs("data");
+    for (const f of files) {
+      if (f.endsWith(".jsonl") && `data/${f}` !== keepFile) {
         await backend.deleteBlob(`data/${f}`);
       }
     }

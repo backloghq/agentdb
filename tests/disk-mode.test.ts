@@ -448,4 +448,72 @@ describe("Disk-backed mode", () => {
       expect(await col2.count()).toBe(3);
     });
   });
+
+  describe("JSONL record store", () => {
+    it("findOne uses JSONL byte-range reads after reopen", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection("jsonl-test");
+      await col.insert({ _id: "j1", title: "JSONL record 1" });
+      await col.insert({ _id: "j2", title: "JSONL record 2" });
+      await col.insert({ _id: "j3", title: "JSONL record 3" });
+      await db.close();
+
+      // Reopen — JSONL record store should be available
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection("jsonl-test");
+
+      const ds = col2.getDiskStore()!;
+      expect(ds.hasJsonlStore).toBe(true);
+
+      // findOne reads from JSONL (byte seek, not Parquet row group)
+      const r1 = await col2.findOne("j1");
+      expect(r1?.title).toBe("JSONL record 1");
+
+      const r3 = await col2.findOne("j3");
+      expect(r3?.title).toBe("JSONL record 3");
+
+      // find returns all records
+      const all = await col2.find({ limit: 100 });
+      expect(all.total).toBe(3);
+    });
+
+    it("find with limit uses JSONL for record fetch", async () => {
+      db = new AgentDB(tmpDir);
+      await db.init();
+
+      const col = await db.collection(defineSchema({
+        name: "jsonl-find",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+        },
+        indexes: ["status"],
+        storageMode: "disk",
+      }));
+
+      for (let i = 0; i < 20; i++) {
+        await col.insert({ title: `Task ${i}`, status: i < 10 ? "open" : "closed" });
+      }
+      await db.close();
+
+      db = new AgentDB(tmpDir);
+      await db.init();
+      const col2 = await db.collection(defineSchema({
+        name: "jsonl-find",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+        },
+        indexes: ["status"],
+        storageMode: "disk",
+      }));
+
+      // find with index — candidates from B-tree, records from JSONL
+      const open = await col2.find({ filter: { status: "open" }, limit: 5 });
+      expect(open.records).toHaveLength(5);
+      expect(open.total).toBe(10);
+    });
+  });
 });
