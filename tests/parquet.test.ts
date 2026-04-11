@@ -159,8 +159,9 @@ describe("Parquet compaction and reader", () => {
 
   describe("cleanup", () => {
     it("removes old Parquet files but keeps the specified one", async () => {
-      // Create two Parquet files
+      // Create two Parquet files (delay to ensure different timestamps)
       const { file: file1 } = await compactToParquet(tmpDir, generateRecords(10));
+      await new Promise((r) => setTimeout(r, 10));
       const { file: file2 } = await compactToParquet(tmpDir, generateRecords(20));
 
       await cleanupOldParquetFiles(tmpDir, file2.path);
