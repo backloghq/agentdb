@@ -554,5 +554,49 @@ describe("Disk-backed mode", () => {
       expect(open.records).toHaveLength(5);
       expect(open.total).toBe(10);
     });
+
+    it("find() short-circuits at limit without fetching all candidates", async () => {
+      db = new AgentDB(tmpDir);
+      await db.init();
+
+      const col = await db.collection(defineSchema({
+        name: "short-circuit",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+        },
+        indexes: ["status"],
+        storageMode: "disk",
+      }));
+
+      // Insert 100 records — 50 open, 50 closed
+      for (let i = 0; i < 100; i++) {
+        await col.insert({ title: `Task ${i}`, status: i < 50 ? "open" : "closed" });
+      }
+      await db.close();
+
+      db = new AgentDB(tmpDir);
+      await db.init();
+      const col2 = await db.collection(defineSchema({
+        name: "short-circuit",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+        },
+        indexes: ["status"],
+        storageMode: "disk",
+      }));
+
+      // limit:5 on 50 candidates — should return 5 records, total=50
+      const result = await col2.find({ filter: { status: "open" }, limit: 5 });
+      expect(result.records).toHaveLength(5);
+      expect(result.total).toBe(50);
+      expect(result.truncated).toBe(true);
+
+      // limit:50 should return all open records
+      const all = await col2.find({ filter: { status: "open" }, limit: 50 });
+      expect(all.records).toHaveLength(50);
+      expect(all.total).toBe(50);
+    });
   });
 });
