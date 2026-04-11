@@ -62,6 +62,7 @@ const tasks = await db.collection(defineSchema({
     tags: { type: "string[]" },
   },
   indexes: ["status", "priority"],
+  arrayIndexes: ["tags"],           // O(1) $contains lookups
   computed: {
     isUrgent: (r) => r.priority === "H" && r.status === "pending",
   },
@@ -141,6 +142,45 @@ All 30 tools exposed as MCP tools (32 on HTTP with db_subscribe/db_unsubscribe).
   }
 }
 ```
+
+## Disk-Backed Storage
+
+For large collections that exceed available RAM, enable disk-backed mode. Collections are compacted to Parquet files with persistent indexes.
+
+```typescript
+// Global: all collections use disk mode
+const db = new AgentDB("./data", {
+  storageMode: "disk",   // "memory" (default) | "disk" | "auto"
+  cacheSize: 10_000,     // LRU cache size (records)
+  rowGroupSize: 5000,    // Parquet row group size
+});
+
+// Per-collection via schema
+const events = await db.collection(defineSchema({
+  name: "events",
+  storageMode: "disk",
+  fields: { ... },
+  indexes: ["type", "timestamp"],
+  arrayIndexes: ["tags"],
+}));
+
+// Auto mode: switches to disk when collection exceeds threshold
+const db = new AgentDB("./data", {
+  storageMode: "auto",
+  diskThreshold: 10_000,  // default
+});
+```
+
+Disk mode opens with `skipLoad` — records are NOT loaded into memory. On close, compaction writes two artifacts:
+
+- **Parquet** — `_id` + extracted columns only. For `count()`, column scans, and skip-scanning. No full records stored.
+- **JSONL record store** — full records, one per line. For `findOne()` and `find(limit:N)` via byte-range seeks.
+
+Point lookups use `readBlobRange` to seek directly to a record's byte offset in the JSONL file — O(1) per record on filesystem, single HTTP Range request on S3. No row group parsing, no full-file reads.
+
+Compaction is incremental — close writes only new records, not the full dataset. Auto-merges after 10 incremental files. Indexes are lazy-loaded on first query.
+
+All disk I/O goes through `StorageBackend` — works identically on filesystem and S3. Zero native dependencies.
 
 ## S3 Backend
 
@@ -232,6 +272,8 @@ Modifier aliases: `gt`, `gte`, `lt`, `lte`, `ne`, `contains`, `has`, `startsWith
 
 ## Collection API
 
+> **v1.2 breaking change:** `findOne`, `find`, `findAll`, `count`, `search`, `queryView` are now async and return Promises.
+
 ```typescript
 const col = await db.collection("tasks");
 
@@ -239,10 +281,10 @@ const col = await db.collection("tasks");
 const id = await col.insert(doc, opts?);
 const ids = await col.insertMany(docs, opts?);
 
-// Read
-const record = col.findOne(id);
-const result = col.find({ filter?, limit?, offset?, summary?, sort?, maxTokens? });
-const n = col.count(filter?);
+// Read (async)
+const record = await col.findOne(id);
+const result = await col.find({ filter?, limit?, offset?, summary?, sort?, maxTokens? });
+const n = await col.count(filter?);
 
 // Update
 const modified = await col.update(filter, { $set?, $unset?, $inc?, $push? }, opts?);
@@ -495,17 +537,21 @@ col.find({ filter: { status: "active" }, summary: true });
 
 ## Deployment Patterns
 
-See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed deployment guidance:
+| Scenario | Pattern | Storage Mode | Latency |
+|----------|---------|-------------|---------|
+| Small datasets (<10K records) | Direct import / stdio MCP | memory (default) | <1ms |
+| Large datasets (10K-1M+) | Direct import / HTTP MCP | disk | <1ms findOne, ~10ms find |
+| Auto-scaling | Any | auto (switches at threshold) | varies |
+| Multiple agents, same machine | HTTP MCP server | memory or disk | ~1-5ms |
+| Multiple agents, distributed | HTTP MCP + S3 backend | disk | ~50ms |
+| Decentralized, no server | Multi-writer S3 | memory | ~50ms |
 
-| Scenario | Pattern | Latency |
-|----------|---------|---------|
-| Single agent, local | Direct import / stdio MCP | <1ms |
-| Multiple agents, same machine | HTTP MCP server | ~1-5ms |
-| Multiple agents, distributed | HTTP MCP + S3 backend | ~50ms |
-| Decentralized, no server | Multi-writer S3 | ~50ms (eventual consistency) |
-| Serverless (Lambda) | S3 per invocation | ~50ms |
+**Storage mode guide:**
+- `memory` — all records in RAM. Fastest queries. Use for <10K records.
+- `disk` — records in JSONL + Parquet on disk/S3. Handles 1M+ records. Lazy index loading for fast cold open.
+- `auto` — starts in memory, switches to disk when collection exceeds `diskThreshold`.
 
-**Default recommendation: HTTP server.** Use the library directly for maximum performance, stdio MCP for single-agent, HTTP MCP for multi-agent.
+**Default recommendation:** Use `memory` for small datasets, `disk` or `auto` for anything that might grow.
 
 ## Examples
 

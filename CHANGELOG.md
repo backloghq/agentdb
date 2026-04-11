@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.2.0] - 2026-04-11
+
+### Added
+- **`RecordCache`** — LRU cache with Map insertion-order eviction, configurable max size, hit/miss/eviction stats. For disk-backed collections.
+- **`ArrayIndex`** — inverted element index for O(1) `$contains` lookups on array fields. `createArrayIndex("tags")` makes `+tag`/`-tag` and `{ tags: { $contains: "bug" } }` queries use O(1) Set lookup instead of O(n) full scan.
+- **`defineSchema({ arrayIndexes })` option** — auto-create array indexes on collection open.
+- **Persistent B-tree serialization** — `BTreeIndex.toJSON()`/`fromJSON()` for disk persistence. Load indexes on open without full record scan.
+- **Persistent text index serialization** — `TextIndex.toJSON()`/`fromJSON()` for disk persistence.
+- **Persistent array index serialization** — `ArrayIndex.toJSON()`/`fromJSON()` for disk persistence.
+- **`hyparquet` + `hyparquet-writer`** — pure JS Parquet read/write for disk-backed storage.
+- **opslog v0.7.1** — `skipLoad`, `streamSnapshot()`, `getWalOps()`, `getManifest()`, JSONL snapshots, streaming snapshot write (fixes V8 string limit at 1M+ records).
+- **Disk-backed storage mode** — `storageMode: "disk"` compacts collections to Parquet on close, persists indexes to disk, loads both on next open. Configurable globally or per-collection via `defineSchema({ storageMode })`.
+- **`DiskStore`** — disk-backed record storage with LRU cache, offset index, Parquet compaction lifecycle, persistent index save/load.
+- **Parquet compaction** — `compactToParquet()` writes records as Parquet files via hyparquet-writer with configurable row groups and extracted columns for skip-scanning.
+- **Parquet reader** — `readByIds()` for point lookups batched by row group, `readAllFromParquet()` for full reads, `getParquetMetadata()` for row group stats.
+- **`storageMode: "auto"`** — auto-detect disk mode when collection exceeds `diskThreshold` records (default: 10K).
+- **`cacheSize` / `rowGroupSize` options** — configurable LRU cache size and Parquet row group size.
+
+### Changed (BREAKING)
+- **Async Collection read methods** — `findOne`, `find`, `findAll`, `count`, `search`, `queryView` now return Promises. All callers must `await` them. Enables disk-backed reads without loading all records into memory. `searchByVector` stays synchronous.
+- **Disk mode uses `skipLoad`** — records NOT loaded into memory on open. Reads merge DiskStore (Parquet) with Map (session writes). Initial open compacts snapshot to Parquet. Subsequent opens load offset index only.
+- **`storageMode: "auto"`** — evaluates record count on open against `diskThreshold` (default 10K). Switches to disk mode when collection exceeds threshold. Per-collection schema `storageMode` overrides global setting.
+
+### Fixed
+- **Prototype pollution** — replaced `Object.assign(textIndex, restored)` with `TextIndex.loadFromJSON()` instance method. Prevents crafted index files from polluting prototypes.
+- **WAL replay O(n²)** — initial compaction used `findIndex()` per WAL op. Now uses Map for O(1) lookups.
+- **Close compacts unconditionally** — `DiskStore.isDirty` flag prevents unnecessary Parquet rewrites on read-only sessions.
+- **Stale deleted records** — `cacheDelete()` now removes from offset index, preventing deleted records from resurfacing via Parquet reads.
+- **Index file size validation** — index files capped at 256MB to prevent DoS via crafted JSON.
+- **Parquet path traversal** — `readCompactionMeta()` rejects `..` and absolute paths in `parquetFile` field.
+- **Full scan warning** — `console.warn` emitted when disk-mode find() does unindexed scan on >10K records.
+- **DiskStore dirty tracking** — mutations (insert/update/delete) now mark DiskStore dirty via `emitChange()`, ensuring `close()` compacts to Parquet. Previously records were lost after close/reopen in disk mode.
+- **Programmatic index cardinality** — `saveIndexes()` computes cardinality from B-tree data for all indexed fields (not just schema `extractColumns`). Fixes cardinality being empty for programmatic indexes on reopen.
+- **Bulk mutation regression** — `emitChange()` no longer calls `cacheWrite()` per mutation ID. Uses `markDirty()` once instead. Records are in the opslog Map during the session — cache is only for Parquet reads on reopen. Restores bulk insert throughput.
+- **S3 support for disk mode** — all Parquet and DiskStore I/O routed through `StorageBackend` (writeBlob/readBlob/listBlobs/deleteBlob). Disk mode works on both filesystem (FsBackend) and S3 (S3Backend) transparently. Verified with real S3 integration test.
+- **Parquet buffer caching** — Parquet file read once on first query, cached as ArrayBuffer for all subsequent reads. Eliminates per-query file I/O. Cleared on compaction.
+- **JSONL record store** — compaction writes `records.jsonl` alongside Parquet. Point lookups (`findOne`, `find(limit:N)`) use byte-range reads via `readBlobRange` instead of Parquet row group parsing. O(1) per record on filesystem, single HTTP Range request on S3.
+- **Parquet is now a column index** — `_data` column removed from Parquet. Full records live in JSONL only. Parquet stores `_id` + extracted columns for count/column-scan. Reduces storage duplication.
+- **find() short-circuit at limit** — disk mode fetches candidates in batches of 2x limit, stops when enough found. `find({ status: "open" }, limit: 10)` with 30K candidates now fetches ~20 records instead of 30K.
+- **Sorted JSONL reads** — byte-range reads sorted by offset for sequential I/O locality. Small batches parallel, larger batches sequential.
+- **Binary offset index** — record offset index stored as compact binary (48 bytes/entry) instead of JSON (~80 bytes/entry). 3.6x faster load at 1M records (~300ms vs ~1000ms). Supports variable-length IDs and offsets up to 256TB (uint48).
+- **Lazy index loading** — B-tree/array/text indexes discovered on open but deserialized on first query. Cold open loads only offset index + metadata, skipping heavy JSON parsing. Concurrent callers serialized via promise lock.
+- **Batched-parallel JSONL reads** — byte-range reads in groups of 20, sorted by offset for disk locality.
+- **Incremental compaction** — close writes only new records to new JSONL + Parquet files instead of rewriting everything. Auto-merges at 10 files. Multi-session growth is O(K) per close instead of O(N).
+- **Hydrate-from-disk** — `update()`, `remove()`, `upsert()` load records from DiskStore into the Map before mutating. Batch hydration via `getMany` for filter-based updates.
+- **Opslog checkpoints disabled in disk mode** — prevents quadratic snapshot growth (~29GB WAL debris at 1M records). Persistence is via JSONL + Parquet compaction on close. WAL ops file cleaned up after close.
+- **opslog v0.8.0** — `readBlobRange(path, offset, length)` for byte-range reads on StorageBackend.
+
+### Performance
+- **Column-only Parquet scan** — `count()` with a simple equality filter on an extracted column reads only that column from Parquet, skipping `_data` deserialization entirely. ~1MB vs ~50MB at 100K records.
+- **Skip WAL replay on fresh Parquet** — disk mode open skips WAL replay when no ops exist since last compaction.
+- **LRU cache default reduced** — 1K records (from 10K) to enforce tighter memory budgets in disk mode.
+- **Compound filter index intersection** — multi-field filters like `{ status: "open", priority: "H" }` now intersect candidate sets from all matching single-field indexes (smallest-first). Previously only used the first matching index.
+- **Multi-field `isFullyCoveredByIndex`** — `count()` fast path now works for compound filters when all fields have indexes.
+- **Hybrid cardinality-based indexing** — during Parquet compaction, cardinality per extracted column is computed and stored. On reopen, high-cardinality fields (>1000 unique values) skip in-memory B-tree — use column-only Parquet scans instead. Low-cardinality fields (enums, status) keep full in-memory indexes. First session creates all indexes (no cardinality data yet); subsequent sessions use the computed cardinality.
+
 ## [1.1.1] - 2026-04-11
 
 ### Fixed

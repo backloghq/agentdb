@@ -19,6 +19,9 @@ export type {
   FieldInfo,
 } from "./collection.js";
 
+export { RecordCache } from "./record-cache.js";
+export type { CacheStats } from "./record-cache.js";
+export { ArrayIndex } from "./array-index.js";
 export { TextIndex } from "./text-index.js";
 export type { ViewDefinition } from "./view.js";
 export { PermissionManager } from "./permissions.js";

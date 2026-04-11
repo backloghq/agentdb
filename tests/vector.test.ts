@@ -28,7 +28,7 @@ describe("Explicit Vector API", () => {
       await col.insertVector("b", [0, 1, 0], { label: "y-axis" });
       await col.insertVector("c", [0, 0, 1], { label: "z-axis" });
 
-      const result = col.searchByVector([1, 0, 0], { limit: 3 });
+      const result = await col.searchByVector([1, 0, 0], { limit: 3 });
       expect(result.records.length).toBe(3);
       expect(result.records[0].label).toBe("x-axis");
       expect(result.scores[0]).toBeGreaterThan(result.scores[1]);
@@ -47,10 +47,10 @@ describe("Explicit Vector API", () => {
       await col.insertVector("a", [1, 0, 0], { v: 1 });
       await col.insertVector("a", [0, 1, 0], { v: 2 });
 
-      const record = col.findOne("a");
+      const record = await col.findOne("a");
       expect(record?.v).toBe(2);
 
-      const result = col.searchByVector([0, 1, 0], { limit: 1 });
+      const result = await col.searchByVector([0, 1, 0], { limit: 1 });
       expect(result.records[0]._id).toBe("a");
     });
 
@@ -62,14 +62,14 @@ describe("Explicit Vector API", () => {
       col = new Collection("test", store);
       await col.open(tmpDir, { checkpointThreshold: 1000 });
 
-      const result = col.searchByVector([1, 0, 0], { limit: 1 });
+      const result = await col.searchByVector([1, 0, 0], { limit: 1 });
       expect(result.records.length).toBe(1);
       expect(result.records[0].label).toBe("test");
     });
 
     it("metadata fields visible on read but vector bytes hidden", async () => {
       await col.insertVector("a", [1, 0, 0], { label: "test", score: 42 });
-      const record = col.findOne("a");
+      const record = await col.findOne("a");
       expect(record?.label).toBe("test");
       expect(record?.score).toBe(42);
       expect(record?._embedding).toBeUndefined();
@@ -99,19 +99,19 @@ describe("Explicit Vector API", () => {
       expect(() => col.searchByVector([1, 0])).toThrow("dimension mismatch");
     });
 
-    it("respects limit", () => {
-      const result = col.searchByVector([1, 0, 0], { limit: 2 });
+    it("respects limit", async () => {
+      const result = await col.searchByVector([1, 0, 0], { limit: 2 });
       expect(result.records.length).toBe(2);
     });
 
-    it("applies attribute filter", () => {
-      const result = col.searchByVector([1, 0, 0], { filter: { role: "admin" }, limit: 10 });
+    it("applies attribute filter", async () => {
+      const result = await col.searchByVector([1, 0, 0], { filter: { role: "admin" }, limit: 10 });
       expect(result.records.length).toBe(2);
       expect(result.records.every((r) => r.role === "admin")).toBe(true);
     });
 
-    it("returns scores in descending order", () => {
-      const result = col.searchByVector([1, 0, 0], { limit: 3 });
+    it("returns scores in descending order", async () => {
+      const result = await col.searchByVector([1, 0, 0], { limit: 3 });
       for (let i = 1; i < result.scores.length; i++) {
         expect(result.scores[i - 1]).toBeGreaterThanOrEqual(result.scores[i]);
       }

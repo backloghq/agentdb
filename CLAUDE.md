@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** All phases complete. 674 tests, 32 tools (30 core + db_subscribe/db_unsubscribe on HTTP). 5 runnable demos. Auth + security hardened. Group commit ~12x faster writes. Sorted-array indexed queries with range support ($gt/$lt/$gte/$lte). Count-from-index fast path. Predicate cache. HNSW MaxHeap optimized. Incremental index rebuild on tail/watch/undo. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints. Blob storage via StorageBackend (filesystem + S3). Declarative schemas with defineSchema().
+**Status:** v1.2 ready. 756 tests. Disk mode: JSONL for point lookups, Parquet for column scans, short-circuit at limit, sorted reads, lazy index loading Disk mode works on filesystem + S3. Benchmarked at 1M records: 30ms cold open, 1M ops/s findOne cache hit, 187MB heap, hybrid cardinality indexing BREAKING: Collection read methods (findOne, find, findAll, count, search) are now async. Disk mode uses skipLoad — records served from Parquet with LRU cache, not loaded into memory. Review-hardened: prototype pollution fixed, WAL replay O(1), dirty compaction, stale delete prevention, index size validation, path traversal sanitization, 32 tools (30 core + db_subscribe/db_unsubscribe on HTTP). 5 runnable demos. Auth + security hardened. Group commit ~12x faster writes. Sorted-array indexed queries with range support ($gt/$lt/$gte/$lte). Count-from-index fast path. Predicate cache. HNSW MaxHeap optimized. Incremental index rebuild on tail/watch/undo. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints. Blob storage via StorageBackend (filesystem + S3). Declarative schemas with defineSchema(). RecordCache LRU, ArrayIndex for O(1) $contains, persistent index serialization. Disk-backed storage via hyparquet (Parquet).
 
 ## Commands
 
@@ -15,7 +15,7 @@ npm run test:coverage  # vitest coverage
 
 ## Coding Conventions
 
-- Zero native dependencies — pure TypeScript/JS. Core uses opslog only; tools add zod; MCP adds express, jose, @modelcontextprotocol/sdk
+- Zero native dependencies — pure TypeScript/JS. Core uses opslog + hyparquet; tools add zod; MCP adds express, jose, @modelcontextprotocol/sdk
 - Always use conventional commits: `type(scope): description`
 - Always look up library/framework docs via Context7 before using APIs
 - Lint before committing — all code must pass eslint
@@ -44,7 +44,11 @@ src/
   agentdb.ts            # AgentDB class: collection manager, lazy loading, LRU, memory monitor
   collection.ts         # Collection: CRUD, middleware, search, views, TTL, tailing (~1130 lines)
   collection-helpers.ts # Pure utilities: stripMeta, isExpired, applyUpdate, compositeKey, filter cache
-  collection-indexes.ts # IndexManager: B-tree, composite, bloom filter indexes + query planning
+  collection-indexes.ts # IndexManager: B-tree, composite, array, bloom filter indexes + query planning
+  record-cache.ts       # LRU cache for disk-backed mode (Map insertion-order eviction)
+  array-index.ts        # Inverted element index for O(1) $contains on arrays
+  disk-store.ts         # Disk-backed storage: Parquet + LRU cache + persistent indexes
+  disk-io.ts            # Parquet compaction + JSONL record store + readers via hyparquet
   filter.ts             # JSON filter compiler (14 operators, dot-notation)
   compact-filter.ts     # Compact string parser (role:admin age.gt:18)
   hnsw.ts               # HNSW index for approximate nearest neighbor search

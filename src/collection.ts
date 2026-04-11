@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Store, FsBackend } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
+import type { DiskStore } from "./disk-store.js";
 import { getNestedValue } from "./filter.js";
 // parseCompactFilter used by IndexManager (imported there directly)
 import { TextIndex } from "./text-index.js";
@@ -74,6 +75,8 @@ export interface CollectionOptions {
   textSearch?: boolean;
   /** Array field name for +tag/-tag compact filter syntax. Default: "tags". */
   tagField?: string;
+  /** Storage mode override for this collection. */
+  storageMode?: "memory" | "disk" | "auto";
 }
 
 /** Change event emitted after mutations. */
@@ -103,6 +106,25 @@ export class Collection {
   private emitter = new EventEmitter();
   private indexes = new IndexManager();
   private _hasTTL = false; // Tracks if any record has been inserted with TTL
+  private _diskStore: DiskStore | null = null;
+
+  /** Set disk store for disk-backed mode. Called by AgentDB during open. */
+  setDiskStore(ds: DiskStore): void { this._diskStore = ds; }
+
+  /** Get disk store (if in disk mode). */
+  getDiskStore(): DiskStore | null { return this._diskStore; }
+
+  /** Get the index manager (for persistence). */
+  getIndexManager(): IndexManager { return this.indexes; }
+
+  /** Get the text index (for persistence). */
+  getTextIndex(): TextIndex | null { return this.textIdx; }
+
+  /** Get the storage backend (for DiskStore I/O). */
+  getBackend(): import("@backloghq/opslog").StorageBackend { return this.backend; }
+
+  /** Get the opslog store (for accessing session writes in disk mode). */
+  getStore(): Store<StoredRecord> { return this.store; }
 
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
@@ -144,6 +166,14 @@ export class Collection {
   /** Emit a change event and invalidate caches. */
   private emitChange(type: ChangeEvent["type"], ids: string[], agent?: string): void {
     this.views.invalidate();
+    // Mark DiskStore dirty so close() knows to compact. Don't populate cache —
+    // records are in the Map during the session. Cache is for Parquet reads on reopen.
+    if (this._diskStore) {
+      this._diskStore.markDirty();
+      if (type === "delete") {
+        for (const id of ids) this._diskStore.cacheDelete(id);
+      }
+    }
     this.emitter.emit("change", { type, collection: this.name, ids, agent } satisfies ChangeEvent);
   }
 
@@ -258,7 +288,7 @@ export class Collection {
   }
 
   /** Open the underlying opslog store at the given directory. */
-  async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean }): Promise<void> {
+  async open(dir: string, options?: { checkpointThreshold?: number; checkpointOnClose?: boolean; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean; skipLoad?: boolean }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
     if (options?.backend) {
@@ -354,8 +384,15 @@ export class Collection {
    * Find a single record by ID.
    * Returns the record or undefined.
    */
-  findOne(id: string): Record<string, unknown> | undefined {
-    const record = this.store.get(id);
+  async findOne(id: string): Promise<Record<string, unknown> | undefined> {
+    let record: StoredRecord | undefined;
+    if (this._diskStore) {
+      record = await this._diskStore.get(id) as StoredRecord | undefined;
+    }
+    // Fall back to in-memory Map (covers both memory mode and disk mode write-through)
+    if (!record) {
+      record = this.store.get(id);
+    }
     if (!record || isExpired(record)) return undefined;
     const clean = stripMeta(record);
     return this.opts.computed ? this.applyComputed(clean, this.allCleanRecords()) : clean;
@@ -365,7 +402,19 @@ export class Collection {
    * Find records matching a filter with pagination and summary mode.
    */
   /** Return all non-expired records (no limit, no pagination). For internal use (export, etc). */
-  findAll(): Record<string, unknown>[] {
+  async findAll(): Promise<Record<string, unknown>[]> {
+    if (this._diskStore?.hasParquetData) {
+      // Disk mode: merge Map (session writes) + Parquet
+      const seen = new Set<string>();
+      const result: Record<string, unknown>[] = [];
+      for (const [id, record] of this.store.entries()) {
+        if (!isExpired(record)) { result.push(stripMeta(record)); seen.add(id); }
+      }
+      for await (const [id, record] of this._diskStore.entries()) {
+        if (!seen.has(id) && !isExpired(record as StoredRecord)) result.push(stripMeta(record as StoredRecord));
+      }
+      return result;
+    }
     const result: Record<string, unknown>[] = [];
     for (const [, record] of this.store.entries()) {
       if (!isExpired(record)) result.push(stripMeta(record));
@@ -373,7 +422,7 @@ export class Collection {
     return result;
   }
 
-  find(opts?: FindOpts): FindResult {
+  async find(opts?: FindOpts): Promise<FindResult> {
     const MAX_LIMIT = 10000;
     const limit = Math.min(opts?.limit ?? 50, MAX_LIMIT);
     const offset = opts?.offset ?? 0;
@@ -402,25 +451,83 @@ export class Collection {
       textMatchIds = new Set(this.textIdx.search(textQuery));
     }
 
+    // Lazy-load persisted indexes on first query (deferred from open for fast cold start)
+    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
+
     const candidateIds = this.indexedCandidates(attrFilter);
     let records: StoredRecord[];
-    if (textMatchIds) {
-      // Text search narrows candidates, then attribute filter applied
+
+    if (this._diskStore?.hasParquetData) {
+      // Disk mode with Parquet: merge DiskStore (Parquet) + Map (session writes)
+      const seen = new Set<string>();
       records = [];
-      for (const id of textMatchIds) {
-        const value = this.store.get(id);
-        if (value && !isExpired(value) && predicate(value)) records.push(value);
+
+      // First: records from in-memory Map (session writes, most recent)
+      for (const [id, value] of this.store.entries()) {
+        if (!isExpired(value) && predicate(value)) {
+          if (!textMatchIds || textMatchIds.has(id)) {
+            if (!candidateIds || candidateIds.has(id)) {
+              records.push(value);
+            }
+          }
+        }
+        seen.add(id);
       }
-    } else if (candidateIds) {
-      records = [];
-      for (const id of candidateIds) {
-        const value = this.store.get(id);
-        if (value && !isExpired(value) && predicate(value)) {
-          records.push(value);
+
+      // Second: records from JSONL/Parquet (not already in Map)
+      // Fetch in batches to short-circuit at limit (avoid fetching 30K records when limit=10)
+      const needed = offset + limit;
+      const candidateSource = textMatchIds
+        ? [...textMatchIds].filter((id) => !seen.has(id))
+        : candidateIds
+          ? [...candidateIds].filter((id) => !seen.has(id))
+          : null;
+
+      if (candidateSource) {
+        const BATCH = Math.max(needed * 2, 50); // fetch 2x needed or at least 50
+        for (let i = 0; i < candidateSource.length && records.length < needed; i += BATCH) {
+          const batch = candidateSource.slice(i, i + BATCH);
+          const fetched = await this._diskStore.getMany(batch);
+          for (const [, r] of fetched) {
+            if (!isExpired(r as StoredRecord) && predicate(r as StoredRecord)) {
+              records.push(r as StoredRecord);
+              if (records.length >= needed) break;
+            }
+          }
+        }
+      } else {
+        // Full scan from Parquet — loads all records. Consider creating an index for large collections.
+        if (this._diskStore.recordCount > 10_000) {
+          console.warn(`agentdb: full scan on disk-backed collection '${this.name}' (${this._diskStore.recordCount} records). Consider creating an index.`);
+        }
+        for await (const [id, record] of this._diskStore.entries()) {
+          if (seen.has(id)) continue;
+          const r = record as StoredRecord;
+          if (!isExpired(r) && predicate(r)) {
+            records.push(r);
+            if (records.length >= needed) break;
+          }
         }
       }
     } else {
-      records = this.store.filter((value) => !isExpired(value) && predicate(value));
+      // Memory mode: read from Map
+      if (textMatchIds) {
+        records = [];
+        for (const id of textMatchIds) {
+          const value = this.store.get(id);
+          if (value && !isExpired(value) && predicate(value)) records.push(value);
+        }
+      } else if (candidateIds) {
+        records = [];
+        for (const id of candidateIds) {
+          const value = this.store.get(id);
+          if (value && !isExpired(value) && predicate(value)) {
+            records.push(value);
+          }
+        }
+      } else {
+        records = this.store.filter((value) => !isExpired(value) && predicate(value));
+      }
     }
 
     // Sort if requested
@@ -458,7 +565,10 @@ export class Collection {
       }
     }
 
-    const total = records.length;
+    // In disk mode with short-circuit, records may be capped. Use index size as total when available.
+    const total = (this._diskStore?.hasParquetData && candidateIds)
+      ? candidateIds.size + this.store.count()
+      : records.length;
     const sliced = records.slice(offset, offset + limit);
     // Only materialize allCleanRecords if computed fields exist (avoids O(n) allocation)
     const allAccessor = this.opts.computed ? this.allCleanRecords() : () => [];
@@ -494,13 +604,42 @@ export class Collection {
   /**
    * Count records matching a filter.
    */
-  count(filter?: Filter): number {
+  async count(filter?: Filter): Promise<number> {
+    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
     const candidateIds = this.indexedCandidates(filter);
 
     // Fast path: if index covers the entire filter and no TTL records exist,
     // the index size IS the count — no record fetches needed.
     if (candidateIds && !this._hasTTL && this.isFullyCoveredByIndex(filter)) {
       return candidateIds.size;
+    }
+
+    if (this._diskStore?.hasParquetData) {
+      // Disk mode fast path: no filter → offset index size + Map size (deduplicated)
+      if (!filter) {
+        return this._diskStore.recordCount + this.store.count();
+      }
+      // Column-only scan: simple equality on an extracted column
+      if (filter && typeof filter === "object" && !Array.isArray(filter)) {
+        const keys = Object.keys(filter).filter((k) => !k.startsWith("$") && !k.startsWith("+"));
+        if (keys.length === 1) {
+          const val = filter[keys[0]];
+          if (val !== null && val !== undefined && typeof val !== "object") {
+            const colCount = await this._diskStore.countByColumn(keys[0], val);
+            if (colCount !== null) {
+              // Also count matching records in Map (session writes not yet in Parquet)
+              let mapCount = 0;
+              for (const [, record] of this.store.entries()) {
+                if ((record as Record<string, unknown>)[keys[0]] === val) mapCount++;
+              }
+              return colCount + mapCount;
+            }
+          }
+        }
+      }
+      // Disk mode: unindexed falls through to find
+      const result = await this.find({ filter, limit: 100_000 });
+      return result.total;
     }
 
     const predicate = this.resolve(filter);
@@ -532,18 +671,49 @@ export class Collection {
   /**
    * Update records matching a filter. Returns number of modified records.
    */
+  /**
+   * Hydrate a record from DiskStore into the opslog Map (for mutations in skipLoad mode).
+   */
+  private async hydrateFromDisk(id: string): Promise<void> {
+    if (this.store.has(id) || !this._diskStore) return;
+    const record = await this._diskStore.get(id);
+    if (record) await this.store.set(id, record as StoredRecord);
+  }
+
+  /**
+   * Batch-hydrate multiple records from DiskStore into the Map.
+   * Filters to only IDs not already in Map, then does parallel JSONL reads.
+   */
+  private async hydrateManyFromDisk(ids: Iterable<string>): Promise<void> {
+    if (!this._diskStore) return;
+    const needed: string[] = [];
+    for (const id of ids) {
+      if (!this.store.has(id)) needed.push(id);
+    }
+    if (needed.length === 0) return;
+    const records = await this._diskStore.getMany(needed);
+    for (const [id, record] of records) {
+      await this.store.set(id, record as StoredRecord);
+    }
+  }
+
   async update(filter: Filter, update: UpdateOps, opts?: MutationOpts): Promise<number> {
     // Fast path: { _id: value } → direct lookup instead of linear scan
     const directId = this.extractDirectId(filter);
     const matches: [string, StoredRecord][] = [];
 
+    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
+
     if (directId) {
+      // Hydrate from DiskStore if not in Map (skipLoad mode)
+      await this.hydrateFromDisk(directId);
       const value = this.store.get(directId);
       if (value && !isExpired(value)) matches.push([directId, value]);
     } else {
       const candidateIds = this.indexedCandidates(filter);
       const predicate = this.resolve(filter);
       if (candidateIds) {
+        await this.hydrateManyFromDisk(candidateIds);
         for (const id of candidateIds) {
           const value = this.store.get(id);
           if (value && !isExpired(value) && predicate(value)) matches.push([id, value]);
@@ -617,6 +787,7 @@ export class Collection {
     doc: Record<string, unknown>,
     opts?: MutationOpts,
   ): Promise<{ id: string; action: "inserted" | "updated" }> {
+    await this.hydrateFromDisk(id);
     const oldRecord = this.store.get(id);
     const existing = oldRecord !== undefined;
     this.checkVersion(id, opts?.expectedVersion);
@@ -640,6 +811,9 @@ export class Collection {
   async upsertMany(docs: Array<Record<string, unknown>>, opts?: MutationOpts): Promise<Array<{ id: string; action: "inserted" | "updated" }>> {
     const results: Array<{ id: string; action: "inserted" | "updated" }> = [];
     const prepared: Array<{ id: string; stored: StoredRecord; oldRecord: StoredRecord | undefined; existing: boolean }> = [];
+
+    // Hydrate existing records from DiskStore for correct old/new deltas
+    await this.hydrateManyFromDisk(docs.map((d) => d._id as string).filter(Boolean));
 
     for (const doc of docs) {
       const id = doc._id as string;
@@ -679,13 +853,17 @@ export class Collection {
     const directId = this.extractDirectId(filter);
     const toDelete: string[] = [];
 
+    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
+
     if (directId) {
+      await this.hydrateFromDisk(directId);
       const value = this.store.get(directId);
       if (value && !isExpired(value)) toDelete.push(directId);
     } else {
       const candidateIds = this.indexedCandidates(filter);
       const predicate = this.resolve(filter);
       if (candidateIds) {
+        await this.hydrateManyFromDisk(candidateIds);
         for (const id of candidateIds) {
           const value = this.store.get(id);
           if (value && !isExpired(value) && predicate(value)) toDelete.push(id);
@@ -893,10 +1071,11 @@ export class Collection {
    * Requires textSearch: true in collection options.
    * Returns records matching ALL query terms (AND semantics).
    */
-  search(query: string, opts?: { limit?: number; offset?: number; summary?: boolean }): FindResult {
+  async search(query: string, opts?: { limit?: number; offset?: number; summary?: boolean }): Promise<FindResult> {
     if (!this.textIdx) {
       throw new Error("Full-text search not enabled. Set textSearch: true in collection options.");
     }
+    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
     const matchIds = this.textIdx.search(query);
     const allAccessor = this.allCleanRecords();
     const limit = opts?.limit ?? 50;
@@ -907,7 +1086,12 @@ export class Collection {
     let skipped = 0;
     let total = 0;
     for (const id of matchIds) {
-      const record = this.store.get(id);
+      let record: StoredRecord | undefined;
+      if (this._diskStore) {
+        record = await this._diskStore.get(id) as StoredRecord | undefined;
+      } else {
+        record = this.store.get(id);
+      }
       if (record && !isExpired(record)) {
         total++;
         if (skipped < offset) { skipped++; continue; }
@@ -944,7 +1128,7 @@ export class Collection {
   }
 
   /** Execute a named view. Returns cached results if available. */
-  queryView(name: string, overrides?: Omit<FindOpts, "filter">): FindResult {
+  async queryView(name: string, overrides?: Omit<FindOpts, "filter">): Promise<FindResult> {
     const def = this.views.get(name);
     if (!def) throw new Error(`View '${name}' not found`);
 
@@ -953,7 +1137,7 @@ export class Collection {
     if (cached && !overrides) return cached;
 
     // Execute query
-    const result = this.find({ filter: def.filter, ...def.opts, ...overrides });
+    const result = await this.find({ filter: def.filter, ...def.opts, ...overrides });
     if (!overrides) this.views.setCache(name, result);
     return result;
   }
@@ -970,6 +1154,9 @@ export class Collection {
   createCompositeIndex(fields: string[]): void { this.indexes.createCompositeIndex(fields, this.store.entries()); }
   dropCompositeIndex(fields: string[]): boolean { return this.indexes.dropCompositeIndex(fields); }
   listCompositeIndexes(): string[][] { return this.indexes.listCompositeIndexes(); }
+  createArrayIndex(field: string): void { this.indexes.createArrayIndex(field, this.store.entries()); }
+  dropArrayIndex(field: string): boolean { return this.indexes.dropArrayIndex(field); }
+  listArrayIndexes(): string[] { return this.indexes.listArrayIndexes(); }
   createBloomFilter(field: string, expectedItems = 10000): void { this.indexes.createBloomFilter(field, this.store.entries(), expectedItems); }
   mightHave(field: string, value: string): boolean { return this.indexes.mightHave(field, value); }
   suggestIndexes(threshold = 100): Array<{ field: string; count: number }> { return this.indexes.suggestIndexes(threshold); }

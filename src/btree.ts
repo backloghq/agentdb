@@ -148,6 +148,29 @@ export class BTreeIndex {
     this.idToKey.clear();
   }
 
+  /** Serialize to JSON for persistence. */
+  toJSON(): { version: number; field: string; entries: Array<{ key: unknown; ids: string[] }> } {
+    return {
+      version: 1,
+      field: this.field,
+      entries: this.entries.map((e) => ({ key: e.key, ids: Array.from(e.ids).sort() })),
+    };
+  }
+
+  /** Deserialize from JSON. */
+  static fromJSON(data: { field: string; entries: Array<{ key: unknown; ids: string[] }> }): BTreeIndex {
+    const idx = new BTreeIndex(data.field);
+    for (const entry of data.entries) {
+      const ids = new Set(entry.ids);
+      idx.entries.push({ key: entry.key, ids });
+      for (const id of ids) {
+        idx.idToKey.set(id, entry.key);
+      }
+      idx._size += ids.size;
+    }
+    return idx;
+  }
+
   // --- Internal ---
 
   /** Binary search for the position of a key. */

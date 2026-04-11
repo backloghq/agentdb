@@ -11,6 +11,7 @@ import type { AgentPermissions } from "./permissions.js";
 import type { CollectionSchema } from "./schema.js";
 import { MemoryMonitor } from "./memory.js";
 import type { MemoryStats } from "./memory.js";
+import { DiskStore } from "./disk-store.js";
 
 const META_DIR = "meta";
 const COLLECTIONS_DIR = "collections";
@@ -46,6 +47,14 @@ export interface AgentDBOptions {
   groupCommitMs?: number;
   /** Open in read-only mode. Skips write locks, rejects mutations. Safe to run alongside a writer. */
   readOnly?: boolean;
+  /** Storage mode: "memory" (default, all records in RAM), "disk" (Parquet-backed with LRU cache), "auto" (switch to disk when record count exceeds diskThreshold). */
+  storageMode?: "memory" | "disk" | "auto";
+  /** Record count threshold for auto mode (default: 10000). */
+  diskThreshold?: number;
+  /** LRU cache size for disk mode (max records, default: 10000). */
+  cacheSize?: number;
+  /** Parquet row group size for disk mode (default: 5000). */
+  rowGroupSize?: number;
 }
 
 export interface CollectionInfo {
@@ -95,6 +104,10 @@ export class AgentDB {
       groupCommitSize: opts?.groupCommitSize,
       groupCommitMs: opts?.groupCommitMs,
       readOnly: opts?.readOnly,
+      storageMode: opts?.storageMode,
+      diskThreshold: opts?.diskThreshold,
+      cacheSize: opts?.cacheSize,
+      rowGroupSize: opts?.rowGroupSize,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -192,25 +205,105 @@ export class AgentDB {
     if (this.embeddingProvider) {
       col.setEmbeddingProvider(this.embeddingProvider);
     }
-    await col.open(colDir, {
-      checkpointThreshold: this.opts.checkpointThreshold,
-      backend: this.opts.backend,
-      agentId: this.opts.agentId,
-      writeMode: this.opts.writeMode,
-      groupCommitSize: this.opts.groupCommitSize,
-      groupCommitMs: this.opts.groupCommitMs,
-      readOnly: this.opts.readOnly,
-    });
+
+    // Determine storage mode for this collection
+    const schema = this.schemas.get(name);
+    const mode = schema?.collectionOptions?.storageMode ?? this.opts.storageMode ?? "memory";
+    const useDisk = mode === "disk" ||
+      (mode === "auto" && await this.shouldUseDiskMode(colDir));
+
+    if (useDisk) {
+      // Disk mode: open with skipLoad (writes only), DiskStore handles reads.
+      // Disable opslog checkpoints — persistence is via JSONL + Parquet compaction on close.
+      // Without this, opslog writes quadratic snapshot files (full copy every N ops).
+      await col.open(colDir, {
+        checkpointThreshold: Number.MAX_SAFE_INTEGER,
+        checkpointOnClose: false,
+        backend: this.opts.backend,
+        agentId: this.opts.agentId,
+        writeMode: this.opts.writeMode,
+        groupCommitSize: this.opts.groupCommitSize,
+        groupCommitMs: this.opts.groupCommitMs,
+        readOnly: this.opts.readOnly,
+        skipLoad: true,
+      });
+
+      const diskStore = new DiskStore(col.getBackend(), {
+        cacheSize: this.opts.cacheSize ?? 1_000,
+        rowGroupSize: this.opts.rowGroupSize ?? 5000,
+        extractColumns: schema?.indexes ?? [],
+      });
+      await diskStore.load();
+
+      // If no Parquet data yet, do initial compaction from snapshot
+      if (!diskStore.hasParquetData) {
+        const recordMap = new Map<string, Record<string, unknown>>();
+        for await (const [id, record] of store.streamSnapshot()) {
+          recordMap.set(id, record);
+        }
+        // Apply WAL ops on top of snapshot — O(1) per op via Map
+        for await (const op of store.getWalOps()) {
+          if (op.op === "set" && op.data) {
+            recordMap.set(op.id, op.data as Record<string, unknown>);
+          } else if (op.op === "delete") {
+            recordMap.delete(op.id);
+          }
+        }
+        if (recordMap.size > 0) {
+          await diskStore.compact([...recordMap.entries()]);
+        }
+      } else {
+        // Replay WAL since last compaction into DiskStore cache (skip if Parquet is fresh)
+        const { readCompactionMeta } = await import("./disk-io.js");
+        const compactionMeta = await readCompactionMeta(col.getBackend());
+        if (compactionMeta) {
+          let walOpsReplayed = 0;
+          for await (const op of store.getWalOps(compactionMeta.lastTimestamp)) {
+            if (op.op === "set" && op.data) {
+              diskStore.cacheWrite(op.id, op.data as Record<string, unknown>);
+            } else if (op.op === "delete") {
+              diskStore.cacheDelete(op.id);
+            }
+            walOpsReplayed++;
+          }
+          // If no WAL ops to replay, Parquet is fresh — reset dirty flag
+          if (walOpsReplayed === 0) {
+            diskStore.clearCache();
+          }
+        }
+      }
+
+      // Load persisted indexes
+      await diskStore.loadIndexes(col.getIndexManager(), col.getTextIndex());
+
+      col.setDiskStore(diskStore);
+    } else {
+      // Memory mode: normal open (load all records into Map)
+      await col.open(colDir, {
+        checkpointThreshold: this.opts.checkpointThreshold,
+        backend: this.opts.backend,
+        agentId: this.opts.agentId,
+        writeMode: this.opts.writeMode,
+        groupCommitSize: this.opts.groupCommitSize,
+        groupCommitMs: this.opts.groupCommitMs,
+        readOnly: this.opts.readOnly,
+      });
+    }
 
     // Apply schema features: auto-create indexes, init counters, register hooks
-    const schema = this.schemas.get(name);
+    const ds = col.getDiskStore();
     if (schema) {
-      for (const field of schema.indexes) col.createIndex(field);
+      for (const field of schema.indexes) {
+        // In disk mode, skip in-memory index for high-cardinality fields (use Parquet column scan instead)
+        if (ds && !ds.shouldUseInMemoryIndex(field)) continue;
+        col.createIndex(field);
+      }
       for (const fields of schema.compositeIndexes) col.createCompositeIndex(fields);
+      for (const field of schema.arrayIndexes) col.createArrayIndex(field);
       // Initialize auto-increment counters from existing records (sorted desc, limit 1)
       if (schema.autoIncrementFields.length > 0) {
         for (const field of schema.autoIncrementFields) {
-          const top = col.find({ sort: `-${field}`, limit: 1 });
+          const top = await col.find({ sort: `-${field}`, limit: 1 });
           if (top.records.length > 0) {
             const val = top.records[0][field];
             if (typeof val === "number") schema.counters.set(field, val);
@@ -244,7 +337,7 @@ export class AgentDB {
         const ids = await originalInsertMany(processed, opts);
         if (schema.hooks.afterInsert) {
           for (let i = 0; i < ids.length; i++) {
-            const record = col.findOne(ids[i]);
+            const record = await col.findOne(ids[i]);
             if (record) schema.hooks.afterInsert(ids[i], record, ctx);
           }
         }
@@ -265,7 +358,7 @@ export class AgentDB {
         if (schema.hooks.afterInsert) {
           for (const r of results) {
             if (r.action === "inserted") {
-              const record = col.findOne(r.id);
+              const record = await col.findOne(r.id);
               if (record) schema.hooks.afterInsert(r.id, record, ctx);
             }
           }
@@ -363,7 +456,7 @@ export class AgentDB {
     const infos: CollectionInfo[] = [];
     for (const name of this.meta.collections) {
       const col = await this.collection(name);
-      infos.push({ name, recordCount: col.count() });
+      infos.push({ name, recordCount: await col.count() });
     }
     return infos;
   }
@@ -380,7 +473,7 @@ export class AgentDB {
     let totalRecords = 0;
     for (const name of this.meta.collections) {
       const col = await this.collection(name);
-      totalRecords += col.count();
+      totalRecords += await col.count();
     }
     return { collections: this.meta.collections.length, totalRecords };
   }
@@ -398,7 +491,7 @@ export class AgentDB {
     };
     for (const name of names) {
       const col = await this.collection(name);
-      data.collections[name] = { records: col.findAll() };
+      data.collections[name] = { records: await col.findAll() };
     }
     return data;
   }
@@ -417,7 +510,7 @@ export class AgentDB {
         if (opts?.overwrite) {
           await col.upsert(id, record);
         } else {
-          if (!col.findOne(id)) {
+          if (!(await col.findOne(id))) {
             await col.insert(record);
           }
         }
@@ -432,7 +525,29 @@ export class AgentDB {
     for (const [name, col] of this.open) {
       const listener = this.collectionListeners.get(name);
       if (listener) col.off("change", listener);
+      // Disk mode: compact to Parquet + save indexes before closing (only if dirty)
+      const ds = col.getDiskStore();
+      if (ds) {
+        if (ds.isDirty) {
+          // Incremental: pass session writes (from Map) as newRecords
+          const mapRecords = col.getStore().entries().map(([id, r]) => [id, r] as [string, Record<string, unknown>]);
+          const allRecords = await col.findAll();
+          await ds.compact(
+            allRecords.map((r) => [r._id as string, r]),
+            mapRecords.length > 0 ? mapRecords : undefined,
+          );
+        }
+        await ds.saveIndexes(col.getIndexManager(), col.getTextIndex());
+      }
+      // Clean up WAL ops after close — data is safe in JSONL + Parquet
+      const diskBackend = ds ? col.getBackend() : null;
       await col.close();
+      if (diskBackend) {
+        try {
+          const ops = await diskBackend.listBlobs("ops");
+          for (const f of ops) await diskBackend.deleteBlob(`ops/${f}`);
+        } catch { /* best-effort cleanup */ }
+      }
     }
     this.open.clear();
     this.collectionListeners.clear();
@@ -450,6 +565,26 @@ export class AgentDB {
   private removeLru(name: string): void {
     const idx = this.lru.indexOf(name);
     if (idx !== -1) this.lru.splice(idx, 1);
+  }
+
+  /** Check if a collection should use disk mode based on snapshot record count. */
+  private async shouldUseDiskMode(colDir: string): Promise<boolean> {
+    const threshold = this.opts.diskThreshold ?? 10_000;
+    try {
+      // Use a temporary backend to check compaction metadata
+      const { FsBackend } = await import("@backloghq/opslog");
+      const tmpBackend = new FsBackend();
+      await tmpBackend.initialize(colDir, { readOnly: true });
+      const { readCompactionMeta } = await import("./disk-io.js");
+      const meta = await readCompactionMeta(tmpBackend);
+      if (meta && meta.rowCount >= threshold) return true;
+      // Check manifest stats for record count
+      const { readFile } = await import("node:fs/promises");
+      const manifest = JSON.parse(await readFile(join(colDir, "manifest.json"), "utf-8"));
+      return (manifest?.stats?.activeRecords ?? 0) >= threshold;
+    } catch {
+      return false;
+    }
   }
 
   private async evictLru(): Promise<void> {

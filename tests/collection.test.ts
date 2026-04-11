@@ -35,20 +35,20 @@ describe("Collection", () => {
 
     it("auto-generates _id if not provided", async () => {
       const id = await col.insert({ name: "Alice" });
-      const record = col.findOne(id);
+      const record = await col.findOne(id);
       expect(record?._id).toBe(id);
     });
 
     it("uses provided _id", async () => {
       const id = await col.insert({ _id: "custom-id", name: "Alice" });
       expect(id).toBe("custom-id");
-      expect(col.findOne("custom-id")?.name).toBe("Alice");
+      expect((await col.findOne("custom-id"))?.name).toBe("Alice");
     });
 
     it("stores agent identity", async () => {
       const id = await col.insert({ name: "Alice" }, { agent: "test-agent", reason: "testing" });
       // Agent info is stripped from public API
-      const record = col.findOne(id);
+      const record = await col.findOne(id);
       expect(record?._agent).toBeUndefined();
       expect(record?._reason).toBeUndefined();
       // But visible in history
@@ -66,7 +66,7 @@ describe("Collection", () => {
         { name: "Charlie" },
       ]);
       expect(ids).toHaveLength(3);
-      expect(col.count()).toBe(3);
+      expect(await col.count()).toBe(3);
     });
 
     it("returns correct ids", async () => {
@@ -82,19 +82,19 @@ describe("Collection", () => {
   describe("findOne", () => {
     it("returns a record by id", async () => {
       const id = await col.insert({ name: "Alice", role: "admin" });
-      const record = col.findOne(id);
+      const record = await col.findOne(id);
       expect(record?.name).toBe("Alice");
       expect(record?.role).toBe("admin");
       expect(record?._id).toBe(id);
     });
 
-    it("returns undefined for non-existent id", () => {
-      expect(col.findOne("nonexistent")).toBeUndefined();
+    it("returns undefined for non-existent id", async () => {
+      expect(await col.findOne("nonexistent")).toBeUndefined();
     });
 
     it("strips internal metadata", async () => {
       const id = await col.insert({ name: "Alice" }, { agent: "bot" });
-      const record = col.findOne(id);
+      const record = await col.findOne(id);
       expect(record?._agent).toBeUndefined();
       expect(record?._reason).toBeUndefined();
     });
@@ -111,36 +111,36 @@ describe("Collection", () => {
       ]);
     });
 
-    it("returns all records with no filter", () => {
-      const result = col.find();
+    it("returns all records with no filter", async () => {
+      const result = await col.find();
       expect(result.total).toBe(5);
       expect(result.records).toHaveLength(5);
       expect(result.truncated).toBe(false);
     });
 
-    it("filters records", () => {
-      const result = col.find({ filter: { role: "admin" } });
+    it("filters records", async () => {
+      const result = await col.find({ filter: { role: "admin" } });
       expect(result.total).toBe(2);
       expect(result.records).toHaveLength(2);
       expect(result.records.every((r) => r.role === "admin")).toBe(true);
     });
 
-    it("supports pagination with limit", () => {
-      const result = col.find({ limit: 2 });
+    it("supports pagination with limit", async () => {
+      const result = await col.find({ limit: 2 });
       expect(result.records).toHaveLength(2);
       expect(result.total).toBe(5);
       expect(result.truncated).toBe(true);
     });
 
-    it("supports pagination with offset", () => {
-      const result = col.find({ limit: 2, offset: 3 });
+    it("supports pagination with offset", async () => {
+      const result = await col.find({ limit: 2, offset: 3 });
       expect(result.records).toHaveLength(2);
       expect(result.total).toBe(5);
       expect(result.truncated).toBe(false);
     });
 
-    it("summary mode omits long text fields", () => {
-      const result = col.find({ summary: true });
+    it("summary mode omits long text fields", async () => {
+      const result = await col.find({ summary: true });
       // Alice's bio is 300 chars — should be omitted
       const alice = result.records.find((r) => r.name === "Alice");
       expect(alice?.bio).toBeUndefined();
@@ -149,22 +149,22 @@ describe("Collection", () => {
       expect(charlie?.bio).toBe("Short bio");
     });
 
-    it("combines filter and pagination", () => {
-      const result = col.find({ filter: { role: "user" }, limit: 1 });
+    it("combines filter and pagination", async () => {
+      const result = await col.find({ filter: { role: "user" }, limit: 1 });
       expect(result.total).toBe(2);
       expect(result.records).toHaveLength(1);
       expect(result.truncated).toBe(true);
     });
 
-    it("returns empty result for no matches", () => {
-      const result = col.find({ filter: { role: "superadmin" } });
+    it("returns empty result for no matches", async () => {
+      const result = await col.find({ filter: { role: "superadmin" } });
       expect(result.total).toBe(0);
       expect(result.records).toHaveLength(0);
       expect(result.truncated).toBe(false);
     });
 
-    it("strips internal metadata from results", () => {
-      const result = col.find();
+    it("strips internal metadata from results", async () => {
+      const result = await col.find();
       for (const record of result.records) {
         expect(record._agent).toBeUndefined();
         expect(record._reason).toBeUndefined();
@@ -238,27 +238,27 @@ describe("Collection", () => {
   describe("optimistic locking", () => {
     it("records have _version starting at 1", async () => {
       const id = await col.insert({ _id: "a", name: "Alice" });
-      const record = col.findOne(id);
+      const record = await col.findOne(id);
       expect(record?._version).toBe(1);
     });
 
     it("_version increments on update", async () => {
       await col.insert({ _id: "a", name: "Alice" });
       await col.update({ _id: "a" }, { $set: { name: "Updated" } });
-      expect(col.findOne("a")?._version).toBe(2);
+      expect((await col.findOne("a"))?._version).toBe(2);
     });
 
     it("_version increments on upsert", async () => {
       await col.insert({ _id: "a", name: "Alice" });
       await col.upsert("a", { name: "Upserted" });
-      expect(col.findOne("a")?._version).toBe(2);
+      expect((await col.findOne("a"))?._version).toBe(2);
     });
 
     it("update with matching expectedVersion succeeds", async () => {
       await col.insert({ _id: "a", name: "Alice" });
       await col.update({ _id: "a" }, { $set: { name: "Updated" } }, { expectedVersion: 1 });
-      expect(col.findOne("a")?._version).toBe(2);
-      expect(col.findOne("a")?.name).toBe("Updated");
+      expect((await col.findOne("a"))?._version).toBe(2);
+      expect((await col.findOne("a"))?.name).toBe("Updated");
     });
 
     it("update with mismatched expectedVersion throws conflict", async () => {
@@ -267,7 +267,7 @@ describe("Collection", () => {
       await expect(
         col.update({ _id: "a" }, { $set: { name: "V3" } }, { expectedVersion: 1 }),
       ).rejects.toThrow("Conflict");
-      expect(col.findOne("a")?.name).toBe("V2"); // unchanged
+      expect((await col.findOne("a"))?.name).toBe("V2"); // unchanged
     });
 
     it("upsert with mismatched expectedVersion throws conflict", async () => {
@@ -275,14 +275,14 @@ describe("Collection", () => {
       await expect(
         col.upsert("a", { name: "New" }, { expectedVersion: 99 }),
       ).rejects.toThrow("Conflict");
-      expect(col.findOne("a")?.name).toBe("Alice");
+      expect((await col.findOne("a"))?.name).toBe("Alice");
     });
 
     it("no expectedVersion = no check (backward compatible)", async () => {
       await col.insert({ _id: "a", name: "Alice" });
       await col.update({ _id: "a" }, { $set: { name: "V2" } });
       await col.update({ _id: "a" }, { $set: { name: "V3" } }); // no expectedVersion
-      expect(col.findOne("a")?.name).toBe("V3");
+      expect((await col.findOne("a"))?.name).toBe("V3");
     });
 
     it("_version visible in find results", async () => {
@@ -290,7 +290,7 @@ describe("Collection", () => {
         { _id: "a", name: "Alice" },
         { _id: "b", name: "Bob" },
       ]);
-      const result = col.find();
+      const result = await col.find();
       expect(result.records.every((r) => r._version === 1)).toBe(true);
     });
   });
@@ -306,15 +306,15 @@ describe("Collection", () => {
       await col.insert({ _id: "perm", name: "Permanent" });
       await insertExpired(col, "temp", { name: "Temporary" });
 
-      expect(col.findOne("perm")?.name).toBe("Permanent");
-      expect(col.findOne("temp")).toBeUndefined();
+      expect((await col.findOne("perm"))?.name).toBe("Permanent");
+      expect(await col.findOne("temp")).toBeUndefined();
     });
 
     it("expired records excluded from find", async () => {
       await col.insert({ _id: "a", name: "Active" });
       await insertExpired(col, "b", { name: "Expired" });
 
-      const result = col.find();
+      const result = await col.find();
       expect(result.total).toBe(1);
       expect(result.records[0].name).toBe("Active");
     });
@@ -323,13 +323,13 @@ describe("Collection", () => {
       await col.insert({ _id: "a", name: "Active" });
       await insertExpired(col, "b", { name: "Expired" });
 
-      expect(col.count()).toBe(1);
+      expect(await col.count()).toBe(1);
     });
 
     it("ttl option sets _expires on insert", async () => {
       const id = await col.insert({ name: "Temp" }, { ttl: 3600 });
-      expect(col.findOne(id)?.name).toBe("Temp");
-      expect(col.findOne(id)?._expires).toBeUndefined();
+      expect((await col.findOne(id))?.name).toBe("Temp");
+      expect((await col.findOne(id))?._expires).toBeUndefined();
       const ops = col.history(id);
       expect(ops[0].data?._expires).toBeDefined();
     });
@@ -341,14 +341,14 @@ describe("Collection", () => {
 
       const cleaned = await col.cleanup();
       expect(cleaned).toBe(2);
-      expect(col.count()).toBe(1);
+      expect(await col.count()).toBe(1);
     });
 
     it("non-expired records are unaffected by cleanup", async () => {
       await col.insert({ _id: "a", name: "Active" }, { ttl: 99999 });
       const cleaned = await col.cleanup();
       expect(cleaned).toBe(0);
-      expect(col.findOne("a")?.name).toBe("Active");
+      expect((await col.findOne("a"))?.name).toBe("Active");
     });
 
     it("expired records excluded from update", async () => {
@@ -370,38 +370,38 @@ describe("Collection", () => {
       ]);
     });
 
-    it("returns all records when no maxTokens", () => {
-      const result = col.find();
+    it("returns all records when no maxTokens", async () => {
+      const result = await col.find();
       expect(result.records).toHaveLength(4);
       expect(result.estimatedTokens).toBeUndefined();
     });
 
-    it("truncates when maxTokens exceeded", () => {
+    it("truncates when maxTokens exceeded", async () => {
       // Each record is ~120 tokens (400 char bio + fields). Budget for ~2 records.
-      const result = col.find({ maxTokens: 250 });
+      const result = await col.find({ maxTokens: 250 });
       expect(result.records.length).toBeLessThan(4);
       expect(result.truncated).toBe(true);
       expect(result.estimatedTokens).toBeDefined();
       expect(result.estimatedTokens!).toBeLessThanOrEqual(250);
     });
 
-    it("always returns at least one record", () => {
-      const result = col.find({ maxTokens: 1 });
+    it("always returns at least one record", async () => {
+      const result = await col.find({ maxTokens: 1 });
       expect(result.records).toHaveLength(1);
       expect(result.truncated).toBe(true);
     });
 
-    it("returns estimatedTokens when maxTokens set", () => {
-      const result = col.find({ maxTokens: 10000 });
+    it("returns estimatedTokens when maxTokens set", async () => {
+      const result = await col.find({ maxTokens: 10000 });
       expect(result.estimatedTokens).toBeDefined();
       expect(result.estimatedTokens!).toBeGreaterThan(0);
       expect(result.records).toHaveLength(4);
     });
 
-    it("works with summary mode to stay under budget", () => {
+    it("works with summary mode to stay under budget", async () => {
       // Summary strips the long bio field, so more records fit
-      const withBio = col.find({ maxTokens: 250 });
-      const withSummary = col.find({ maxTokens: 250, summary: true });
+      const withBio = await col.find({ maxTokens: 250 });
+      const withSummary = await col.find({ maxTokens: 250, summary: true });
       expect(withSummary.records.length).toBeGreaterThanOrEqual(withBio.records.length);
     });
   });
@@ -415,19 +415,19 @@ describe("Collection", () => {
       ]);
     });
 
-    it("find with compact string filter", () => {
-      const result = col.find({ filter: "role:admin" });
+    it("find with compact string filter", async () => {
+      const result = await col.find({ filter: "role:admin" });
       expect(result.total).toBe(2);
     });
 
-    it("find with compound string filter", () => {
-      const result = col.find({ filter: "role:admin age.gt:35" });
+    it("find with compound string filter", async () => {
+      const result = await col.find({ filter: "role:admin age.gt:35" });
       expect(result.total).toBe(1);
       expect(result.records[0].name).toBe("Charlie");
     });
 
-    it("count with string filter", () => {
-      expect(col.count("role:admin")).toBe(2);
+    it("count with string filter", async () => {
+      expect(await col.count("role:admin")).toBe(2);
     });
 
     it("update with string filter", async () => {
@@ -438,11 +438,11 @@ describe("Collection", () => {
     it("remove with string filter", async () => {
       const deleted = await col.remove("role:user");
       expect(deleted).toBe(1);
-      expect(col.count()).toBe(2);
+      expect(await col.count()).toBe(2);
     });
 
-    it("find with or string filter", () => {
-      const result = col.find({ filter: "(role:admin or age:25)" });
+    it("find with or string filter", async () => {
+      const result = await col.find({ filter: "(role:admin or age:25)" });
       expect(result.total).toBe(3);
     });
   });
@@ -456,16 +456,16 @@ describe("Collection", () => {
       ]);
     });
 
-    it("counts all records", () => {
-      expect(col.count()).toBe(3);
+    it("counts all records", async () => {
+      expect(await col.count()).toBe(3);
     });
 
-    it("counts with filter", () => {
-      expect(col.count({ role: "admin" })).toBe(2);
+    it("counts with filter", async () => {
+      expect(await col.count({ role: "admin" })).toBe(2);
     });
 
-    it("returns 0 for no matches", () => {
-      expect(col.count({ role: "superadmin" })).toBe(0);
+    it("returns 0 for no matches", async () => {
+      expect(await col.count({ role: "superadmin" })).toBe(0);
     });
   });
 
@@ -481,37 +481,37 @@ describe("Collection", () => {
     it("updates matching records with $set", async () => {
       const modified = await col.update({ role: "admin" }, { $set: { active: true } });
       expect(modified).toBe(2);
-      expect(col.findOne("1")?.active).toBe(true);
-      expect(col.findOne("3")?.active).toBe(true);
-      expect(col.findOne("2")?.active).toBeUndefined();
+      expect((await col.findOne("1"))?.active).toBe(true);
+      expect((await col.findOne("3"))?.active).toBe(true);
+      expect((await col.findOne("2"))?.active).toBeUndefined();
     });
 
     it("removes fields with $unset", async () => {
       await col.update({ _id: "1" }, { $unset: { score: true } });
-      expect(col.findOne("1")?.score).toBeUndefined();
+      expect((await col.findOne("1"))?.score).toBeUndefined();
     });
 
     it("increments with $inc", async () => {
       await col.update({ role: "admin" }, { $inc: { score: 5 } });
-      expect(col.findOne("1")?.score).toBe(15);
-      expect(col.findOne("3")?.score).toBe(13);
+      expect((await col.findOne("1"))?.score).toBe(15);
+      expect((await col.findOne("3"))?.score).toBe(13);
     });
 
     it("pushes to arrays with $push", async () => {
       await col.update({ _id: "1" }, { $set: { tags: ["admin"] } });
       await col.update({ _id: "1" }, { $push: { tags: "verified" } });
-      const record = col.findOne("1");
+      const record = await col.findOne("1");
       expect(record?.tags).toEqual(["admin", "verified"]);
     });
 
     it("$push creates array if field doesn't exist", async () => {
       await col.update({ _id: "1" }, { $push: { tags: "new" } });
-      expect(col.findOne("1")?.tags).toEqual(["new"]);
+      expect((await col.findOne("1"))?.tags).toEqual(["new"]);
     });
 
     it("$inc initializes to amount if field doesn't exist", async () => {
       await col.update({ _id: "1" }, { $inc: { bonus: 3 } });
-      expect(col.findOne("1")?.bonus).toBe(3);
+      expect((await col.findOne("1"))?.bonus).toBe(3);
     });
 
     it("returns 0 when no records match", async () => {
@@ -532,14 +532,14 @@ describe("Collection", () => {
       const result = await col.upsert("new-id", { name: "New" });
       expect(result.action).toBe("inserted");
       expect(result.id).toBe("new-id");
-      expect(col.findOne("new-id")?.name).toBe("New");
+      expect((await col.findOne("new-id"))?.name).toBe("New");
     });
 
     it("updates when record exists", async () => {
       await col.insert({ _id: "existing", name: "Old" });
       const result = await col.upsert("existing", { name: "Updated" });
       expect(result.action).toBe("updated");
-      expect(col.findOne("existing")?.name).toBe("Updated");
+      expect((await col.findOne("existing"))?.name).toBe("Updated");
     });
   });
 
@@ -555,14 +555,14 @@ describe("Collection", () => {
     it("deletes matching records", async () => {
       const deleted = await col.remove({ role: "admin" });
       expect(deleted).toBe(2);
-      expect(col.count()).toBe(1);
-      expect(col.findOne("2")?.name).toBe("Bob");
+      expect(await col.count()).toBe(1);
+      expect((await col.findOne("2"))?.name).toBe("Bob");
     });
 
     it("returns 0 when no records match", async () => {
       const deleted = await col.remove({ role: "superadmin" });
       expect(deleted).toBe(0);
-      expect(col.count()).toBe(3);
+      expect(await col.count()).toBe(3);
     });
 
     it("deletes without double write", async () => {
@@ -576,14 +576,14 @@ describe("Collection", () => {
     it("_id fast path: update by _id without full scan", async () => {
       const updated = await col.update({ _id: "1" }, { $set: { role: "superadmin" } });
       expect(updated).toBe(1);
-      expect(col.findOne("1")?.role).toBe("superadmin");
+      expect((await col.findOne("1"))?.role).toBe("superadmin");
     });
 
     it("_id fast path: remove by _id without full scan", async () => {
       const deleted = await col.remove({ _id: "2" });
       expect(deleted).toBe(1);
-      expect(col.findOne("2")).toBeUndefined();
-      expect(col.count()).toBe(2);
+      expect(await col.findOne("2")).toBeUndefined();
+      expect(await col.count()).toBe(2);
     });
 
     it("_id fast path: update non-existent _id returns 0", async () => {
@@ -595,14 +595,14 @@ describe("Collection", () => {
       col.createIndex("role");
       const updated = await col.update({ role: "admin" }, { $set: { verified: true } });
       expect(updated).toBe(2);
-      expect(col.findOne("1")?.verified).toBe(true);
-      expect(col.findOne("3")?.verified).toBe(true);
+      expect((await col.findOne("1"))?.verified).toBe(true);
+      expect((await col.findOne("3"))?.verified).toBe(true);
     });
 
-    it("predicate cache: repeated identical filters reuse compiled predicate", () => {
+    it("predicate cache: repeated identical filters reuse compiled predicate", async () => {
       // Run the same filter multiple times — should not error and should return consistent results
       for (let i = 0; i < 10; i++) {
-        const result = col.find({ filter: { role: "admin" } });
+        const result = await col.find({ filter: { role: "admin" } });
         expect(result.records).toHaveLength(2);
       }
     });
@@ -611,18 +611,18 @@ describe("Collection", () => {
   describe("undo", () => {
     it("undoes the last mutation", async () => {
       await col.insert({ _id: "a", name: "Alice" });
-      expect(col.count()).toBe(1);
+      expect(await col.count()).toBe(1);
 
       const undone = await col.undo();
       expect(undone).toBe(true);
-      expect(col.count()).toBe(0);
+      expect(await col.count()).toBe(0);
     });
 
     it("undoes an update", async () => {
       await col.insert({ _id: "a", name: "Original" });
       await col.update({ _id: "a" }, { $set: { name: "Updated" } });
       await col.undo();
-      expect(col.findOne("a")?.name).toBe("Original");
+      expect((await col.findOne("a"))?.name).toBe("Original");
     });
 
     it("returns false when nothing to undo", async () => {
@@ -750,10 +750,10 @@ describe("Collection", () => {
       expect(col.mightHave("role", "anything")).toBe(true);
     });
 
-    it("tracks query frequency", () => {
-      col.find({ filter: { role: "admin" } });
-      col.find({ filter: { role: "user" } });
-      col.find({ filter: { score: { $gt: 15 } } });
+    it("tracks query frequency", async () => {
+      await col.find({ filter: { role: "admin" } });
+      await col.find({ filter: { role: "user" } });
+      await col.find({ filter: { score: { $gt: 15 } } });
       const suggestions = col.suggestIndexes(2);
       expect(suggestions[0].field).toBe("role");
       expect(suggestions[0].count).toBe(2);
@@ -765,68 +765,100 @@ describe("Collection", () => {
       expect(col.listIndexes()).not.toContain("role");
     });
 
-    it("uses index for $gt/$lt range queries", () => {
+    it("uses index for $gt/$lt range queries", async () => {
       col.createIndex("score");
-      const result = col.find({ filter: { score: { $gt: 20 } } });
+      const result = await col.find({ filter: { score: { $gt: 20 } } });
       expect(result.records).toHaveLength(1);
       expect(result.records[0].name).toBe("Charlie");
     });
 
-    it("uses index for $gte/$lte range queries", () => {
+    it("uses index for $gte/$lte range queries", async () => {
       col.createIndex("score");
-      const result = col.find({ filter: { score: { $gte: 10, $lte: 20 } } });
+      const result = await col.find({ filter: { score: { $gte: 10, $lte: 20 } } });
       expect(result.records).toHaveLength(2);
       const names = result.records.map((r) => r.name);
       expect(names).toContain("Alice");
       expect(names).toContain("Bob");
     });
 
-    it("uses index for compound range + equality on different fields", () => {
+    it("uses index for compound range + equality on different fields", async () => {
       col.createIndex("score");
       // score index narrows, then role filter applied as predicate
-      const result = col.find({ filter: { score: { $gte: 10 }, role: "admin" } });
+      const result = await col.find({ filter: { score: { $gte: 10 }, role: "admin" } });
       expect(result.records).toHaveLength(2);
     });
 
-    it("count fast path returns correct count with index and no TTL", () => {
+    it("count fast path returns correct count with index and no TTL", async () => {
       col.createIndex("role");
-      expect(col.count({ role: "admin" })).toBe(2);
-      expect(col.count({ role: "user" })).toBe(1);
-      expect(col.count({ role: "nonexistent" })).toBe(0);
+      expect(await col.count({ role: "admin" })).toBe(2);
+      expect(await col.count({ role: "user" })).toBe(1);
+      expect(await col.count({ role: "nonexistent" })).toBe(0);
     });
 
-    it("count with range operator on indexed field", () => {
+    it("intersects multiple single-field indexes for compound filter", async () => {
+      col.createIndex("role");
       col.createIndex("score");
-      expect(col.count({ score: { $gt: 15 } })).toBe(2);
-      expect(col.count({ score: { $lte: 10 } })).toBe(1);
-    });
 
-    // --- Composite indexes ---
-
-    it("creates a composite index and resolves compound equality", () => {
-      col.createCompositeIndex(["role", "score"]);
-      expect(col.listCompositeIndexes()).toEqual([["role", "score"]]);
-
-      // Compound equality: role=admin AND score=10
-      const result = col.find({ filter: { role: "admin", score: 10 } });
+      // { role: "admin", score: 10 } — both fields indexed
+      // Should intersect: role=admin → {Alice, Bob} ∩ score=10 → {Alice} = {Alice}
+      const result = await col.find({ filter: { role: "admin", score: 10 } });
       expect(result.records).toHaveLength(1);
       expect(result.records[0].name).toBe("Alice");
     });
 
-    it("composite index with range on trailing field", () => {
-      col.createCompositeIndex(["role", "score"]);
+    it("compound count uses intersected indexes", async () => {
+      col.createIndex("role");
+      col.createIndex("score");
 
-      // role=admin AND score >= 20
-      const result = col.find({ filter: { role: "admin", score: { $gte: 20 } } });
+      // Both indexed — should use fast path (intersected candidate set)
+      // Alice: admin, 10. Bob: user, 20. Charlie: admin, 30.
+      expect(await col.count({ role: "admin", score: 10 })).toBe(1);  // Alice
+      expect(await col.count({ role: "admin", score: 30 })).toBe(1);  // Charlie
+      expect(await col.count({ role: "user", score: 10 })).toBe(0);   // no user with score=10
+    });
+
+    it("intersects equality + range across two indexes", async () => {
+      col.createIndex("role");
+      col.createIndex("score");
+
+      // role=admin ∩ score>15 → Charlie (admin, score=30)
+      const result = await col.find({ filter: { role: "admin", score: { $gt: 15 } } });
       expect(result.records).toHaveLength(1);
       expect(result.records[0].name).toBe("Charlie");
     });
 
-    it("composite index with combined range on trailing field", () => {
+    it("count with range operator on indexed field", async () => {
+      col.createIndex("score");
+      expect(await col.count({ score: { $gt: 15 } })).toBe(2);
+      expect(await col.count({ score: { $lte: 10 } })).toBe(1);
+    });
+
+    // --- Composite indexes ---
+
+    it("creates a composite index and resolves compound equality", async () => {
+      col.createCompositeIndex(["role", "score"]);
+      expect(col.listCompositeIndexes()).toEqual([["role", "score"]]);
+
+      // Compound equality: role=admin AND score=10
+      const result = await col.find({ filter: { role: "admin", score: 10 } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].name).toBe("Alice");
+    });
+
+    it("composite index with range on trailing field", async () => {
+      col.createCompositeIndex(["role", "score"]);
+
+      // role=admin AND score >= 20
+      const result = await col.find({ filter: { role: "admin", score: { $gte: 20 } } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].name).toBe("Charlie");
+    });
+
+    it("composite index with combined range on trailing field", async () => {
       col.createCompositeIndex(["role", "score"]);
 
       // role=admin AND 5 <= score <= 25
-      const result = col.find({ filter: { role: "admin", score: { $gte: 5, $lte: 25 } } });
+      const result = await col.find({ filter: { role: "admin", score: { $gte: 5, $lte: 25 } } });
       expect(result.records).toHaveLength(1);
       expect(result.records[0].name).toBe("Alice");
     });
@@ -835,23 +867,23 @@ describe("Collection", () => {
       col.createCompositeIndex(["role", "score"]);
 
       await col.insert({ _id: "d", name: "Dave", role: "admin", score: 40 });
-      const r1 = col.find({ filter: { role: "admin", score: 40 } });
+      const r1 = await col.find({ filter: { role: "admin", score: 40 } });
       expect(r1.records).toHaveLength(1);
 
       await col.update({ _id: "d" }, { $set: { score: 50 } });
-      expect(col.find({ filter: { role: "admin", score: 40 } }).records).toHaveLength(0);
-      expect(col.find({ filter: { role: "admin", score: 50 } }).records).toHaveLength(1);
+      expect((await col.find({ filter: { role: "admin", score: 40 } })).records).toHaveLength(0);
+      expect((await col.find({ filter: { role: "admin", score: 50 } })).records).toHaveLength(1);
 
       await col.remove({ _id: "d" });
-      expect(col.find({ filter: { role: "admin", score: 50 } }).records).toHaveLength(0);
+      expect((await col.find({ filter: { role: "admin", score: 50 } })).records).toHaveLength(0);
     });
 
-    it("composite index prefix-only falls back to single-field index", () => {
+    it("composite index prefix-only falls back to single-field index", async () => {
       col.createIndex("role");
       col.createCompositeIndex(["role", "score"]);
 
       // Only role in filter — composite not eligible, single-field used
-      const result = col.find({ filter: { role: "admin" } });
+      const result = await col.find({ filter: { role: "admin" } });
       expect(result.records).toHaveLength(2);
     });
 
@@ -865,26 +897,26 @@ describe("Collection", () => {
       expect(() => col.createCompositeIndex(["role"])).toThrow("at least 2 fields");
     });
 
-    it("range query on indexed field with no matching records returns empty", () => {
+    it("range query on indexed field with no matching records returns empty", async () => {
       col.createIndex("score");
-      const result = col.find({ filter: { score: { $gt: 100 } } });
+      const result = await col.find({ filter: { score: { $gt: 100 } } });
       expect(result.records).toHaveLength(0);
       expect(result.total).toBe(0);
     });
 
-    it("composite index with all fields matching exact equality", () => {
+    it("composite index with all fields matching exact equality", async () => {
       col.createCompositeIndex(["role", "score"]);
       // Both fields match exactly one record
-      const result = col.find({ filter: { role: "user", score: 20 } });
+      const result = await col.find({ filter: { role: "user", score: 20 } });
       expect(result.records).toHaveLength(1);
       expect(result.records[0].name).toBe("Bob");
     });
 
-    it("indexedCandidates returns null when filter has no indexed fields", () => {
+    it("indexedCandidates returns null when filter has no indexed fields", async () => {
       // Create an index on 'role' but filter on 'name' (not indexed)
       col.createIndex("role");
       // We query on a non-indexed field — index cannot help, falls through to full scan
-      const result = col.find({ filter: { name: "Alice" } });
+      const result = await col.find({ filter: { name: "Alice" } });
       expect(result.records).toHaveLength(1);
       expect(result.records[0].name).toBe("Alice");
     });
@@ -952,7 +984,7 @@ describe("Collection", () => {
       col.createIndex("role");
 
       // Verify: find with index only returns active record
-      const beforeCleanup = col.find({ filter: { role: "admin" } });
+      const beforeCleanup = await col.find({ filter: { role: "admin" } });
       expect(beforeCleanup.records).toHaveLength(1);
       expect(beforeCleanup.records[0]._id).toBe("a");
 
@@ -961,12 +993,12 @@ describe("Collection", () => {
       expect(cleaned).toBe(1);
 
       // After cleanup, index should still work correctly
-      const afterCleanup = col.find({ filter: { role: "admin" } });
+      const afterCleanup = await col.find({ filter: { role: "admin" } });
       expect(afterCleanup.records).toHaveLength(1);
       expect(afterCleanup.records[0]._id).toBe("a");
 
       // Total count should reflect only active records
-      expect(col.count()).toBe(1);
+      expect(await col.count()).toBe(1);
     });
   });
 
@@ -986,7 +1018,7 @@ describe("Collection", () => {
       await reader.open(tmpDir, { checkpointThreshold: 1000, readOnly: true } as Record<string, unknown>);
 
       // Reader sees initial data
-      expect(reader.count()).toBe(1);
+      expect(await reader.count()).toBe(1);
 
       // Writer adds more
       await writer.insert({ _id: "b", name: "Bob" });
@@ -994,7 +1026,7 @@ describe("Collection", () => {
       // Reader tails to pick up
       const newOps = await reader.tail();
       expect(newOps.length).toBeGreaterThan(0);
-      expect(reader.findOne("b")?.name).toBe("Bob");
+      expect((await reader.findOne("b"))?.name).toBe("Bob");
 
       await reader.close();
       await writer.close();
@@ -1022,47 +1054,47 @@ describe("Collection", () => {
       ]);
     });
 
-    it("defines and queries a view", () => {
+    it("defines and queries a view", async () => {
       col.defineView({ name: "admins", filter: { role: "admin" } });
-      const result = col.queryView("admins");
+      const result = await col.queryView("admins");
       expect(result.total).toBe(2);
       expect(result.records.every((r) => r.role === "admin")).toBe(true);
     });
 
-    it("caches view results", () => {
+    it("caches view results", async () => {
       col.defineView({ name: "admins", filter: { role: "admin" } });
-      const r1 = col.queryView("admins");
-      const r2 = col.queryView("admins");
+      const r1 = await col.queryView("admins");
+      const r2 = await col.queryView("admins");
       // Same object reference = cached
       expect(r1).toBe(r2);
     });
 
     it("invalidates cache on mutation", async () => {
       col.defineView({ name: "active", filter: { active: true } });
-      const r1 = col.queryView("active");
+      const r1 = await col.queryView("active");
       expect(r1.total).toBe(3);
 
       await col.update({ _id: "2" }, { $set: { active: true } });
-      const r2 = col.queryView("active");
+      const r2 = await col.queryView("active");
       expect(r2.total).toBe(4);
       expect(r1).not.toBe(r2); // Different object = re-queried
     });
 
-    it("supports overrides on queryView", () => {
+    it("supports overrides on queryView", async () => {
       col.defineView({ name: "all", filter: {} });
-      const result = col.queryView("all", { limit: 2 });
+      const result = await col.queryView("all", { limit: 2 });
       expect(result.records).toHaveLength(2);
       expect(result.truncated).toBe(true);
     });
 
-    it("view with default opts", () => {
+    it("view with default opts", async () => {
       col.defineView({ name: "admins-summary", filter: { role: "admin" }, opts: { summary: true } });
-      const result = col.queryView("admins-summary");
+      const result = await col.queryView("admins-summary");
       expect(result.total).toBe(2);
     });
 
-    it("throws on unknown view", () => {
-      expect(() => col.queryView("nonexistent")).toThrow("not found");
+    it("throws on unknown view", async () => {
+      await expect(col.queryView("nonexistent")).rejects.toThrow("not found");
     });
 
     it("lists views", () => {
@@ -1102,49 +1134,49 @@ describe("Collection", () => {
       await rm(sDir, { recursive: true, force: true });
     });
 
-    it("searches by text across all string fields", () => {
-      const result = searchCol.search("API");
+    it("searches by text across all string fields", async () => {
+      const result = await searchCol.search("API");
       expect(result.total).toBe(2); // "Build the API" + "Write API documentation"
     });
 
-    it("multi-term search uses AND", () => {
-      const result = searchCol.search("API documentation");
+    it("multi-term search uses AND", async () => {
+      const result = await searchCol.search("API documentation");
       expect(result.total).toBe(1);
       expect(result.records[0].title).toBe("Write API documentation");
     });
 
-    it("searches tag content", () => {
-      const result = searchCol.search("backend");
+    it("searches tag content", async () => {
+      const result = await searchCol.search("backend");
       expect(result.total).toBe(2);
     });
 
-    it("respects pagination", () => {
-      const result = searchCol.search("API", { limit: 1 });
+    it("respects pagination", async () => {
+      const result = await searchCol.search("API", { limit: 1 });
       expect(result.records).toHaveLength(1);
       expect(result.truncated).toBe(true);
     });
 
-    it("throws when textSearch not enabled", () => {
-      expect(() => col.search("test")).toThrow("not enabled");
+    it("throws when textSearch not enabled", async () => {
+      await expect(col.search("test")).rejects.toThrow("not enabled");
     });
 
     it("index updates on insert", async () => {
       await searchCol.insert({ _id: "5", title: "New search feature" });
-      const result = searchCol.search("search feature");
+      const result = await searchCol.search("search feature");
       expect(result.total).toBe(1);
     });
 
     it("index updates on remove", async () => {
       await searchCol.remove({ _id: "1" });
-      const result = searchCol.search("API");
+      const result = await searchCol.search("API");
       expect(result.total).toBe(1); // Only "Write API documentation" remains
     });
 
     it("index updates on undo", async () => {
       await searchCol.insert({ _id: "5", title: "Temporary item" });
-      expect(searchCol.search("temporary").total).toBe(1);
+      expect((await searchCol.search("temporary")).total).toBe(1);
       await searchCol.undo();
-      expect(searchCol.search("temporary").total).toBe(0);
+      expect((await searchCol.search("temporary")).total).toBe(0);
     });
   });
 
@@ -1281,44 +1313,44 @@ describe("Collection", () => {
       await rm(vfDir, { recursive: true, force: true });
     });
 
-    it("filters with virtual filter in JSON syntax", () => {
-      const result = vfCol.find({ filter: { "+OVERDUE": true } });
+    it("filters with virtual filter in JSON syntax", async () => {
+      const result = await vfCol.find({ filter: { "+OVERDUE": true } });
       expect(result.total).toBe(1);
       expect(result.records[0].title).toBe("Past due");
     });
 
-    it("filters with virtual filter + regular filter", () => {
-      const result = vfCol.find({ filter: { "+HIGH": true, status: "pending" } });
+    it("filters with virtual filter + regular filter", async () => {
+      const result = await vfCol.find({ filter: { "+HIGH": true, status: "pending" } });
       expect(result.total).toBe(3); // Past due, Blocked, Unblocked
     });
 
-    it("virtual filter with false negates", () => {
-      const result = vfCol.find({ filter: { "+HIGH": false } });
+    it("virtual filter with false negates", async () => {
+      const result = await vfCol.find({ filter: { "+HIGH": false } });
       expect(result.total).toBe(2); // Future (L), No due (M)
     });
 
-    it("cross-record virtual filter works", () => {
+    it("cross-record virtual filter works", async () => {
       // "Blocked" depends on "Future" which is pending — so it's blocked
       // "Unblocked" depends on "Past due" which is also pending — also blocked
-      const result = vfCol.find({ filter: { "+BLOCKED": true } });
+      const result = await vfCol.find({ filter: { "+BLOCKED": true } });
       expect(result.total).toBe(2);
     });
 
-    it("count with virtual filter", () => {
-      expect(vfCol.count({ "+OVERDUE": true })).toBe(1);
-      expect(vfCol.count({ "+HIGH": true })).toBe(3);
+    it("count with virtual filter", async () => {
+      expect(await vfCol.count({ "+OVERDUE": true })).toBe(1);
+      expect(await vfCol.count({ "+HIGH": true })).toBe(3);
     });
 
-    it("virtual filters compose with string syntax via parseCompactFilter", () => {
+    it("virtual filters compose with string syntax via parseCompactFilter", async () => {
       // Compact syntax doesn't natively support +TOKEN yet,
       // but JSON filter works. String filters without + are regular fields.
-      const result = vfCol.find({ filter: { "+HIGH": true, "+OVERDUE": true } });
+      const result = await vfCol.find({ filter: { "+HIGH": true, "+OVERDUE": true } });
       expect(result.total).toBe(1);
       expect(result.records[0].title).toBe("Past due");
     });
 
-    it("no virtual filters = backward compatible", () => {
-      const result = col.find({ filter: { "+NONEXISTENT": true } });
+    it("no virtual filters = backward compatible", async () => {
+      const result = await col.find({ filter: { "+NONEXISTENT": true } });
       // Without virtual filters, +NONEXISTENT is treated as a regular field name
       expect(result.total).toBe(0);
     });
@@ -1353,7 +1385,7 @@ describe("Collection", () => {
 
     it("computed fields appear in findOne", async () => {
       await computed.insert({ _id: "a", first: "Alice", last: "Smith", priority: "H" });
-      const record = computed.findOne("a");
+      const record = await computed.findOne("a");
       expect(record?.fullName).toBe("Alice Smith");
       expect(record?.isHighPriority).toBe(true);
     });
@@ -1361,7 +1393,7 @@ describe("Collection", () => {
     it("computed fields appear in find results", async () => {
       await computed.insert({ _id: "a", first: "Alice", last: "Smith", priority: "H" });
       await computed.insert({ _id: "b", first: "Bob", last: "Jones", priority: "L" });
-      const result = computed.find();
+      const result = await computed.find();
       const alice = result.records.find((r) => r._id === "a");
       const bob = result.records.find((r) => r._id === "b");
       expect(alice?.fullName).toBe("Alice Smith");
@@ -1380,7 +1412,7 @@ describe("Collection", () => {
     it("computed fields can reference other records", async () => {
       await computed.insert({ _id: "a", first: "Alice", last: "Smith", priority: "H" });
       await computed.insert({ _id: "b", first: "Bob", last: "Jones", priority: "L", depends: ["a"] });
-      const bob = computed.findOne("b");
+      const bob = await computed.findOne("b");
       expect(bob?.depCount).toBe(1);
     });
 
@@ -1392,9 +1424,9 @@ describe("Collection", () => {
       expect(fullNameField?.type).toBe("string");
     });
 
-    it("no computed = backward compatible", () => {
+    it("no computed = backward compatible", async () => {
       // The default col has no computed fields — find should work normally
-      const result = col.find();
+      const result = await col.find();
       expect(result).toBeDefined();
     });
   });
@@ -1428,7 +1460,7 @@ describe("Collection", () => {
 
     it("allows valid insert", async () => {
       const id = await validated.insert({ name: "Alice" });
-      expect(validated.findOne(id)?.name).toBe("Alice");
+      expect((await validated.findOne(id))?.name).toBe("Alice");
     });
 
     it("rejects invalid insert", async () => {
@@ -1444,7 +1476,7 @@ describe("Collection", () => {
         { name: "Alice" },
         { role: "admin" }, // invalid — no name
       ])).rejects.toThrow("name is required");
-      expect(validated.count()).toBe(0); // nothing persisted
+      expect(await validated.count()).toBe(0); // nothing persisted
     });
 
     it("validates update result, not operators", async () => {
@@ -1454,29 +1486,29 @@ describe("Collection", () => {
         validated.update({ _id: "a" }, { $unset: { name: true } }),
       ).rejects.toThrow("name is required");
       // Original record unchanged
-      expect(validated.findOne("a")?.name).toBe("Alice");
+      expect((await validated.findOne("a"))?.name).toBe("Alice");
     });
 
     it("allows valid update", async () => {
       await validated.insert({ _id: "a", name: "Alice" });
       await validated.update({ _id: "a" }, { $set: { name: "Bob" } });
-      expect(validated.findOne("a")?.name).toBe("Bob");
+      expect((await validated.findOne("a"))?.name).toBe("Bob");
     });
 
     it("rejects invalid upsert", async () => {
       await expect(validated.upsert("a", { role: "admin" })).rejects.toThrow("name is required");
-      expect(validated.findOne("a")).toBeUndefined();
+      expect(await validated.findOne("a")).toBeUndefined();
     });
 
     it("allows valid upsert", async () => {
       await validated.upsert("a", { name: "Alice" });
-      expect(validated.findOne("a")?.name).toBe("Alice");
+      expect((await validated.findOne("a"))?.name).toBe("Alice");
     });
 
     it("no validate = no-op (backward compatible)", async () => {
       // The default col fixture has no validate hook
       await col.insert({ anything: "goes" });
-      expect(col.count()).toBe(1);
+      expect(await col.count()).toBe(1);
     });
   });
 
@@ -1505,10 +1537,10 @@ describe("Collection", () => {
       await combo.insert({ _id: "b", title: "This is a long title" });
 
       // Computed field works
-      expect(combo.findOne("a")?.titleLen).toBe(5);
+      expect((await combo.findOne("a"))?.titleLen).toBe(5);
 
       // Virtual filter works
-      const long = combo.find({ filter: { "+LONG": true } });
+      const long = await combo.find({ filter: { "+LONG": true } });
       expect(long.total).toBe(1);
       expect(long.records[0]._id).toBe("b");
 
@@ -1536,7 +1568,7 @@ describe("Collection", () => {
         promises.push(col.insert({ name: `User ${i}` }));
       }
       await Promise.all(promises);
-      expect(col.count()).toBe(20);
+      expect(await col.count()).toBe(20);
     });
   });
 
@@ -1550,19 +1582,19 @@ describe("Collection", () => {
       ]);
     });
 
-    it("sorts ascending by field", () => {
-      const result = col.find({ sort: "name" });
+    it("sorts ascending by field", async () => {
+      const result = await col.find({ sort: "name" });
       const names = result.records.map((r) => r.name);
       expect(names.slice(0, 3)).toEqual(["Alice", "Bob", "Charlie"]);
     });
 
-    it("sorts descending with - prefix", () => {
-      const result = col.find({ sort: "-score" });
+    it("sorts descending with - prefix", async () => {
+      const result = await col.find({ sort: "-score" });
       expect(result.records.map((r) => r.score)).toEqual([30, 20, 10, 5]);
     });
 
-    it("null/undefined values sort to end", () => {
-      const result = col.find({ sort: "name" });
+    it("null/undefined values sort to end", async () => {
+      const result = await col.find({ sort: "name" });
       // Record with no name should be last
       expect(result.records[result.records.length - 1]._id).toBe("4");
     });
@@ -1583,8 +1615,8 @@ describe("Collection", () => {
 
     it("duplicate _id insert overwrites", async () => {
       await col.insert({ _id: "e1", name: "Updated" });
-      expect(col.findOne("e1")?.name).toBe("Updated");
-      expect(col.findOne("e1")?._version).toBe(2);
+      expect((await col.findOne("e1"))?.name).toBe("Updated");
+      expect((await col.findOne("e1"))?._version).toBe(2);
     });
   });
 
@@ -1597,8 +1629,8 @@ describe("Collection", () => {
       const store2 = new Store<Record<string, unknown>>();
       const col2 = new Collection("test", store2);
       await col2.open(tmpDir, { checkpointThreshold: 1000 });
-      expect(col2.count()).toBe(2);
-      expect(col2.findOne("a")?.name).toBe("Alice");
+      expect(await col2.count()).toBe(2);
+      expect((await col2.findOne("a"))?.name).toBe("Alice");
       await col2.close();
     });
   });
@@ -1622,7 +1654,7 @@ describe("Collection", () => {
       ]);
       expect(results[0].action).toBe("updated");
       expect(results[1].action).toBe("inserted");
-      expect(col.findOne("u1")?.v).toBe(2);
+      expect((await col.findOne("u1"))?.v).toBe(2);
     });
 
     it("requires _id on each doc", async () => {
@@ -1641,15 +1673,15 @@ describe("Collection", () => {
       await textCol.insert({ _id: "b", title: "Payment gateway", status: "open" });
       await textCol.insert({ _id: "c", title: "Authentication bug", status: "closed" });
 
-      const result = textCol.find({ filter: { $text: "authentication", status: "open" } });
+      const result = await textCol.find({ filter: { $text: "authentication", status: "open" } });
       expect(result.records).toHaveLength(1);
       expect(result.records[0]._id).toBe("a");
 
       await textCol.close();
     });
 
-    it("$text throws without textSearch enabled", () => {
-      expect(() => col.find({ filter: { $text: "test" } })).toThrow("Text search not enabled");
+    it("$text throws without textSearch enabled", async () => {
+      await expect(col.find({ filter: { $text: "test" } })).rejects.toThrow("Text search not enabled");
     });
   });
 });
