@@ -9,8 +9,6 @@ import {
   readOffsetIndex,
   writeCompactionMeta,
   readCompactionMeta,
-  readAllFromParquet,
-  readByIds,
   getParquetMetadata,
   cleanupOldParquetFiles,
   countByColumn,
@@ -66,12 +64,12 @@ describe("Parquet compaction and reader", () => {
       });
 
       const metadata = await getParquetMetadata(backend, file.path);
-      // Should have _id, _data, status, score columns
+      // Should have _id + extracted columns (no _data — full records live in JSONL)
       const colNames = metadata.row_groups[0].columns.map(
         (c) => c.meta_data?.path_in_schema?.[0],
       );
       expect(colNames).toContain("_id");
-      expect(colNames).toContain("_data");
+      expect(colNames).not.toContain("_data");
       expect(colNames).toContain("status");
       expect(colNames).toContain("score");
     });
@@ -83,46 +81,14 @@ describe("Parquet compaction and reader", () => {
       expect(offsetIndex.size).toBe(0);
     });
 
-    it("round-trips: compact then read all", async () => {
+    it("Parquet has no _data column (full records live in JSONL)", async () => {
       const { file } = await compactToParquet(backend, generateRecords(50));
-      const records = await readAllFromParquet(backend, file.path);
-
-      expect(records.size).toBe(50);
-      expect(records.get("id-0")?.title).toBe("Record 0");
-      expect(records.get("id-49")?.title).toBe("Record 49");
-      expect(records.get("id-0")?.tags).toEqual(["even"]);
-    });
-  });
-
-  describe("readByIds", () => {
-    it("reads specific records by ID", async () => {
-      const { file, offsetIndex } = await compactToParquet(
-        backend, generateRecords(100), { rowGroupSize: 25 },
+      const metadata = await getParquetMetadata(backend, file.path);
+      const colNames = metadata.row_groups[0].columns.map(
+        (c) => c.meta_data?.path_in_schema?.[0],
       );
-
-      const results = await readByIds(backend, file.path, ["id-0", "id-50", "id-99"], offsetIndex, 25);
-      expect(results.size).toBe(3);
-      expect(results.get("id-0")?.title).toBe("Record 0");
-      expect(results.get("id-50")?.score).toBe(50);
-      expect(results.get("id-99")?.title).toBe("Record 99");
-    });
-
-    it("returns empty for nonexistent IDs", async () => {
-      const { file, offsetIndex } = await compactToParquet(backend, generateRecords(10));
-      const results = await readByIds(backend, file.path, ["nonexistent"], offsetIndex, 5000);
-      expect(results.size).toBe(0);
-    });
-
-    it("batches reads by row group", async () => {
-      // With 100 records and rowGroupSize=25, reading IDs from the same row group
-      // should only read that row group
-      const { file, offsetIndex } = await compactToParquet(
-        backend, generateRecords(100), { rowGroupSize: 25 },
-      );
-
-      // IDs 0-24 are in row group 0
-      const results = await readByIds(backend, file.path, ["id-0", "id-10", "id-24"], offsetIndex, 25);
-      expect(results.size).toBe(3);
+      expect(colNames).toContain("_id");
+      expect(colNames).not.toContain("_data");
     });
   });
 
@@ -165,19 +131,18 @@ describe("Parquet compaction and reader", () => {
 
   describe("cleanup", () => {
     it("removes old Parquet files but keeps the specified one", async () => {
-      // Create two Parquet files (delay to ensure different timestamps)
       const { file: file1 } = await compactToParquet(backend, generateRecords(10));
       await new Promise((r) => setTimeout(r, 10));
       const { file: file2 } = await compactToParquet(backend, generateRecords(20));
 
       await cleanupOldParquetFiles(backend, file2.path);
 
-      // file2 should still exist (readAll works)
-      const records = await readAllFromParquet(backend, file2.path);
-      expect(records.size).toBe(20);
+      // file2 should still exist
+      const metadata = await getParquetMetadata(backend, file2.path);
+      expect(Number(metadata.num_rows)).toBe(20);
 
       // file1 should be gone
-      await expect(readAllFromParquet(backend, file1.path)).rejects.toThrow();
+      await expect(getParquetMetadata(backend, file1.path)).rejects.toThrow();
     });
   });
 

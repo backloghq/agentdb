@@ -7,8 +7,6 @@
 import { RecordCache } from "./record-cache.js";
 import {
   compactToParquet,
-  readAllFromParquet,
-  readByIds,
   readParquetBuffer,
   countByColumn,
   scanColumn,
@@ -124,38 +122,27 @@ export class DiskStore {
 
   // --- Read operations ---
 
-  /** Get a record by ID. Checks cache → JSONL (byte seek) → Parquet (row group parse). */
+  /** Get a record by ID. Checks cache → JSONL byte seek. */
   async get(id: string): Promise<Record<string, unknown> | undefined> {
     const cached = this.cache.get(id);
     if (cached !== undefined) return cached;
 
-    if (!this.compactionMeta) return undefined;
+    if (!this.compactionMeta?.jsonlFile) return undefined;
 
-    // JSONL path: O(1) byte-range read
     const jsonlEntry = this.recordOffsetIndex.get(id);
-    if (jsonlEntry && this.compactionMeta.jsonlFile) {
-      const record = await readRecordByOffset(this.backend, this.compactionMeta.jsonlFile, jsonlEntry);
-      this.cache.set(id, record);
-      return record;
-    }
+    if (!jsonlEntry) return undefined;
 
-    // Parquet fallback (for collections compacted before JSONL support)
-    if (!this.offsetIndex.has(id)) return undefined;
-    const pqBuf = await this.getParquetBuffer();
-    const results = await readByIds(
-      this.backend, this.compactionMeta.parquetFile, [id], this.offsetIndex, this.rowGroupSize, pqBuf,
-    );
-    const record = results.get(id);
-    if (record) this.cache.set(id, record);
+    const record = await readRecordByOffset(this.backend, this.compactionMeta.jsonlFile, jsonlEntry);
+    this.cache.set(id, record);
     return record;
   }
 
   /** Check if a record exists (by offset index, no I/O). */
   has(id: string): boolean {
-    return this.cache.has(id) || this.recordOffsetIndex.has(id) || this.offsetIndex.has(id);
+    return this.cache.has(id) || this.recordOffsetIndex.has(id);
   }
 
-  /** Get multiple records by ID. Uses JSONL byte seeks (parallel), falls back to Parquet. */
+  /** Get multiple records by ID. Parallel JSONL byte-range reads. */
   async getMany(ids: string[]): Promise<Map<string, Record<string, unknown>>> {
     const results = new Map<string, Record<string, unknown>>();
     const uncached: string[] = [];
@@ -164,40 +151,18 @@ export class DiskStore {
       const cached = this.cache.get(id);
       if (cached !== undefined) {
         results.set(id, cached);
-      } else if (this.recordOffsetIndex.has(id) || this.offsetIndex.has(id)) {
+      } else if (this.recordOffsetIndex.has(id)) {
         uncached.push(id);
       }
     }
 
-    if (uncached.length > 0 && this.compactionMeta) {
-      // JSONL path: parallel byte-range reads
-      if (this.compactionMeta.jsonlFile) {
-        const entries = uncached
-          .map((id) => ({ id, entry: this.recordOffsetIndex.get(id)! }))
-          .filter((e) => e.entry);
-        if (entries.length > 0) {
-          const fromJsonl = await readRecordsByOffsets(this.backend, this.compactionMeta.jsonlFile, entries);
-          for (const [id, record] of fromJsonl) {
-            this.cache.set(id, record);
-            results.set(id, record);
-          }
-          // Remove fetched IDs from uncached list
-          const fetchedIds = new Set(fromJsonl.keys());
-          const remaining = uncached.filter((id) => !fetchedIds.has(id));
-          if (remaining.length === 0) return results;
-          // Fall through to Parquet for any remaining
-          uncached.length = 0;
-          uncached.push(...remaining);
-        }
-      }
-
-      // Parquet fallback for remaining IDs
-      if (uncached.length > 0) {
-        const pqBuf = await this.getParquetBuffer();
-        const fromParquet = await readByIds(
-          this.backend, this.compactionMeta.parquetFile, uncached, this.offsetIndex, this.rowGroupSize, pqBuf,
-        );
-        for (const [id, record] of fromParquet) {
+    if (uncached.length > 0 && this.compactionMeta?.jsonlFile) {
+      const entries = uncached
+        .map((id) => ({ id, entry: this.recordOffsetIndex.get(id)! }))
+        .filter((e) => e.entry);
+      if (entries.length > 0) {
+        const fromJsonl = await readRecordsByOffsets(this.backend, this.compactionMeta.jsonlFile, entries);
+        for (const [id, record] of fromJsonl) {
           this.cache.set(id, record);
           results.set(id, record);
         }
@@ -228,13 +193,10 @@ export class DiskStore {
     return scanColumn(this.backend, this.compactionMeta.parquetFile, field, predicate, pqBuf);
   }
 
-  /** Iterate all records (reads from JSONL if available, falls back to Parquet). */
+  /** Iterate all records from JSONL. */
   async *entries(): AsyncGenerator<[string, Record<string, unknown>]> {
-    if (!this.compactionMeta) return;
-    // Prefer JSONL (lighter than Parquet for full reads)
-    const all = this.compactionMeta.jsonlFile
-      ? await readAllFromJsonl(this.backend, this.compactionMeta.jsonlFile)
-      : await readAllFromParquet(this.backend, this.compactionMeta.parquetFile, await this.getParquetBuffer());
+    if (!this.compactionMeta?.jsonlFile) return;
+    const all = await readAllFromJsonl(this.backend, this.compactionMeta.jsonlFile);
     for (const [id, record] of all) {
       this.cache.set(id, record);
       yield [id, record];

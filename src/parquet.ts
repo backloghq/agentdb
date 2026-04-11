@@ -50,13 +50,11 @@ export async function compactToParquet(
 
   // Collect all records (needed for columnar layout)
   const ids: string[] = [];
-  const dataJsons: string[] = [];
   const extracted: Map<string, unknown[]> = new Map();
   for (const col of extractCols) extracted.set(col, []);
 
   for await (const [id, record] of records) {
     ids.push(id);
-    dataJsons.push(JSON.stringify(record));
     for (const col of extractCols) {
       extracted.get(col)!.push(record[col] ?? null);
     }
@@ -67,7 +65,6 @@ export async function compactToParquet(
     const relativePath = `data/${filename}`;
     const columnData = [
       { name: "_id", data: [] as string[] },
-      { name: "_data", data: [] as string[] },
     ];
     const buffer = parquetWriteBuffer({ columnData });
     await backend.writeBlob(relativePath, Buffer.from(buffer));
@@ -78,10 +75,9 @@ export async function compactToParquet(
     };
   }
 
-  // Build column data
+  // Build column data — _id + extracted columns only (no _data; full records live in JSONL)
   const columnData: Array<{ name: string; data: unknown[] }> = [
     { name: "_id", data: ids },
-    { name: "_data", data: dataJsons },
   ];
   for (const [col, values] of extracted) {
     const nonNull = values.filter((v) => v !== null && v !== undefined);
