@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Persistent array index serialization** — `ArrayIndex.toJSON()`/`fromJSON()` for disk persistence.
 - **`hyparquet` + `hyparquet-writer`** — pure JS Parquet read/write for disk-backed storage.
 - **opslog v0.7.0** — `skipLoad`, `streamSnapshot()`, `getWalOps()`, `getManifest()`, JSONL snapshots.
+- **Disk-backed storage mode** — `storageMode: "disk"` compacts collections to Parquet on close, persists indexes to disk, loads both on next open. Configurable globally or per-collection via `defineSchema({ storageMode })`.
+- **`DiskStore`** — disk-backed record storage with LRU cache, offset index, Parquet compaction lifecycle, persistent index save/load.
+- **Parquet compaction** — `compactToParquet()` writes records as Parquet files via hyparquet-writer with configurable row groups and extracted columns for skip-scanning.
+- **Parquet reader** — `readByIds()` for point lookups batched by row group, `readAllFromParquet()` for full reads, `getParquetMetadata()` for row group stats.
+- **`storageMode: "auto"`** — auto-detect disk mode when collection exceeds `diskThreshold` records (default: 10K).
+- **`cacheSize` / `rowGroupSize` options** — configurable LRU cache size and Parquet row group size.
 
 ## [1.1.1] - 2026-04-11
 

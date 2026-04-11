@@ -143,6 +143,36 @@ All 30 tools exposed as MCP tools (32 on HTTP with db_subscribe/db_unsubscribe).
 }
 ```
 
+## Disk-Backed Storage
+
+For large collections that exceed available RAM, enable disk-backed mode. Collections are compacted to Parquet files with persistent indexes.
+
+```typescript
+// Global: all collections use disk mode
+const db = new AgentDB("./data", {
+  storageMode: "disk",   // "memory" (default) | "disk" | "auto"
+  cacheSize: 10_000,     // LRU cache size (records)
+  rowGroupSize: 5000,    // Parquet row group size
+});
+
+// Per-collection via schema
+const events = await db.collection(defineSchema({
+  name: "events",
+  storageMode: "disk",
+  fields: { ... },
+  indexes: ["type", "timestamp"],
+  arrayIndexes: ["tags"],
+}));
+
+// Auto mode: switches to disk when collection exceeds threshold
+const db = new AgentDB("./data", {
+  storageMode: "auto",
+  diskThreshold: 10_000,  // default
+});
+```
+
+Disk mode compacts to Parquet on close, persists B-tree/array/text indexes, and loads both on next open. Records stay in memory during the session — Parquet provides faster open times and persistent index state.
+
 ## S3 Backend
 
 Store data in Amazon S3 instead of the local filesystem. Zero code changes — just configure via CLI flags or environment variables.
