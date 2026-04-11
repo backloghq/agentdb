@@ -185,4 +185,58 @@ describe("Disk-backed mode", () => {
       expect(titles).toEqual(["Existing", "Fresh"]);
     });
   });
+
+  describe("auto mode", () => {
+    it("stays in memory when under threshold", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "auto", diskThreshold: 100 });
+      await db.init();
+
+      const col = await db.collection("auto-small");
+      for (let i = 0; i < 10; i++) {
+        await col.insert({ title: `Record ${i}` });
+      }
+
+      // Under threshold → memory mode, no DiskStore
+      expect(col.getDiskStore()).toBeNull();
+      expect(await col.count()).toBe(10);
+    });
+
+    it("switches to disk mode when over threshold on reopen", async () => {
+      // Session 1: insert records above threshold, memory mode (first open is always under)
+      db = new AgentDB(tmpDir, { storageMode: "auto", diskThreshold: 5 });
+      await db.init();
+      const col1 = await db.collection("auto-grow");
+      for (let i = 0; i < 10; i++) {
+        await col1.insert({ title: `Record ${i}` });
+      }
+      await db.close();
+
+      // Session 2: reopen — auto mode detects 10 records > threshold 5, switches to disk
+      db = new AgentDB(tmpDir, { storageMode: "auto", diskThreshold: 5 });
+      await db.init();
+      const col2 = await db.collection("auto-grow");
+
+      expect(col2.getDiskStore()).not.toBeNull();
+      expect(await col2.count()).toBe(10);
+
+      // Verify all records accessible
+      const all = await col2.find({ limit: 100 });
+      expect(all.records).toHaveLength(10);
+    });
+
+    it("per-collection schema overrides global auto mode", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "auto", diskThreshold: 1000 });
+      await db.init();
+
+      // Force disk mode on this collection regardless of threshold
+      const col = await db.collection(defineSchema({
+        name: "forced-disk",
+        fields: { title: { type: "string" } },
+        storageMode: "disk",
+      }));
+
+      await col.insert({ title: "Test" });
+      expect(col.getDiskStore()).not.toBeNull();
+    });
+  });
 });
