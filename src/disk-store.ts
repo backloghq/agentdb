@@ -52,6 +52,10 @@ export class DiskStore {
   private _dirty = false;
   /** Cached Parquet file buffer — read once, reused for all queries. Cleared on compaction. */
   private _parquetBuffer: ArrayBuffer | null = null;
+  /** Pending index files for lazy loading — loaded on first query. */
+  private _pendingIndexFiles: Map<string, string> = new Map(); // field → filename
+  private _indexManager: IndexManager | null = null;
+  private _textIndex: TextIndex | null = null;
 
   constructor(backend: StorageBackend, options?: DiskStoreOptions) {
     this.backend = backend;
@@ -303,47 +307,66 @@ export class DiskStore {
     }
   }
 
-  /** Load persisted indexes from disk. Returns true if indexes were loaded. */
+  /** Discover persisted index files for lazy loading. Actual deserialization deferred to first query. */
   async loadIndexes(indexManager: IndexManager, textIndex?: TextIndex | null): Promise<boolean> {
-    let loaded = false;
+    this._indexManager = indexManager;
+    this._textIndex = textIndex ?? null;
+    let found = false;
 
     try {
       const files = await this.backend.listBlobs("indexes");
 
       for (const f of files) {
-        // Size check — read blob and check length
-        let content: Buffer;
-        try {
-          content = await this.backend.readBlob(`indexes/${f}`);
-        } catch {
-          continue;
-        }
-        if (content.length > DiskStore.MAX_INDEX_FILE_SIZE) {
-          console.warn(`agentdb: skipping oversized index file ${f} (${content.length} bytes)`);
-          continue;
-        }
         if (f.startsWith("btree-") && f.endsWith(".json")) {
           const field = f.slice(6, -5);
           if (!this.shouldUseInMemoryIndex(field)) continue;
-          const data = JSON.parse(content.toString("utf-8"));
-          indexManager.loadBTreeIndex(data);
-          loaded = true;
+          this._pendingIndexFiles.set(`btree:${field}`, f);
+          found = true;
         }
         if (f.startsWith("array-") && f.endsWith(".json")) {
-          const data = JSON.parse(content.toString("utf-8"));
-          indexManager.loadArrayIndex(data);
-          loaded = true;
+          this._pendingIndexFiles.set(`array:${f.slice(6, -5)}`, f);
+          found = true;
         }
-        if (f === "text-index.json" && textIndex) {
-          const data = JSON.parse(content.toString("utf-8"));
-          textIndex.loadFromJSON(data);
-          loaded = true;
+        if (f === "text-index.json") {
+          this._pendingIndexFiles.set("text", f);
+          found = true;
         }
       }
     } catch {
       // indexes dir doesn't exist yet
     }
 
-    return loaded;
+    return found;
+  }
+
+  /** Ensure all pending indexes are loaded. Called lazily before first query that needs indexes. */
+  async ensureIndexesLoaded(): Promise<void> {
+    if (this._pendingIndexFiles.size === 0) return;
+    if (!this._indexManager) return;
+
+    for (const [key, filename] of this._pendingIndexFiles) {
+      let content: Buffer;
+      try {
+        content = await this.backend.readBlob(`indexes/${filename}`);
+      } catch {
+        continue;
+      }
+      if (content.length > DiskStore.MAX_INDEX_FILE_SIZE) {
+        console.warn(`agentdb: skipping oversized index file ${filename} (${content.length} bytes)`);
+        continue;
+      }
+      if (key.startsWith("btree:")) {
+        const data = JSON.parse(content.toString("utf-8"));
+        this._indexManager.loadBTreeIndex(data);
+      } else if (key.startsWith("array:")) {
+        const data = JSON.parse(content.toString("utf-8"));
+        this._indexManager.loadArrayIndex(data);
+      } else if (key === "text" && this._textIndex) {
+        const data = JSON.parse(content.toString("utf-8"));
+        this._textIndex.loadFromJSON(data);
+      }
+    }
+
+    this._pendingIndexFiles.clear();
   }
 }

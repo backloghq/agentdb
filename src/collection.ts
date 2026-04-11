@@ -448,6 +448,9 @@ export class Collection {
       textMatchIds = new Set(this.textIdx.search(textQuery));
     }
 
+    // Lazy-load persisted indexes on first query (deferred from open for fast cold start)
+    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
+
     const candidateIds = this.indexedCandidates(attrFilter);
     let records: StoredRecord[];
 
@@ -599,6 +602,7 @@ export class Collection {
    * Count records matching a filter.
    */
   async count(filter?: Filter): Promise<number> {
+    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
     const candidateIds = this.indexedCandidates(filter);
 
     // Fast path: if index covers the entire filter and no TTL records exist,
@@ -1029,6 +1033,7 @@ export class Collection {
     if (!this.textIdx) {
       throw new Error("Full-text search not enabled. Set textSearch: true in collection options.");
     }
+    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
     const matchIds = this.textIdx.search(query);
     const allAccessor = this.allCleanRecords();
     const limit = opts?.limit ?? 50;
