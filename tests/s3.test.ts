@@ -254,4 +254,57 @@ describe.skipIf(!runS3)("S3 backend benchmarks", () => {
     await col.close();
     console.log("  Blob storage on S3: write, read, list, delete — all passed");
   }, 30000);
+
+  it("disk mode: compact to Parquet on S3, reopen and read", async () => {
+    const prefix = `${PREFIX}/disk-mode`;
+
+    // Session 1: insert records, close (triggers Parquet compaction to S3)
+    const backend1 = new S3Backend({ bucket: BUCKET, prefix, client });
+    const store1 = new Store<Record<string, unknown>>();
+    const col1 = new Collection("disk-s3", store1);
+    await col1.open("s3", { checkpointThreshold: 5000, backend: backend1, skipLoad: true });
+
+    // Set up DiskStore
+    const { DiskStore } = await import("../src/disk-store.js");
+    const ds1 = new DiskStore(backend1, { rowGroupSize: 50, extractColumns: ["role"] });
+    await ds1.load();
+    col1.setDiskStore(ds1);
+
+    for (let i = 0; i < 20; i++) {
+      await col1.insert(randomRecord(i));
+    }
+    expect(await col1.count()).toBe(20);
+
+    // Compact to Parquet on S3
+    const allRecords = await col1.findAll();
+    await ds1.compact(allRecords.map((r) => [r._id as string, r]));
+    await ds1.saveIndexes(col1.getIndexManager(), col1.getTextIndex());
+    await col1.close();
+    console.log("  Session 1: 20 records compacted to Parquet on S3");
+
+    // Session 2: reopen with skipLoad — read from S3 Parquet
+    const backend2 = new S3Backend({ bucket: BUCKET, prefix, client });
+    const store2 = new Store<Record<string, unknown>>();
+    const col2 = new Collection("disk-s3", store2);
+    await col2.open("s3", { checkpointThreshold: 5000, backend: backend2, skipLoad: true });
+
+    const ds2 = new DiskStore(backend2, { rowGroupSize: 50, extractColumns: ["role"] });
+    await ds2.load();
+    col2.setDiskStore(ds2);
+
+    expect(ds2.hasParquetData).toBe(true);
+    expect(ds2.recordCount).toBe(20);
+
+    // findOne from S3 Parquet
+    const record = await col2.findOne("rec-0");
+    expect(record).toBeTruthy();
+    expect(record?.name).toBe("User 0");
+
+    // find returns all records
+    const all = await col2.find({ limit: 100 });
+    expect(all.total).toBe(20);
+
+    await col2.close();
+    console.log("  Session 2: 20 records read from S3 Parquet — disk mode works on S3");
+  }, 60000);
 });
