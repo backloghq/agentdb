@@ -290,4 +290,44 @@ describe("Disk-backed mode", () => {
       await db.close();
     });
   });
+
+  describe("column-only count", () => {
+    it("count with extracted column avoids full record materialization", async () => {
+      db = new AgentDB(tmpDir);
+      await db.init();
+
+      const col = await db.collection(defineSchema({
+        name: "col-count",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+        },
+        indexes: ["status"],
+        storageMode: "disk",
+      }));
+
+      await col.insert({ title: "A" });
+      await col.insert({ title: "B" });
+      await col.insert({ title: "C", status: "closed" });
+      await db.close();
+
+      // Reopen — records in Parquet with "status" as extracted column
+      db = new AgentDB(tmpDir);
+      await db.init();
+      const col2 = await db.collection(defineSchema({
+        name: "col-count",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+        },
+        indexes: ["status"],
+        storageMode: "disk",
+      }));
+
+      // count with extracted column — should use column-only scan
+      expect(await col2.count({ status: "open" })).toBe(2);
+      expect(await col2.count({ status: "closed" })).toBe(1);
+      expect(await col2.count()).toBe(3);
+    });
+  });
 });

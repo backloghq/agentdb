@@ -15,6 +15,8 @@ import {
   compactToParquet,
   readAllFromParquet,
   readByIds,
+  countByColumn,
+  scanColumn,
   writeOffsetIndex,
   readOffsetIndex,
   writeCompactionMeta,
@@ -129,6 +131,26 @@ export class DiskStore {
     }
 
     return results;
+  }
+
+  /**
+   * Count records matching a simple equality on an extracted column.
+   * Reads only the target column — no _data deserialization.
+   * Returns null if column not available (fall back to full scan).
+   */
+  async countByColumn(field: string, value: unknown): Promise<number | null> {
+    if (!this.compactionMeta) return null;
+    return countByColumn(this.dir, this.compactionMeta.parquetFile, field, value);
+  }
+
+  /**
+   * Scan an extracted column and return matching _ids.
+   * Reads only _id + target column — no _data deserialization.
+   * Returns null if column not available.
+   */
+  async scanColumn(field: string, predicate: (value: unknown) => boolean): Promise<string[] | null> {
+    if (!this.compactionMeta) return null;
+    return scanColumn(this.dir, this.compactionMeta.parquetFile, field, predicate);
   }
 
   /** Iterate all records (streams from Parquet). */

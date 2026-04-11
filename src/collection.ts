@@ -591,7 +591,25 @@ export class Collection {
       if (!filter) {
         return this._diskStore.recordCount + this.store.count();
       }
-      // Disk mode: indexed count already handled above, unindexed falls through to find
+      // Column-only scan: simple equality on an extracted column
+      if (filter && typeof filter === "object" && !Array.isArray(filter)) {
+        const keys = Object.keys(filter).filter((k) => !k.startsWith("$") && !k.startsWith("+"));
+        if (keys.length === 1) {
+          const val = filter[keys[0]];
+          if (val !== null && val !== undefined && typeof val !== "object") {
+            const colCount = await this._diskStore.countByColumn(keys[0], val);
+            if (colCount !== null) {
+              // Also count matching records in Map (session writes not yet in Parquet)
+              let mapCount = 0;
+              for (const [, record] of this.store.entries()) {
+                if ((record as Record<string, unknown>)[keys[0]] === val) mapCount++;
+              }
+              return colCount + mapCount;
+            }
+          }
+        }
+      }
+      // Disk mode: unindexed falls through to find
       const result = await this.find({ filter, limit: 100_000 });
       return result.total;
     }

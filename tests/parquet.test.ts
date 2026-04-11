@@ -12,6 +12,8 @@ import {
   readByIds,
   getParquetMetadata,
   cleanupOldParquetFiles,
+  countByColumn,
+  scanColumn,
 } from "../src/parquet.js";
 
 describe("Parquet compaction and reader", () => {
@@ -194,6 +196,51 @@ describe("Parquet compaction and reader", () => {
       const stats = scoreCol!.meta_data!.statistics;
       expect(stats?.min_value).toBe(0);
       expect(stats?.max_value).toBe(24);
+    });
+  });
+
+  describe("column-only scan", () => {
+    it("countByColumn counts matches without reading _data", async () => {
+      const { file } = await compactToParquet(tmpDir, generateRecords(100), {
+        extractColumns: ["status"],
+      });
+
+      // status is "open" for i % 3 === 0, "closed" otherwise
+      const openCount = await countByColumn(tmpDir, file.path, "status", "open");
+      expect(openCount).toBe(34); // 0,3,6,...,99 → 34 records
+
+      const closedCount = await countByColumn(tmpDir, file.path, "status", "closed");
+      expect(closedCount).toBe(66);
+    });
+
+    it("countByColumn returns null for non-extracted column", async () => {
+      const { file } = await compactToParquet(tmpDir, generateRecords(50), {
+        extractColumns: ["status"],
+      });
+
+      const result = await countByColumn(tmpDir, file.path, "nonexistent", "value");
+      expect(result).toBeNull();
+    });
+
+    it("scanColumn returns matching IDs", async () => {
+      const { file } = await compactToParquet(tmpDir, generateRecords(50), {
+        extractColumns: ["status"],
+      });
+
+      const openIds = await scanColumn(tmpDir, file.path, "status", (v) => v === "open");
+      expect(openIds).not.toBeNull();
+      expect(openIds!.length).toBe(17); // 0,3,6,...,48
+
+      // Verify IDs are correct
+      expect(openIds).toContain("id-0");
+      expect(openIds).toContain("id-3");
+      expect(openIds).not.toContain("id-1");
+    });
+
+    it("scanColumn returns null for non-extracted column", async () => {
+      const { file } = await compactToParquet(tmpDir, generateRecords(10));
+      const result = await scanColumn(tmpDir, file.path, "title", () => true);
+      expect(result).toBeNull();
     });
   });
 });

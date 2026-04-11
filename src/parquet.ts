@@ -252,6 +252,66 @@ export async function getParquetMetadata(dir: string, parquetPath: string): Prom
 }
 
 /**
+ * Count records matching a simple equality filter by reading only the target column.
+ * Skips _data deserialization entirely — reads ~1MB instead of ~50MB at 100K records.
+ * Returns null if the column doesn't exist in the Parquet file (not an extracted column).
+ */
+export async function countByColumn(
+  dir: string,
+  parquetPath: string,
+  field: string,
+  value: unknown,
+): Promise<number | null> {
+  const filePath = join(dir, parquetPath);
+  const file = await asyncBufferFromFile(filePath);
+
+  // Check if the column exists in the Parquet schema
+  const buf = await readFile(filePath);
+  const metadata = parquetMetadata(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+  const columns = metadata.row_groups[0]?.columns.map(
+    (c) => c.meta_data?.path_in_schema?.[0],
+  ) ?? [];
+  if (!columns.includes(field)) return null;
+
+  // Read only the target column
+  const rows = await parquetReadObjects({ file, columns: [field] }) as Array<Record<string, unknown>>;
+  let count = 0;
+  for (const row of rows) {
+    if (row[field] === value) count++;
+  }
+  return count;
+}
+
+/**
+ * Read only specific columns from Parquet (no _data deserialization).
+ * For find() with extracted columns — scan column, collect matching _ids, then fetch full records only for matches.
+ * Returns null if the column doesn't exist.
+ */
+export async function scanColumn(
+  dir: string,
+  parquetPath: string,
+  field: string,
+  predicate: (value: unknown) => boolean,
+): Promise<string[] | null> {
+  const filePath = join(dir, parquetPath);
+  const file = await asyncBufferFromFile(filePath);
+
+  const buf = await readFile(filePath);
+  const metadata = parquetMetadata(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+  const columns = metadata.row_groups[0]?.columns.map(
+    (c) => c.meta_data?.path_in_schema?.[0],
+  ) ?? [];
+  if (!columns.includes(field)) return null;
+
+  const rows = await parquetReadObjects({ file, columns: ["_id", field] }) as Array<Record<string, unknown>>;
+  const matchingIds: string[] = [];
+  for (const row of rows) {
+    if (predicate(row[field])) matchingIds.push(row._id as string);
+  }
+  return matchingIds;
+}
+
+/**
  * Clean up old Parquet data files (keeps only the specified file).
  */
 export async function cleanupOldParquetFiles(dir: string, keepFile: string): Promise<void> {

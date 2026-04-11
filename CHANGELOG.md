@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Parquet path traversal** — `readCompactionMeta()` rejects `..` and absolute paths in `parquetFile` field.
 - **Full scan warning** — `console.warn` emitted when disk-mode find() does unindexed scan on >10K records.
 
+### Performance
+- **Column-only Parquet scan** — `count()` with a simple equality filter on an extracted column reads only that column from Parquet, skipping `_data` deserialization entirely. ~1MB vs ~50MB at 100K records.
+- **Skip WAL replay on fresh Parquet** — disk mode open skips WAL replay when no ops exist since last compaction.
+- **LRU cache default reduced** — 1K records (from 10K) to enforce tighter memory budgets in disk mode.
+
 ## [1.1.1] - 2026-04-11
 
 ### Fixed
