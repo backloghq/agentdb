@@ -59,6 +59,8 @@ export interface SchemaDefinition {
   indexes?: string[];
   /** Composite indexes to create on open. */
   compositeIndexes?: string[][];
+  /** Array-element indexes for $contains queries (auto-created on open). */
+  arrayIndexes?: string[];
   /** Computed fields — calculated on read, not stored. */
   computed?: Record<string, ComputedFn>;
   /** Virtual filter predicates — domain-specific query conditions. */
@@ -78,6 +80,7 @@ export interface CollectionSchema {
   collectionOptions: CollectionOptions;
   indexes: string[];
   compositeIndexes: string[][];
+  arrayIndexes: string[];
   hooks: SchemaHooks;
   /** Apply defaults to a record (called before validation). */
   applyDefaults: (record: Record<string, unknown>) => Record<string, unknown>;
@@ -132,6 +135,7 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     collectionOptions,
     indexes: def.indexes ?? [],
     compositeIndexes: def.compositeIndexes ?? [],
+    arrayIndexes: def.arrayIndexes ?? [],
     hooks: def.hooks ?? {},
     applyDefaults: defaults ?? ((r) => r),
     autoIncrementFields,

@@ -103,4 +103,32 @@ export class TextIndex {
     this.index.clear();
     this.docTerms.clear();
   }
+
+  /** Serialize to JSON for persistence. */
+  toJSON(): { version: number; terms: Record<string, string[]>; docCount: number } {
+    const terms: Record<string, string[]> = {};
+    for (const [term, ids] of this.index) {
+      terms[term] = Array.from(ids).sort();
+    }
+    return { version: 1, terms, docCount: this.docTerms.size };
+  }
+
+  /** Deserialize from JSON. */
+  static fromJSON(data: { terms: Record<string, string[]> }): TextIndex {
+    const idx = new TextIndex();
+    for (const [term, ids] of Object.entries(data.terms)) {
+      const idSet = new Set(ids);
+      idx.index.set(term, idSet);
+      // Rebuild docTerms from inverted index
+      for (const id of ids) {
+        let terms = idx.docTerms.get(id);
+        if (!terms) {
+          terms = new Set();
+          idx.docTerms.set(id, terms);
+        }
+        terms.add(term);
+      }
+    }
+    return idx;
+  }
 }

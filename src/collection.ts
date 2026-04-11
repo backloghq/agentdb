@@ -970,6 +970,9 @@ export class Collection {
   createCompositeIndex(fields: string[]): void { this.indexes.createCompositeIndex(fields, this.store.entries()); }
   dropCompositeIndex(fields: string[]): boolean { return this.indexes.dropCompositeIndex(fields); }
   listCompositeIndexes(): string[][] { return this.indexes.listCompositeIndexes(); }
+  createArrayIndex(field: string): void { this.indexes.createArrayIndex(field, this.store.entries()); }
+  dropArrayIndex(field: string): boolean { return this.indexes.dropArrayIndex(field); }
+  listArrayIndexes(): string[] { return this.indexes.listArrayIndexes(); }
   createBloomFilter(field: string, expectedItems = 10000): void { this.indexes.createBloomFilter(field, this.store.entries(), expectedItems); }
   mightHave(field: string, value: string): boolean { return this.indexes.mightHave(field, value); }
   suggestIndexes(threshold = 100): Array<{ field: string; count: number }> { return this.indexes.suggestIndexes(threshold); }

@@ -575,4 +575,51 @@ describe("defineSchema", () => {
       expect(excluded.records[0].title).toBe("Feature");
     });
   });
+
+  describe("array indexes", () => {
+    it("$contains uses array index when available", async () => {
+      const col = await db.collection(defineSchema({
+        name: "array-idx-test",
+        fields: {
+          title: { type: "string", required: true },
+          tags: { type: "string[]" },
+        },
+        arrayIndexes: ["tags"],
+      }));
+
+      await col.insert({ title: "Bug report", tags: ["bug", "urgent"] });
+      await col.insert({ title: "Feature req", tags: ["feature"] });
+      await col.insert({ title: "Bug fix", tags: ["bug", "fixed"] });
+
+      const results = col.find({ filter: { tags: { $contains: "bug" } } });
+      expect(results.records).toHaveLength(2);
+      expect(results.records.map((r) => r.title).sort()).toEqual(["Bug fix", "Bug report"]);
+
+      // Array index should be created
+      expect(col.listArrayIndexes()).toContain("tags");
+    });
+
+    it("array index updates on insert/update/delete", async () => {
+      const col = await db.collection(defineSchema({
+        name: "array-idx-update",
+        fields: {
+          title: { type: "string", required: true },
+          tags: { type: "string[]" },
+        },
+        arrayIndexes: ["tags"],
+      }));
+
+      const id = await col.insert({ title: "Test", tags: ["alpha"] });
+      expect(col.find({ filter: { tags: { $contains: "alpha" } } }).records).toHaveLength(1);
+
+      // Update tags
+      await col.update({ _id: id }, { $set: { tags: ["beta"] } });
+      expect(col.find({ filter: { tags: { $contains: "alpha" } } }).records).toHaveLength(0);
+      expect(col.find({ filter: { tags: { $contains: "beta" } } }).records).toHaveLength(1);
+
+      // Delete
+      await col.remove({ _id: id });
+      expect(col.find({ filter: { tags: { $contains: "beta" } } }).records).toHaveLength(0);
+    });
+  });
 });

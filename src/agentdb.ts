@@ -207,6 +207,7 @@ export class AgentDB {
     if (schema) {
       for (const field of schema.indexes) col.createIndex(field);
       for (const fields of schema.compositeIndexes) col.createCompositeIndex(fields);
+      for (const field of schema.arrayIndexes) col.createArrayIndex(field);
       // Initialize auto-increment counters from existing records (sorted desc, limit 1)
       if (schema.autoIncrementFields.length > 0) {
         for (const field of schema.autoIncrementFields) {

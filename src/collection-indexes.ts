@@ -4,6 +4,7 @@
  */
 import { BTreeIndex, QueryFrequencyTracker } from "./btree.js";
 import { BloomFilter } from "./bloom.js";
+import { ArrayIndex } from "./array-index.js";
 import { getNestedValue } from "./filter.js";
 import { parseCompactFilter } from "./compact-filter.js";
 import {
@@ -14,6 +15,7 @@ import {
 export class IndexManager {
   private btreeIndexes = new Map<string, BTreeIndex>();
   private compositeIndexes = new Map<string, { fields: string[]; idx: BTreeIndex }>();
+  private arrayIndexes = new Map<string, ArrayIndex>();
   private bloomFilters = new Map<string, BloomFilter>();
   private queryTracker = new QueryFrequencyTracker();
 
@@ -37,6 +39,31 @@ export class IndexManager {
 
   listIndexes(): string[] {
     return [...this.btreeIndexes.keys()];
+  }
+
+  // --- Array indexes ---
+
+  createArrayIndex(field: string, entries: Iterable<[string, StoredRecord]>): void {
+    if (this.arrayIndexes.has(field)) return;
+    const idx = new ArrayIndex(field);
+    for (const [id, record] of entries) {
+      if (isExpired(record)) continue;
+      const clean = stripMeta(record);
+      idx.add(id, getNestedValue(clean, field));
+    }
+    this.arrayIndexes.set(field, idx);
+  }
+
+  dropArrayIndex(field: string): boolean {
+    return this.arrayIndexes.delete(field);
+  }
+
+  listArrayIndexes(): string[] {
+    return [...this.arrayIndexes.keys()];
+  }
+
+  getArrayIndex(field: string): ArrayIndex | undefined {
+    return this.arrayIndexes.get(field);
   }
 
   createCompositeIndex(fields: string[], entries: Iterable<[string, StoredRecord]>): void {
@@ -86,7 +113,7 @@ export class IndexManager {
 
   /** Update all indexes for a record change. Call after every insert/update/delete. */
   updateIndexes(id: string, oldRecord: StoredRecord | undefined, newRecord: StoredRecord | undefined): void {
-    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0) return;
+    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0 && this.arrayIndexes.size === 0) return;
     const oldClean = oldRecord ? stripMeta(oldRecord) : undefined;
     const newClean = newRecord && !isExpired(newRecord) ? stripMeta(newRecord) : undefined;
     for (const [field, idx] of this.btreeIndexes) {
@@ -107,13 +134,19 @@ export class IndexManager {
         idx.add(compositeKey(fields.map((f) => getNestedValue(newClean, f))), id);
       }
     }
+    for (const [field, idx] of this.arrayIndexes) {
+      const oldVal = oldClean ? getNestedValue(oldClean, field) : undefined;
+      const newVal = newClean ? getNestedValue(newClean, field) : undefined;
+      idx.update(id, oldVal, newVal);
+    }
   }
 
   /** Rebuild all indexes from scratch. Single pass over all records. */
   rebuildAll(entries: Iterable<[string, StoredRecord]>): void {
-    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0) return;
+    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0 && this.arrayIndexes.size === 0) return;
     for (const [, idx] of this.btreeIndexes) idx.clear();
     for (const [, { idx }] of this.compositeIndexes) idx.clear();
+    for (const [, idx] of this.arrayIndexes) idx.clear();
     for (const [id, record] of entries) {
       if (isExpired(record)) continue;
       const clean = stripMeta(record);
@@ -123,6 +156,9 @@ export class IndexManager {
       }
       for (const [, { fields, idx }] of this.compositeIndexes) {
         idx.add(compositeKey(fields.map((f) => getNestedValue(clean, f))), id);
+      }
+      for (const [field, idx] of this.arrayIndexes) {
+        idx.add(id, getNestedValue(clean, field));
       }
     }
   }
@@ -147,6 +183,12 @@ export class IndexManager {
         idx.removeById(id);
         if (clean) {
           idx.add(compositeKey(fields.map((f) => getNestedValue(clean, f))), id);
+        }
+      }
+      for (const [field, idx] of this.arrayIndexes) {
+        idx.removeById(id);
+        if (clean) {
+          idx.add(id, getNestedValue(clean, field));
         }
       }
     }
@@ -175,7 +217,7 @@ export class IndexManager {
    * Returns a Set of candidate IDs or null for full scan.
    */
   indexedCandidates(filter: Filter): Set<string> | null {
-    if (!filter || (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0)) return null;
+    if (!filter || (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0 && this.arrayIndexes.size === 0)) return null;
 
     let filterObj: Record<string, unknown>;
     if (typeof filter === "string") {
@@ -187,6 +229,19 @@ export class IndexManager {
     // Try composite indexes first (more selective)
     const compositeResult = this.compositeIndexedCandidates(filterObj);
     if (compositeResult) return compositeResult;
+
+    // Check array indexes for $contains
+    for (const [key, value] of Object.entries(filterObj)) {
+      if (key.startsWith("$") || key.startsWith("+")) continue;
+      const arrIdx = this.arrayIndexes.get(key);
+      if (!arrIdx) continue;
+      if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+        const ops = value as Record<string, unknown>;
+        if ("$contains" in ops) {
+          return new Set(arrIdx.lookup(String(ops.$contains)));
+        }
+      }
+    }
 
     // Fall back to single-field indexes
     for (const [key, value] of Object.entries(filterObj)) {
@@ -290,5 +345,27 @@ export class IndexManager {
     }
 
     return null;
+  }
+
+  // --- Persistence ---
+
+  /** Serialize all indexes to JSON objects for disk persistence. */
+  serializeIndexes(): {
+    btree: Array<{ field: string; data: ReturnType<BTreeIndex["toJSON"]> }>;
+    array: Array<{ field: string; data: ReturnType<ArrayIndex["toJSON"]> }>;
+  } {
+    const btree = [...this.btreeIndexes.entries()].map(([field, idx]) => ({ field, data: idx.toJSON() }));
+    const array = [...this.arrayIndexes.entries()].map(([field, idx]) => ({ field, data: idx.toJSON() }));
+    return { btree, array };
+  }
+
+  /** Load B-tree indexes from serialized data. */
+  loadBTreeIndex(data: ReturnType<BTreeIndex["toJSON"]>): void {
+    this.btreeIndexes.set(data.field, BTreeIndex.fromJSON(data));
+  }
+
+  /** Load array index from serialized data. */
+  loadArrayIndex(data: ReturnType<ArrayIndex["toJSON"]>): void {
+    this.arrayIndexes.set(data.field, ArrayIndex.fromJSON(data));
   }
 }
