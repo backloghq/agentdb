@@ -247,7 +247,7 @@ describe("Parquet compaction and reader", () => {
       expect(all.size).toBe(3);
     });
 
-    it("offset index persistence round-trip", async () => {
+    it("offset index binary round-trip", async () => {
       const { writeRecordStore, writeRecordOffsetIndex, readRecordOffsetIndex } = await import("../src/disk-io.js");
 
       const records: Array<[string, Record<string, unknown>]> = [
@@ -261,6 +261,42 @@ describe("Parquet compaction and reader", () => {
       expect(loaded.size).toBe(2);
       expect(loaded.get("a")).toEqual(offsetIndex.get("a"));
       expect(loaded.get("b")).toEqual(offsetIndex.get("b"));
+    });
+
+    it("binary offset index handles variable-length IDs", async () => {
+      const { writeRecordOffsetIndex, readRecordOffsetIndex } = await import("../src/disk-io.js");
+
+      const offsetIndex = new Map([
+        ["short", { offset: 0, length: 100 }],
+        ["a-much-longer-custom-id-string", { offset: 101, length: 200 }],
+        ["x", { offset: 302, length: 50 }],
+      ]);
+      await writeRecordOffsetIndex(backend, offsetIndex);
+
+      const loaded = await readRecordOffsetIndex(backend);
+      expect(loaded.size).toBe(3);
+      expect(loaded.get("short")).toEqual({ offset: 0, length: 100 });
+      expect(loaded.get("a-much-longer-custom-id-string")).toEqual({ offset: 101, length: 200 });
+      expect(loaded.get("x")).toEqual({ offset: 302, length: 50 });
+    });
+
+    it("binary offset index handles large offsets (uint48)", async () => {
+      const { writeRecordOffsetIndex, readRecordOffsetIndex } = await import("../src/disk-io.js");
+
+      const largeOffset = 500_000_000_000; // 500GB — beyond uint32 range
+      const offsetIndex = new Map([
+        ["big", { offset: largeOffset, length: 1000 }],
+      ]);
+      await writeRecordOffsetIndex(backend, offsetIndex);
+
+      const loaded = await readRecordOffsetIndex(backend);
+      expect(loaded.get("big")?.offset).toBe(largeOffset);
+    });
+
+    it("binary offset index returns empty for missing file", async () => {
+      const { readRecordOffsetIndex } = await import("../src/disk-io.js");
+      const loaded = await readRecordOffsetIndex(backend);
+      expect(loaded.size).toBe(0);
     });
   });
 });
