@@ -291,6 +291,98 @@ describe("Disk-backed mode", () => {
     });
   });
 
+  describe("hybrid index — cardinality-based", () => {
+    it("skips in-memory index for high-cardinality fields", async () => {
+      db = new AgentDB(tmpDir);
+      await db.init();
+
+      // Create collection with a high-cardinality field (unique per record)
+      const col = await db.collection(defineSchema({
+        name: "cardinality-test",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+          uniqueId: { type: "string" },
+        },
+        indexes: ["status", "uniqueId"],
+        storageMode: "disk",
+      }));
+
+      // Insert records with unique IDs
+      for (let i = 0; i < 20; i++) {
+        await col.insert({ title: `Task ${i}`, uniqueId: `uid-${i}`, status: i % 2 === 0 ? "open" : "closed" });
+      }
+      await db.close();
+
+      // Reopen — cardinality analysis should classify:
+      // status: 2 unique values → in-memory index
+      // uniqueId: 20 unique values → still in-memory (under 1000 threshold)
+      db = new AgentDB(tmpDir);
+      await db.init();
+      const col2 = await db.collection(defineSchema({
+        name: "cardinality-test",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+          uniqueId: { type: "string" },
+        },
+        indexes: ["status", "uniqueId"],
+        storageMode: "disk",
+      }));
+
+      // Both indexes should work (both under 1000 cardinality threshold)
+      expect(await col2.count({ status: "open" })).toBe(10);
+      expect((await col2.findOne("uid-5" as never))).toBeUndefined(); // findOne by _id, not uniqueId
+
+      // Verify cardinality was computed
+      const ds = col2.getDiskStore()!;
+      expect(ds.columnCardinality["status"]).toBe(2);
+      expect(ds.columnCardinality["uniqueId"]).toBe(20);
+    });
+  });
+
+  describe("compound filter intersection", () => {
+    it("intersects two indexed fields in disk mode", async () => {
+      db = new AgentDB(tmpDir);
+      await db.init();
+
+      const col = await db.collection(defineSchema({
+        name: "compound-disk",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+          priority: { type: "enum", values: ["H", "M", "L"], default: "M" },
+        },
+        indexes: ["status", "priority"],
+        storageMode: "disk",
+      }));
+
+      await col.insert({ title: "A", status: "open", priority: "H" });
+      await col.insert({ title: "B", status: "open", priority: "L" });
+      await col.insert({ title: "C", status: "closed", priority: "H" });
+      await db.close();
+
+      db = new AgentDB(tmpDir);
+      await db.init();
+      const col2 = await db.collection(defineSchema({
+        name: "compound-disk",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+          priority: { type: "enum", values: ["H", "M", "L"], default: "M" },
+        },
+        indexes: ["status", "priority"],
+        storageMode: "disk",
+      }));
+
+      // Compound filter — should intersect two indexes
+      expect(await col2.count({ status: "open", priority: "H" })).toBe(1);
+      const result = await col2.find({ filter: { status: "open", priority: "H" } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].title).toBe("A");
+    });
+  });
+
   describe("column-only count", () => {
     it("count with extracted column avoids full record materialization", async () => {
       db = new AgentDB(tmpDir);

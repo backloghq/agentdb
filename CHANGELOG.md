@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Column-only Parquet scan** — `count()` with a simple equality filter on an extracted column reads only that column from Parquet, skipping `_data` deserialization entirely. ~1MB vs ~50MB at 100K records.
 - **Skip WAL replay on fresh Parquet** — disk mode open skips WAL replay when no ops exist since last compaction.
 - **LRU cache default reduced** — 1K records (from 10K) to enforce tighter memory budgets in disk mode.
+- **Compound filter index intersection** — multi-field filters like `{ status: "open", priority: "H" }` now intersect candidate sets from all matching single-field indexes (smallest-first). Previously only used the first matching index.
+- **Multi-field `isFullyCoveredByIndex`** — `count()` fast path now works for compound filters when all fields have indexes.
+- **Hybrid cardinality-based indexing** — during Parquet compaction, cardinality per extracted column is computed. High-cardinality fields (>1000 unique values) skip in-memory B-tree index creation — use column-only Parquet scans instead. Low-cardinality fields (enums, status) keep full in-memory indexes. Reduces index memory from ~1.5GB to ~50MB at 1M records with mixed cardinality.
 
 ## [1.1.1] - 2026-04-11
 

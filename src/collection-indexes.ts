@@ -243,17 +243,19 @@ export class IndexManager {
       }
     }
 
-    // Fall back to single-field indexes
+    // Collect candidates from ALL matching single-field indexes, then intersect
+    const candidateSets: Set<string>[] = [];
+
     for (const [key, value] of Object.entries(filterObj)) {
       if (key.startsWith("$") || key.startsWith("+")) continue;
       const idx = this.btreeIndexes.get(key);
       if (!idx) continue;
 
-      if (value === null || typeof value !== "object") {
-        return idx.eq(value);
-      }
+      let candidates: Set<string> | null = null;
 
-      if (!Array.isArray(value)) {
+      if (value === null || typeof value !== "object") {
+        candidates = idx.eq(value);
+      } else if (!Array.isArray(value)) {
         const ops = value as Record<string, unknown>;
         const opKeys = Object.keys(ops);
         if (opKeys.length === 0 || !opKeys.every((k) => k === "$gt" || k === "$gte" || k === "$lt" || k === "$lte")) continue;
@@ -264,25 +266,34 @@ export class IndexManager {
         const hasLte = "$lte" in ops;
 
         if ((hasGt || hasGte) && (hasLt || hasLte)) {
-          const lo = hasGt ? ops.$gt : ops.$gte;
-          const hi = hasLt ? ops.$lt : ops.$lte;
-          const candidates = idx.range(lo, hi);
-          if (hasGt) { for (const id of idx.eq(lo)) candidates.delete(id); }
-          if (hasLt) { for (const id of idx.eq(hi)) candidates.delete(id); }
-          return candidates;
-        }
-
-        if (hasGt) return idx.gt(ops.$gt);
-        if (hasGte) return idx.gte(ops.$gte);
-        if (hasLt) return idx.lt(ops.$lt);
-        if (hasLte) return idx.lte(ops.$lte);
+          candidates = idx.range(hasGt ? ops.$gt : ops.$gte, hasLt ? ops.$lt : ops.$lte);
+          if (hasGt) { for (const id of idx.eq(ops.$gt)) candidates.delete(id); }
+          if (hasLt) { for (const id of idx.eq(ops.$lt)) candidates.delete(id); }
+        } else if (hasGt) candidates = idx.gt(ops.$gt);
+        else if (hasGte) candidates = idx.gte(ops.$gte);
+        else if (hasLt) candidates = idx.lt(ops.$lt);
+        else if (hasLte) candidates = idx.lte(ops.$lte);
       }
+
+      if (candidates) candidateSets.push(candidates);
     }
 
-    return null;
+    if (candidateSets.length === 0) return null;
+    if (candidateSets.length === 1) return candidateSets[0];
+
+    // Intersect all candidate sets — start with smallest for efficiency
+    candidateSets.sort((a, b) => a.size - b.size);
+    const result = new Set(candidateSets[0]);
+    for (let i = 1; i < candidateSets.length; i++) {
+      for (const id of result) {
+        if (!candidateSets[i].has(id)) result.delete(id);
+      }
+      if (result.size === 0) return result;
+    }
+    return result;
   }
 
-  /** Check if a filter is fully covered by a single index. */
+  /** Check if a filter is fully covered by indexes (all fields have indexes). */
   isFullyCoveredByIndex(filter: Filter): boolean {
     if (!filter || this.btreeIndexes.size === 0) return false;
 
@@ -294,8 +305,8 @@ export class IndexManager {
     }
 
     const fieldKeys = Object.keys(filterObj).filter((k) => !k.startsWith("$") && !k.startsWith("+"));
-    if (fieldKeys.length !== 1) return false;
-    return this.btreeIndexes.has(fieldKeys[0]);
+    if (fieldKeys.length === 0) return false;
+    return fieldKeys.every((k) => this.btreeIndexes.has(k));
   }
 
   /** Get B-tree index for a field (used by distinct fast path). */

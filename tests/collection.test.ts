@@ -795,6 +795,38 @@ describe("Collection", () => {
       expect(await col.count({ role: "nonexistent" })).toBe(0);
     });
 
+    it("intersects multiple single-field indexes for compound filter", async () => {
+      col.createIndex("role");
+      col.createIndex("score");
+
+      // { role: "admin", score: 10 } — both fields indexed
+      // Should intersect: role=admin → {Alice, Bob} ∩ score=10 → {Alice} = {Alice}
+      const result = await col.find({ filter: { role: "admin", score: 10 } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].name).toBe("Alice");
+    });
+
+    it("compound count uses intersected indexes", async () => {
+      col.createIndex("role");
+      col.createIndex("score");
+
+      // Both indexed — should use fast path (intersected candidate set)
+      // Alice: admin, 10. Bob: user, 20. Charlie: admin, 30.
+      expect(await col.count({ role: "admin", score: 10 })).toBe(1);  // Alice
+      expect(await col.count({ role: "admin", score: 30 })).toBe(1);  // Charlie
+      expect(await col.count({ role: "user", score: 10 })).toBe(0);   // no user with score=10
+    });
+
+    it("intersects equality + range across two indexes", async () => {
+      col.createIndex("role");
+      col.createIndex("score");
+
+      // role=admin ∩ score>15 → Charlie (admin, score=30)
+      const result = await col.find({ filter: { role: "admin", score: { $gt: 15 } } });
+      expect(result.records).toHaveLength(1);
+      expect(result.records[0].name).toBe("Charlie");
+    });
+
     it("count with range operator on indexed field", async () => {
       col.createIndex("score");
       expect(await col.count({ score: { $gt: 15 } })).toBe(2);

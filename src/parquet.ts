@@ -44,7 +44,7 @@ export async function compactToParquet(
   dir: string,
   records: AsyncIterable<[string, Record<string, unknown>]> | Iterable<[string, Record<string, unknown>]>,
   options?: CompactionOptions,
-): Promise<{ file: ParquetFileInfo; offsetIndex: Map<string, OffsetEntry> }> {
+): Promise<{ file: ParquetFileInfo; offsetIndex: Map<string, OffsetEntry>; columnCardinality: Record<string, number> }> {
   const rowGroupSize = options?.rowGroupSize ?? 5000;
   const extractCols = options?.extractColumns ?? [];
 
@@ -77,6 +77,7 @@ export async function compactToParquet(
     return {
       file: { path: `data/${filename}`, rowCount: 0, rowGroups: 0 },
       offsetIndex: new Map(),
+      columnCardinality: {},
     };
   }
 
@@ -116,6 +117,12 @@ export async function compactToParquet(
 
   const metadata = parquetMetadata(buffer);
 
+  // Compute cardinality per extracted column
+  const columnCardinality: Record<string, number> = {};
+  for (const [col, values] of extracted) {
+    columnCardinality[col] = new Set(values.map((v) => String(v))).size;
+  }
+
   return {
     file: {
       path: `data/${filename}`,
@@ -123,6 +130,7 @@ export async function compactToParquet(
       rowGroups: metadata.row_groups.length,
     },
     offsetIndex,
+    columnCardinality,
   };
 }
 
@@ -153,6 +161,8 @@ export interface CompactionMeta {
   parquetFile: string;
   rowCount: number;
   rowGroups: number;
+  /** Cardinality per extracted column. Used to decide in-memory vs Parquet-only index. */
+  columnCardinality?: Record<string, number>;
 }
 
 export async function writeCompactionMeta(dir: string, meta: CompactionMeta): Promise<void> {

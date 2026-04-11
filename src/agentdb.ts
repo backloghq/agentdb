@@ -288,8 +288,13 @@ export class AgentDB {
     }
 
     // Apply schema features: auto-create indexes, init counters, register hooks
+    const ds = col.getDiskStore();
     if (schema) {
-      for (const field of schema.indexes) col.createIndex(field);
+      for (const field of schema.indexes) {
+        // In disk mode, skip in-memory index for high-cardinality fields (use Parquet column scan instead)
+        if (ds && !ds.shouldUseInMemoryIndex(field)) continue;
+        col.createIndex(field);
+      }
       for (const fields of schema.compositeIndexes) col.createCompositeIndex(fields);
       for (const field of schema.arrayIndexes) col.createArrayIndex(field);
       // Initialize auto-increment counters from existing records (sorted desc, limit 1)

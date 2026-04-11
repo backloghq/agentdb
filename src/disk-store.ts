@@ -72,6 +72,21 @@ export class DiskStore {
     return this._dirty;
   }
 
+  /** Cardinality per extracted column from last compaction. */
+  get columnCardinality(): Record<string, number> {
+    return this.compactionMeta?.columnCardinality ?? {};
+  }
+
+  /** Max cardinality for in-memory index (above this, use Parquet column scan). Default: 1000. */
+  static readonly MAX_INDEX_CARDINALITY = 1000;
+
+  /** Check if a field should use in-memory index (low cardinality) or Parquet scan (high cardinality). */
+  shouldUseInMemoryIndex(field: string): boolean {
+    const cardinality = this.columnCardinality[field];
+    if (cardinality === undefined) return true; // unknown cardinality — default to in-memory
+    return cardinality <= DiskStore.MAX_INDEX_CARDINALITY;
+  }
+
   /** Number of records in the offset index. */
   get recordCount(): number {
     return this._recordCount;
@@ -201,7 +216,7 @@ export class DiskStore {
       extractColumns: this.extractColumns,
     };
 
-    const { file, offsetIndex } = await compactToParquet(this.dir, allRecords, options);
+    const { file, offsetIndex, columnCardinality } = await compactToParquet(this.dir, allRecords, options);
 
     // Update state
     this.offsetIndex = offsetIndex;
@@ -211,6 +226,7 @@ export class DiskStore {
       parquetFile: file.path,
       rowCount: file.rowCount,
       rowGroups: file.rowGroups,
+      columnCardinality,
     };
 
     // Persist
@@ -264,6 +280,8 @@ export class DiskStore {
           continue;
         }
         if (f.startsWith("btree-") && f.endsWith(".json")) {
+          const field = f.slice(6, -5); // "btree-status.json" → "status"
+          if (!this.shouldUseInMemoryIndex(field)) continue; // high cardinality — skip
           const data = JSON.parse(await readFile(filePath, "utf-8"));
           indexManager.loadBTreeIndex(data);
           loaded = true;
