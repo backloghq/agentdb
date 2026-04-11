@@ -475,7 +475,10 @@ export class Collection {
           }
         }
       } else {
-        // Full scan from Parquet for records not in Map
+        // Full scan from Parquet — loads all records. Consider creating an index for large collections.
+        if (this._diskStore.recordCount > 10_000) {
+          console.warn(`agentdb: full scan on disk-backed collection '${this.name}' (${this._diskStore.recordCount} records). Consider creating an index.`);
+        }
         for await (const [id, record] of this._diskStore.entries()) {
           if (seen.has(id)) continue;
           const r = record as StoredRecord;

@@ -8,7 +8,7 @@
  *   get(id) → cache hit? → return : offset index → Parquet seek → cache + return
  *   find(filter) → indexed? → batch Parquet read : full Parquet scan
  */
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, stat, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { RecordCache } from "./record-cache.js";
 import {
@@ -44,6 +44,7 @@ export class DiskStore {
   private rowGroupSize: number;
   private extractColumns: string[];
   private _recordCount = 0;
+  private _dirty = false;
 
   constructor(dir: string, options?: DiskStoreOptions) {
     this.dir = dir;
@@ -62,6 +63,11 @@ export class DiskStore {
   /** Whether a Parquet file exists from a previous compaction. */
   get hasParquetData(): boolean {
     return this.compactionMeta !== null;
+  }
+
+  /** Whether there are unsaved writes since last compaction. */
+  get isDirty(): boolean {
+    return this._dirty;
   }
 
   /** Number of records in the offset index. */
@@ -141,13 +147,17 @@ export class DiskStore {
   cacheWrite(id: string, record: Record<string, unknown>): void {
     this.cache.set(id, record);
     if (!this.offsetIndex.has(id)) this._recordCount++;
+    this._dirty = true;
   }
 
-  /** Evict from cache after a delete (caller handles WAL persistence). */
+  /** Evict from cache and offset index after a delete (caller handles WAL persistence). */
   cacheDelete(id: string): void {
     this.cache.delete(id);
-    // Note: offsetIndex is stale for deleted records until next compaction
-    if (this.offsetIndex.has(id)) this._recordCount--;
+    this._dirty = true;
+    if (this.offsetIndex.has(id)) {
+      this.offsetIndex.delete(id);
+      this._recordCount--;
+    }
   }
 
   /** Clear cache (e.g., after compaction when offsets change). */
@@ -188,8 +198,9 @@ export class DiskStore {
     // Clean up old Parquet files
     await cleanupOldParquetFiles(this.dir, file.path);
 
-    // Clear cache (offsets changed)
+    // Clear cache (offsets changed) and reset dirty flag
     this.cache.clear();
+    this._dirty = false;
   }
 
   // --- Index persistence ---
@@ -211,6 +222,9 @@ export class DiskStore {
     }
   }
 
+  /** Max index file size to load (256MB). Prevents DoS via crafted index files. */
+  private static readonly MAX_INDEX_FILE_SIZE = 256 * 1024 * 1024;
+
   /** Load persisted indexes from disk. Returns true if indexes were loaded. */
   async loadIndexes(indexManager: IndexManager, textIndex?: TextIndex | null): Promise<boolean> {
     const indexDir = join(this.dir, "indexes");
@@ -221,23 +235,25 @@ export class DiskStore {
       const files = await readdir(indexDir);
 
       for (const f of files) {
+        const filePath = join(indexDir, f);
+        const fileStat = await stat(filePath);
+        if (fileStat.size > DiskStore.MAX_INDEX_FILE_SIZE) {
+          console.warn(`agentdb: skipping oversized index file ${f} (${fileStat.size} bytes)`);
+          continue;
+        }
         if (f.startsWith("btree-") && f.endsWith(".json")) {
-          const data = JSON.parse(await readFile(join(indexDir, f), "utf-8"));
+          const data = JSON.parse(await readFile(filePath, "utf-8"));
           indexManager.loadBTreeIndex(data);
           loaded = true;
         }
         if (f.startsWith("array-") && f.endsWith(".json")) {
-          const data = JSON.parse(await readFile(join(indexDir, f), "utf-8"));
+          const data = JSON.parse(await readFile(filePath, "utf-8"));
           indexManager.loadArrayIndex(data);
           loaded = true;
         }
         if (f === "text-index.json" && textIndex) {
-          const data = JSON.parse(await readFile(join(indexDir, f), "utf-8"));
-          const restored = (await import("./text-index.js")).TextIndex.fromJSON(data);
-          // Copy restored data into the existing textIndex instance
-          // TextIndex doesn't have a "load" method, so we replace via clear + rebuild
-          textIndex.clear();
-          Object.assign(textIndex, restored);
+          const data = JSON.parse(await readFile(filePath, "utf-8"));
+          textIndex.loadFromJSON(data);
           loaded = true;
         }
       }

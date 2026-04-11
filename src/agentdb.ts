@@ -234,23 +234,20 @@ export class AgentDB {
 
       // If no Parquet data yet, do initial compaction from snapshot
       if (!diskStore.hasParquetData) {
-        const records: Array<[string, Record<string, unknown>]> = [];
-        for await (const entry of store.streamSnapshot()) {
-          records.push(entry);
+        const recordMap = new Map<string, Record<string, unknown>>();
+        for await (const [id, record] of store.streamSnapshot()) {
+          recordMap.set(id, record);
         }
-        // Apply WAL ops on top of snapshot
+        // Apply WAL ops on top of snapshot — O(1) per op via Map
         for await (const op of store.getWalOps()) {
           if (op.op === "set" && op.data) {
-            const idx = records.findIndex(([id]) => id === op.id);
-            if (idx >= 0) records[idx] = [op.id, op.data as Record<string, unknown>];
-            else records.push([op.id, op.data as Record<string, unknown>]);
+            recordMap.set(op.id, op.data as Record<string, unknown>);
           } else if (op.op === "delete") {
-            const idx = records.findIndex(([id]) => id === op.id);
-            if (idx >= 0) records.splice(idx, 1);
+            recordMap.delete(op.id);
           }
         }
-        if (records.length > 0) {
-          await diskStore.compact(records);
+        if (recordMap.size > 0) {
+          await diskStore.compact([...recordMap.entries()]);
         }
       } else {
         // Replay WAL since last compaction into DiskStore cache
@@ -514,11 +511,13 @@ export class AgentDB {
     for (const [name, col] of this.open) {
       const listener = this.collectionListeners.get(name);
       if (listener) col.off("change", listener);
-      // Disk mode: compact to Parquet + save indexes before closing
+      // Disk mode: compact to Parquet + save indexes before closing (only if dirty)
       const ds = col.getDiskStore();
       if (ds) {
-        const allRecords = await col.findAll();
-        await ds.compact(allRecords.map((r) => [r._id as string, r]));
+        if (ds.isDirty) {
+          const allRecords = await col.findAll();
+          await ds.compact(allRecords.map((r) => [r._id as string, r]));
+        }
         await ds.saveIndexes(col.getIndexManager(), col.getTextIndex());
       }
       await col.close();

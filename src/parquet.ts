@@ -164,8 +164,14 @@ export async function writeCompactionMeta(dir: string, meta: CompactionMeta): Pr
 export async function readCompactionMeta(dir: string): Promise<CompactionMeta | null> {
   try {
     const content = await readFile(join(dir, "meta", "compaction.json"), "utf-8");
-    return JSON.parse(content) as CompactionMeta;
-  } catch {
+    const meta = JSON.parse(content) as CompactionMeta;
+    // Sanitize parquetFile path to prevent traversal
+    if (meta.parquetFile && (meta.parquetFile.includes("..") || meta.parquetFile.startsWith("/"))) {
+      throw new Error(`Invalid parquetFile path in compaction metadata: '${meta.parquetFile}'`);
+    }
+    return meta;
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Invalid parquetFile")) throw err;
     return null;
   }
 }

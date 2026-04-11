@@ -239,4 +239,55 @@ describe("Disk-backed mode", () => {
       expect(col.getDiskStore()).not.toBeNull();
     });
   });
+
+  describe("mutations in disk mode", () => {
+    it("update persists across reopens", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection("mut-update");
+      await col.insert({ _id: "u1", title: "Original", status: "open" });
+      await col.update({ _id: "u1" }, { $set: { status: "closed" } });
+      await db.close();
+
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection("mut-update");
+      const record = await col2.findOne("u1");
+      expect(record?.status).toBe("closed");
+    });
+
+    it("delete removes record from Parquet on reopen", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection("mut-delete");
+      await col.insert({ _id: "d1", title: "Delete me" });
+      await col.insert({ _id: "d2", title: "Keep me" });
+      await col.remove({ _id: "d1" });
+      await db.close();
+
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection("mut-delete");
+      expect(await col2.findOne("d1")).toBeUndefined();
+      expect((await col2.findOne("d2"))?.title).toBe("Keep me");
+      expect(await col2.count()).toBe(1);
+    });
+
+    it("no compaction on close when nothing changed", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection("no-compact");
+      await col.insert({ _id: "nc1", title: "Test" });
+      await db.close();
+
+      // Reopen, read only, close — should not compact
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection("no-compact");
+      await col2.findOne("nc1"); // read only
+      const ds = col2.getDiskStore()!;
+      expect(ds.isDirty).toBe(false);
+      await db.close();
+    });
+  });
 });

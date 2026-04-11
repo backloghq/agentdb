@@ -116,19 +116,25 @@ export class TextIndex {
   /** Deserialize from JSON. */
   static fromJSON(data: { terms: Record<string, string[]> }): TextIndex {
     const idx = new TextIndex();
+    idx.loadFromJSON(data);
+    return idx;
+  }
+
+  /** Load serialized data into this instance (replaces current state). */
+  loadFromJSON(data: { terms: Record<string, string[]> }): void {
+    this.clear();
     for (const [term, ids] of Object.entries(data.terms)) {
+      if (term === "__proto__" || term === "constructor" || term === "prototype") continue;
       const idSet = new Set(ids);
-      idx.index.set(term, idSet);
-      // Rebuild docTerms from inverted index
+      this.index.set(term, idSet);
       for (const id of ids) {
-        let terms = idx.docTerms.get(id);
+        let terms = this.docTerms.get(id);
         if (!terms) {
           terms = new Set();
-          idx.docTerms.set(id, terms);
+          this.docTerms.set(id, terms);
         }
         terms.add(term);
       }
     }
-    return idx;
   }
 }
