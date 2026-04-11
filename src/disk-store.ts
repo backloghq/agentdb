@@ -82,8 +82,11 @@ export class DiskStore {
 
   /** Check if a field should use in-memory index (low cardinality) or Parquet scan (high cardinality). */
   shouldUseInMemoryIndex(field: string): boolean {
-    const cardinality = this.columnCardinality[field];
-    if (cardinality === undefined) return true; // unknown cardinality — default to in-memory
+    // No compaction data yet (first session) — default to in-memory
+    if (!this.compactionMeta?.columnCardinality) return true;
+    const cardinality = this.compactionMeta.columnCardinality[field];
+    // Field not in extracted columns — default to Parquet scan (unknown = assume high)
+    if (cardinality === undefined) return false;
     return cardinality <= DiskStore.MAX_INDEX_CARDINALITY;
   }
 
