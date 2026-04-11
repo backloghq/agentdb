@@ -537,17 +537,21 @@ col.find({ filter: { status: "active" }, summary: true });
 
 ## Deployment Patterns
 
-See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed deployment guidance:
+| Scenario | Pattern | Storage Mode | Latency |
+|----------|---------|-------------|---------|
+| Small datasets (<10K records) | Direct import / stdio MCP | memory (default) | <1ms |
+| Large datasets (10K-1M+) | Direct import / HTTP MCP | disk | <1ms findOne, ~10ms find |
+| Auto-scaling | Any | auto (switches at threshold) | varies |
+| Multiple agents, same machine | HTTP MCP server | memory or disk | ~1-5ms |
+| Multiple agents, distributed | HTTP MCP + S3 backend | disk | ~50ms |
+| Decentralized, no server | Multi-writer S3 | memory | ~50ms |
 
-| Scenario | Pattern | Latency |
-|----------|---------|---------|
-| Single agent, local | Direct import / stdio MCP | <1ms |
-| Multiple agents, same machine | HTTP MCP server | ~1-5ms |
-| Multiple agents, distributed | HTTP MCP + S3 backend | ~50ms |
-| Decentralized, no server | Multi-writer S3 | ~50ms (eventual consistency) |
-| Serverless (Lambda) | S3 per invocation | ~50ms |
+**Storage mode guide:**
+- `memory` — all records in RAM. Fastest queries. Use for <10K records.
+- `disk` — records in JSONL + Parquet on disk/S3. Handles 1M+ records. Lazy index loading for fast cold open.
+- `auto` — starts in memory, switches to disk when collection exceeds `diskThreshold`.
 
-**Default recommendation: HTTP server.** Use the library directly for maximum performance, stdio MCP for single-agent, HTTP MCP for multi-agent.
+**Default recommendation:** Use `memory` for small datasets, `disk` or `auto` for anything that might grow.
 
 ## Examples
 

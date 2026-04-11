@@ -241,3 +241,55 @@ store.watch((newOps) => {
 | Read scaling | ReadOnly replicas | 1× per reader | N/A (read-only) | Near-real-time (tail) |
 
 **Default recommendation: HTTP server.** Use multi-writer only when you truly need decentralized writes with no single server.
+
+---
+
+## Storage Modes
+
+### Memory mode (default)
+
+All records loaded into RAM on open. Fastest for reads and writes. Suitable for datasets under 10K records.
+
+```typescript
+const db = new AgentDB("./data"); // memory mode is default
+```
+
+### Disk mode
+
+Records stored in JSONL (point lookups) + Parquet (column scans). Not loaded into memory. Handles 1M+ records.
+
+```typescript
+const db = new AgentDB("./data", {
+  storageMode: "disk",
+  cacheSize: 1_000,      // LRU cache size (default)
+  rowGroupSize: 5000,    // Parquet row groups
+});
+```
+
+On close, compaction writes:
+- `records.jsonl` — full records, one per line. Point lookups via byte-range seek.
+- `data.parquet` — `_id` + extracted columns. For count/column-scan.
+- Persisted B-tree/array/text indexes. Lazy-loaded on first query.
+
+Works on both filesystem and S3.
+
+### Auto mode
+
+Starts in memory. Switches to disk when a collection exceeds `diskThreshold` records on reopen.
+
+```typescript
+const db = new AgentDB("./data", {
+  storageMode: "auto",
+  diskThreshold: 10_000,  // default
+});
+```
+
+Per-collection override via schema:
+
+```typescript
+const events = await db.collection(defineSchema({
+  name: "events",
+  storageMode: "disk",  // always disk, regardless of global setting
+  // ...
+}));
+```
