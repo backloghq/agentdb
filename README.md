@@ -173,7 +173,7 @@ const db = new AgentDB("./data", {
 
 Disk mode opens with `skipLoad` — records are NOT loaded into memory. Reads go through a Parquet reader with LRU cache. Writes go to WAL + cache. On close (only if dirty), records are compacted to a fresh Parquet file with persisted indexes. Next open loads the offset index + persisted indexes without touching record data.
 
-Powered by [hyparquet](https://github.com/hyparam/hyparquet) — pure JS Parquet reader/writer, zero native dependencies.
+Powered by [hyparquet](https://github.com/hyparam/hyparquet) — pure JS Parquet reader/writer, zero native dependencies. Works on both filesystem and S3.
 
 ## S3 Backend
 
