@@ -181,16 +181,23 @@ export class DiskStore {
    * Reads only the target column — no _data deserialization.
    * Returns null if column not available (fall back to full scan).
    */
-  /** Get all Parquet files (base + incremental). */
+  private _cachedParquetFiles: string[] | null = null;
+  private _cachedJsonlFiles: string[] | null = null;
+
+  /** Get all Parquet files (base + incremental). Cached. */
   private getAllParquetFiles(): string[] {
+    if (this._cachedParquetFiles) return this._cachedParquetFiles;
     if (!this.compactionMeta) return [];
-    return [this.compactionMeta.parquetFile, ...(this.compactionMeta.parquetFiles ?? [])];
+    this._cachedParquetFiles = [this.compactionMeta.parquetFile, ...(this.compactionMeta.parquetFiles ?? [])];
+    return this._cachedParquetFiles;
   }
 
-  /** Get all JSONL files (base + incremental). */
+  /** Get all JSONL files (base + incremental). Cached. */
   private getAllJsonlFiles(): string[] {
+    if (this._cachedJsonlFiles) return this._cachedJsonlFiles;
     if (!this.compactionMeta?.jsonlFile) return [];
-    return [this.compactionMeta.jsonlFile, ...(this.compactionMeta.jsonlFiles ?? [])];
+    this._cachedJsonlFiles = [this.compactionMeta.jsonlFile, ...(this.compactionMeta.jsonlFiles ?? [])];
+    return this._cachedJsonlFiles;
   }
 
   async countByColumn(field: string, value: unknown): Promise<number | null> {
@@ -325,6 +332,8 @@ export class DiskStore {
 
     this.cache.clear();
     this._parquetBuffer = null;
+    this._cachedParquetFiles = null;
+    this._cachedJsonlFiles = null;
     this._dirty = false;
   }
 
@@ -370,6 +379,8 @@ export class DiskStore {
 
     this.cache.clear();
     this._parquetBuffer = null;
+    this._cachedParquetFiles = null;
+    this._cachedJsonlFiles = null;
     this._dirty = false;
   }
 

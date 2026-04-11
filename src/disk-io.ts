@@ -378,11 +378,19 @@ export async function writeRecordStore(
 /**
  * Read a single record from JSONL by byte offset.
  */
+/** Validate a file path from the binary offset index — reject traversal. */
+function validateIndexFilePath(filePath: string): void {
+  if (filePath.includes("..") || filePath.startsWith("/") || filePath.startsWith("\\")) {
+    throw new Error(`Invalid file path in offset index: '${filePath}'`);
+  }
+}
+
 export async function readRecordByOffset(
   backend: StorageBackend,
   _jsonlPath: string, // deprecated — file now in entry.file
   entry: RecordOffsetEntry,
 ): Promise<Record<string, unknown>> {
+  validateIndexFilePath(entry.file);
   const buf = await backend.readBlobRange(entry.file, entry.offset, entry.length);
   return JSON.parse(buf.toString("utf-8"));
 }
@@ -500,6 +508,7 @@ export async function readRecordOffsetIndex(
       const id = buf.subarray(pos + 2, pos + 2 + idLen).toString("utf-8");
       const fileLen = buf.readUInt16LE(pos + 2 + idLen);
       const file = buf.subarray(pos + 2 + idLen + 2, pos + 2 + idLen + 2 + fileLen).toString("utf-8");
+      validateIndexFilePath(file);
       const offset = buf.readUIntLE(pos + 2 + idLen + 2 + fileLen, 6);
       const length = buf.readUInt32LE(pos + 2 + idLen + 2 + fileLen + 6);
       index.set(id, { file, offset, length });
