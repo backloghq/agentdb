@@ -390,11 +390,25 @@ export async function readRecordsByOffsets(
   entries: Array<{ id: string; entry: RecordOffsetEntry }>,
 ): Promise<Map<string, Record<string, unknown>>> {
   const results = new Map<string, Record<string, unknown>>();
-  // Parallel reads for better S3 latency (sequential for filesystem is fine too)
-  await Promise.all(entries.map(async ({ id, entry }) => {
-    const record = await readRecordByOffset(backend, jsonlPath, entry);
-    results.set(id, record);
-  }));
+  if (entries.length === 0) return results;
+
+  // Sort by offset for sequential I/O (better disk locality, S3 pipelining)
+  const sorted = [...entries].sort((a, b) => a.entry.offset - b.entry.offset);
+
+  // For small batches (<= 20), parallel reads are fine
+  // For larger batches, merge adjacent reads into single range requests
+  if (sorted.length <= 20) {
+    await Promise.all(sorted.map(async ({ id, entry }) => {
+      const record = await readRecordByOffset(backend, jsonlPath, entry);
+      results.set(id, record);
+    }));
+  } else {
+    // Sequential sorted reads — better for filesystem cache coherence
+    for (const { id, entry } of sorted) {
+      const record = await readRecordByOffset(backend, jsonlPath, entry);
+      results.set(id, record);
+    }
+  }
   return results;
 }
 

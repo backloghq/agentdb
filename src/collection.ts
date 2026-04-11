@@ -468,21 +468,25 @@ export class Collection {
         seen.add(id);
       }
 
-      // Second: records from Parquet (not already in Map)
-      if (textMatchIds) {
-        const uncached = [...textMatchIds].filter((id) => !seen.has(id));
-        if (uncached.length > 0) {
-          const fetched = await this._diskStore.getMany(uncached);
+      // Second: records from JSONL/Parquet (not already in Map)
+      // Fetch in batches to short-circuit at limit (avoid fetching 30K records when limit=10)
+      const needed = offset + limit;
+      const candidateSource = textMatchIds
+        ? [...textMatchIds].filter((id) => !seen.has(id))
+        : candidateIds
+          ? [...candidateIds].filter((id) => !seen.has(id))
+          : null;
+
+      if (candidateSource) {
+        const BATCH = Math.max(needed * 2, 50); // fetch 2x needed or at least 50
+        for (let i = 0; i < candidateSource.length && records.length < needed; i += BATCH) {
+          const batch = candidateSource.slice(i, i + BATCH);
+          const fetched = await this._diskStore.getMany(batch);
           for (const [, r] of fetched) {
-            if (!isExpired(r as StoredRecord) && predicate(r as StoredRecord)) records.push(r as StoredRecord);
-          }
-        }
-      } else if (candidateIds) {
-        const uncached = [...candidateIds].filter((id) => !seen.has(id));
-        if (uncached.length > 0) {
-          const fetched = await this._diskStore.getMany(uncached);
-          for (const [, r] of fetched) {
-            if (!isExpired(r as StoredRecord) && predicate(r as StoredRecord)) records.push(r as StoredRecord);
+            if (!isExpired(r as StoredRecord) && predicate(r as StoredRecord)) {
+              records.push(r as StoredRecord);
+              if (records.length >= needed) break;
+            }
           }
         }
       } else {
@@ -493,7 +497,10 @@ export class Collection {
         for await (const [id, record] of this._diskStore.entries()) {
           if (seen.has(id)) continue;
           const r = record as StoredRecord;
-          if (!isExpired(r) && predicate(r)) records.push(r);
+          if (!isExpired(r) && predicate(r)) {
+            records.push(r);
+            if (records.length >= needed) break;
+          }
         }
       }
     } else {
@@ -552,7 +559,10 @@ export class Collection {
       }
     }
 
-    const total = records.length;
+    // In disk mode with short-circuit, records may be capped. Use index size as total when available.
+    const total = (this._diskStore?.hasParquetData && candidateIds)
+      ? candidateIds.size + this.store.count()
+      : records.length;
     const sliced = records.slice(offset, offset + limit);
     // Only materialize allCleanRecords if computed fields exist (avoids O(n) allocation)
     const allAccessor = this.opts.computed ? this.allCleanRecords() : () => [];
