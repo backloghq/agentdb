@@ -178,7 +178,7 @@ Disk mode opens with `skipLoad` — records are NOT loaded into memory. On close
 
 Point lookups use `readBlobRange` to seek directly to a record's byte offset in the JSONL file — O(1) per record on filesystem, single HTTP Range request on S3. No row group parsing, no full-file reads.
 
-Indexes are lazy-loaded — discovered on open, deserialized on first query. Cold open loads only the offset index and metadata.
+Compaction is incremental — close writes only new records, not the full dataset. Auto-merges after 10 incremental files. Indexes are lazy-loaded on first query.
 
 All disk I/O goes through `StorageBackend` — works identically on filesystem and S3. Zero native dependencies.
 

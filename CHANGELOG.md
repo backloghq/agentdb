@@ -48,6 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Binary offset index** — record offset index stored as compact binary (48 bytes/entry) instead of JSON (~80 bytes/entry). 3.6x faster load at 1M records (~300ms vs ~1000ms). Supports variable-length IDs and offsets up to 256TB (uint48).
 - **Lazy index loading** — B-tree/array/text indexes discovered on open but deserialized on first query. Cold open loads only offset index + metadata, skipping heavy JSON parsing. Concurrent callers serialized via promise lock.
 - **Batched-parallel JSONL reads** — byte-range reads in groups of 20, sorted by offset for disk locality.
+- **Incremental compaction** — close writes only new records to new JSONL + Parquet files instead of rewriting everything. Auto-merges at 10 files. Multi-session growth is O(K) per close instead of O(N).
+- **Hydrate-from-disk** — `update()`, `remove()`, `upsert()` load records from DiskStore into the Map before mutating. Updates and deletes work correctly on records stored in JSONL.
 - **opslog v0.8.0** — `readBlobRange(path, offset, length)` for byte-range reads on StorageBackend.
 
 ### Performance
