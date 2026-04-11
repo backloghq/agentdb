@@ -183,6 +183,11 @@ export class DiskStore {
 
   // --- Write-through cache ---
 
+  /** Mark as dirty (mutations occurred this session). */
+  markDirty(): void {
+    this._dirty = true;
+  }
+
   /** Update cache after a write (caller handles WAL persistence). */
   cacheWrite(id: string, record: Record<string, unknown>): void {
     this.cache.set(id, record);

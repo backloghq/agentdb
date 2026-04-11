@@ -160,15 +160,12 @@ export class Collection {
   /** Emit a change event and invalidate caches. */
   private emitChange(type: ChangeEvent["type"], ids: string[], agent?: string): void {
     this.views.invalidate();
-    // Mark DiskStore dirty on any mutation so close() knows to compact
+    // Mark DiskStore dirty so close() knows to compact. Don't populate cache —
+    // records are in the Map during the session. Cache is for Parquet reads on reopen.
     if (this._diskStore) {
-      for (const id of ids) {
-        if (type === "delete") {
-          this._diskStore.cacheDelete(id);
-        } else {
-          const record = this.store.get(id);
-          if (record) this._diskStore.cacheWrite(id, record);
-        }
+      this._diskStore.markDirty();
+      if (type === "delete") {
+        for (const id of ids) this._diskStore.cacheDelete(id);
       }
     }
     this.emitter.emit("change", { type, collection: this.name, ids, agent } satisfies ChangeEvent);
