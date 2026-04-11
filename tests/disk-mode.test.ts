@@ -657,4 +657,30 @@ describe("Disk-backed mode", () => {
       expect((await col.findOne("u2"))?.title).toBe("New");
     });
   });
+
+  describe("opslog checkpoint disabled", () => {
+    it("does not create snapshot files during bulk inserts in disk mode", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection("no-checkpoints");
+
+      // Insert 500 records — would trigger 5 checkpoints at threshold=100
+      for (let i = 0; i < 500; i++) {
+        await col.insert({ _id: `nc-${i}`, title: `Record ${i}` });
+      }
+
+      // Check that no checkpoint snapshots were written (only the initial empty one)
+      const backend = col.getBackend();
+      const snaps = await backend.listBlobs("snapshots");
+      expect(snaps.length).toBeLessThanOrEqual(1); // at most the initial empty snapshot
+
+      await db.close();
+
+      // Verify data survived via JSONL compaction
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection("no-checkpoints");
+      expect(await col2.count()).toBe(500);
+    });
+  });
 });
