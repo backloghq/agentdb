@@ -48,7 +48,7 @@ export class DiskStore {
 
   constructor(dir: string, options?: DiskStoreOptions) {
     this.dir = dir;
-    this.cache = new RecordCache(options?.cacheSize ?? 10_000);
+    this.cache = new RecordCache(options?.cacheSize ?? 1_000);
     this.rowGroupSize = options?.rowGroupSize ?? 5000;
     this.extractColumns = options?.extractColumns ?? [];
   }

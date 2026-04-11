@@ -226,7 +226,7 @@ export class AgentDB {
       });
 
       const diskStore = new DiskStore(colDir, {
-        cacheSize: this.opts.cacheSize ?? 10_000,
+        cacheSize: this.opts.cacheSize ?? 1_000,
         rowGroupSize: this.opts.rowGroupSize ?? 5000,
         extractColumns: schema?.indexes ?? [],
       });
@@ -250,16 +250,22 @@ export class AgentDB {
           await diskStore.compact([...recordMap.entries()]);
         }
       } else {
-        // Replay WAL since last compaction into DiskStore cache
+        // Replay WAL since last compaction into DiskStore cache (skip if Parquet is fresh)
         const { readCompactionMeta } = await import("./parquet.js");
         const compactionMeta = await readCompactionMeta(colDir);
         if (compactionMeta) {
+          let walOpsReplayed = 0;
           for await (const op of store.getWalOps(compactionMeta.lastTimestamp)) {
             if (op.op === "set" && op.data) {
               diskStore.cacheWrite(op.id, op.data as Record<string, unknown>);
             } else if (op.op === "delete") {
               diskStore.cacheDelete(op.id);
             }
+            walOpsReplayed++;
+          }
+          // If no WAL ops to replay, Parquet is fresh — reset dirty flag
+          if (walOpsReplayed === 0) {
+            diskStore.clearCache();
           }
         }
       }

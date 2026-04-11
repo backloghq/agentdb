@@ -587,7 +587,11 @@ export class Collection {
     }
 
     if (this._diskStore?.hasParquetData) {
-      // Disk mode: use find() which merges Map + Parquet
+      // Disk mode fast path: no filter → offset index size + Map size (deduplicated)
+      if (!filter) {
+        return this._diskStore.recordCount + this.store.count();
+      }
+      // Disk mode: indexed count already handled above, unindexed falls through to find
       const result = await this.find({ filter, limit: 100_000 });
       return result.total;
     }
