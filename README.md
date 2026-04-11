@@ -171,7 +171,12 @@ const db = new AgentDB("./data", {
 });
 ```
 
-Disk mode opens with `skipLoad` — records are NOT loaded into memory. Reads go through a Parquet reader with LRU cache. Writes go to WAL + cache. On close (only if dirty), records are compacted to a fresh Parquet file with persisted indexes. Next open loads the offset index + persisted indexes without touching record data.
+Disk mode opens with `skipLoad` — records are NOT loaded into memory. On close, compaction writes two artifacts:
+
+- **Parquet** — columnar format for `count()`, column scans, and skip-scanning
+- **JSONL record store** — row-oriented format for `findOne()` and `find(limit:N)` via byte-range reads
+
+Point lookups use `readBlobRange` to seek directly to a record's byte offset — O(1) per record on filesystem, single HTTP Range request on S3. No row group parsing.
 
 Powered by [hyparquet](https://github.com/hyparam/hyparquet) — pure JS Parquet reader/writer, zero native dependencies. Works on both filesystem and S3.
 

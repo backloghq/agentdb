@@ -48,7 +48,7 @@ src/
   record-cache.ts       # LRU cache for disk-backed mode (Map insertion-order eviction)
   array-index.ts        # Inverted element index for O(1) $contains on arrays
   disk-store.ts         # Disk-backed storage: Parquet + LRU cache + persistent indexes
-  parquet.ts            # Parquet compaction (writer) and reader via hyparquet
+  parquet.ts            # Parquet compaction + JSONL record store + readers via hyparquet
   filter.ts             # JSON filter compiler (14 operators, dot-notation)
   compact-filter.ts     # Compact string parser (role:admin age.gt:18)
   hnsw.ts               # HNSW index for approximate nearest neighbor search
