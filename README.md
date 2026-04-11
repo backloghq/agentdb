@@ -173,12 +173,12 @@ const db = new AgentDB("./data", {
 
 Disk mode opens with `skipLoad` — records are NOT loaded into memory. On close, compaction writes two artifacts:
 
-- **Parquet** — columnar format for `count()`, column scans, and skip-scanning
-- **JSONL record store** — row-oriented format for `findOne()` and `find(limit:N)` via byte-range reads
+- **Parquet** — `_id` + extracted columns only. For `count()`, column scans, and skip-scanning. No full records stored.
+- **JSONL record store** — full records, one per line. For `findOne()` and `find(limit:N)` via byte-range seeks.
 
-Point lookups use `readBlobRange` to seek directly to a record's byte offset — O(1) per record on filesystem, single HTTP Range request on S3. No row group parsing.
+Point lookups use `readBlobRange` to seek directly to a record's byte offset in the JSONL file — O(1) per record on filesystem, single HTTP Range request on S3. No row group parsing, no full-file reads.
 
-Powered by [hyparquet](https://github.com/hyparam/hyparquet) — pure JS Parquet reader/writer, zero native dependencies. Works on both filesystem and S3.
+All disk I/O goes through `StorageBackend` — works identically on filesystem and S3. Zero native dependencies.
 
 ## S3 Backend
 
