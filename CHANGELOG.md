@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Disk mode uses `skipLoad`** — records NOT loaded into memory on open. Reads merge DiskStore (Parquet) with Map (session writes). Initial open compacts snapshot to Parquet. Subsequent opens load offset index only.
 - **`storageMode: "auto"`** — evaluates record count on open against `diskThreshold` (default 10K). Switches to disk mode when collection exceeds threshold. Per-collection schema `storageMode` overrides global setting.
 
+### Fixed
+- **Prototype pollution** — replaced `Object.assign(textIndex, restored)` with `TextIndex.loadFromJSON()` instance method. Prevents crafted index files from polluting prototypes.
+- **WAL replay O(n²)** — initial compaction used `findIndex()` per WAL op. Now uses Map for O(1) lookups.
+- **Close compacts unconditionally** — `DiskStore.isDirty` flag prevents unnecessary Parquet rewrites on read-only sessions.
+- **Stale deleted records** — `cacheDelete()` now removes from offset index, preventing deleted records from resurfacing via Parquet reads.
+- **Index file size validation** — index files capped at 256MB to prevent DoS via crafted JSON.
+- **Parquet path traversal** — `readCompactionMeta()` rejects `..` and absolute paths in `parquetFile` field.
+- **Full scan warning** — `console.warn` emitted when disk-mode find() does unindexed scan on >10K records.
+
 ## [1.1.1] - 2026-04-11
 
 ### Fixed
