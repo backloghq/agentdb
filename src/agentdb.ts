@@ -212,26 +212,76 @@ export class AgentDB {
     const useDisk = mode === "disk" ||
       (mode === "auto" && await this.shouldUseDiskMode(colDir));
 
-    // Open collection (all modes load into memory for now — disk mode adds Parquet persistence + faster open)
-    await col.open(colDir, {
-      checkpointThreshold: this.opts.checkpointThreshold,
-      backend: this.opts.backend,
-      agentId: this.opts.agentId,
-      writeMode: this.opts.writeMode,
-      groupCommitSize: this.opts.groupCommitSize,
-      groupCommitMs: this.opts.groupCommitMs,
-      readOnly: this.opts.readOnly,
-    });
-
     if (useDisk) {
-      // Disk mode: set up DiskStore for Parquet persistence + persistent indexes
+      // Disk mode: open with skipLoad (writes only), DiskStore handles reads
+      await col.open(colDir, {
+        checkpointThreshold: this.opts.checkpointThreshold,
+        backend: this.opts.backend,
+        agentId: this.opts.agentId,
+        writeMode: this.opts.writeMode,
+        groupCommitSize: this.opts.groupCommitSize,
+        groupCommitMs: this.opts.groupCommitMs,
+        readOnly: this.opts.readOnly,
+        skipLoad: true,
+      });
+
       const diskStore = new DiskStore(colDir, {
         cacheSize: this.opts.cacheSize ?? 10_000,
         rowGroupSize: this.opts.rowGroupSize ?? 5000,
         extractColumns: schema?.indexes ?? [],
       });
       await diskStore.load();
+
+      // If no Parquet data yet, do initial compaction from snapshot
+      if (!diskStore.hasParquetData) {
+        const records: Array<[string, Record<string, unknown>]> = [];
+        for await (const entry of store.streamSnapshot()) {
+          records.push(entry);
+        }
+        // Apply WAL ops on top of snapshot
+        for await (const op of store.getWalOps()) {
+          if (op.op === "set" && op.data) {
+            const idx = records.findIndex(([id]) => id === op.id);
+            if (idx >= 0) records[idx] = [op.id, op.data as Record<string, unknown>];
+            else records.push([op.id, op.data as Record<string, unknown>]);
+          } else if (op.op === "delete") {
+            const idx = records.findIndex(([id]) => id === op.id);
+            if (idx >= 0) records.splice(idx, 1);
+          }
+        }
+        if (records.length > 0) {
+          await diskStore.compact(records);
+        }
+      } else {
+        // Replay WAL since last compaction into DiskStore cache
+        const { readCompactionMeta } = await import("./parquet.js");
+        const compactionMeta = await readCompactionMeta(colDir);
+        if (compactionMeta) {
+          for await (const op of store.getWalOps(compactionMeta.lastTimestamp)) {
+            if (op.op === "set" && op.data) {
+              diskStore.cacheWrite(op.id, op.data as Record<string, unknown>);
+            } else if (op.op === "delete") {
+              diskStore.cacheDelete(op.id);
+            }
+          }
+        }
+      }
+
+      // Load persisted indexes
+      await diskStore.loadIndexes(col.getIndexManager(), col.getTextIndex());
+
       col.setDiskStore(diskStore);
+    } else {
+      // Memory mode: normal open (load all records into Map)
+      await col.open(colDir, {
+        checkpointThreshold: this.opts.checkpointThreshold,
+        backend: this.opts.backend,
+        agentId: this.opts.agentId,
+        writeMode: this.opts.writeMode,
+        groupCommitSize: this.opts.groupCommitSize,
+        groupCommitMs: this.opts.groupCommitMs,
+        readOnly: this.opts.readOnly,
+      });
     }
 
     // Apply schema features: auto-create indexes, init counters, register hooks
@@ -467,7 +517,8 @@ export class AgentDB {
       // Disk mode: compact to Parquet + save indexes before closing
       const ds = col.getDiskStore();
       if (ds) {
-        await ds.compact((await col.find({ limit: 100_000 })).records.map((r) => [r._id as string, r]));
+        const allRecords = await col.findAll();
+        await ds.compact(allRecords.map((r) => [r._id as string, r]));
         await ds.saveIndexes(col.getIndexManager(), col.getTextIndex());
       }
       await col.close();

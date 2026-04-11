@@ -389,10 +389,15 @@ export class Collection {
    */
   /** Return all non-expired records (no limit, no pagination). For internal use (export, etc). */
   async findAll(): Promise<Record<string, unknown>[]> {
-    if (this._diskStore) {
+    if (this._diskStore?.hasParquetData) {
+      // Disk mode: merge Map (session writes) + Parquet
+      const seen = new Set<string>();
       const result: Record<string, unknown>[] = [];
-      for await (const [, record] of this._diskStore.entries()) {
-        if (!isExpired(record as StoredRecord)) result.push(stripMeta(record as StoredRecord));
+      for (const [id, record] of this.store.entries()) {
+        if (!isExpired(record)) { result.push(stripMeta(record)); seen.add(id); }
+      }
+      for await (const [id, record] of this._diskStore.entries()) {
+        if (!seen.has(id) && !isExpired(record as StoredRecord)) result.push(stripMeta(record as StoredRecord));
       }
       return result;
     }
@@ -435,25 +440,67 @@ export class Collection {
     const candidateIds = this.indexedCandidates(attrFilter);
     let records: StoredRecord[];
 
-    // Read from in-memory Map (both memory and disk mode — disk mode uses Map during session,
-    // DiskStore is for persistence on close. True skipLoad reads from DiskStore will be added when
-    // the full async read path is wired with skipLoad.)
-    if (textMatchIds) {
+    if (this._diskStore?.hasParquetData) {
+      // Disk mode with Parquet: merge DiskStore (Parquet) + Map (session writes)
+      const seen = new Set<string>();
       records = [];
-      for (const id of textMatchIds) {
-        const value = this.store.get(id);
-        if (value && !isExpired(value) && predicate(value)) records.push(value);
+
+      // First: records from in-memory Map (session writes, most recent)
+      for (const [id, value] of this.store.entries()) {
+        if (!isExpired(value) && predicate(value)) {
+          if (!textMatchIds || textMatchIds.has(id)) {
+            if (!candidateIds || candidateIds.has(id)) {
+              records.push(value);
+            }
+          }
+        }
+        seen.add(id);
       }
-    } else if (candidateIds) {
-      records = [];
-      for (const id of candidateIds) {
-        const value = this.store.get(id);
-        if (value && !isExpired(value) && predicate(value)) {
-          records.push(value);
+
+      // Second: records from Parquet (not already in Map)
+      if (textMatchIds) {
+        const uncached = [...textMatchIds].filter((id) => !seen.has(id));
+        if (uncached.length > 0) {
+          const fetched = await this._diskStore.getMany(uncached);
+          for (const [, r] of fetched) {
+            if (!isExpired(r as StoredRecord) && predicate(r as StoredRecord)) records.push(r as StoredRecord);
+          }
+        }
+      } else if (candidateIds) {
+        const uncached = [...candidateIds].filter((id) => !seen.has(id));
+        if (uncached.length > 0) {
+          const fetched = await this._diskStore.getMany(uncached);
+          for (const [, r] of fetched) {
+            if (!isExpired(r as StoredRecord) && predicate(r as StoredRecord)) records.push(r as StoredRecord);
+          }
+        }
+      } else {
+        // Full scan from Parquet for records not in Map
+        for await (const [id, record] of this._diskStore.entries()) {
+          if (seen.has(id)) continue;
+          const r = record as StoredRecord;
+          if (!isExpired(r) && predicate(r)) records.push(r);
         }
       }
     } else {
-      records = this.store.filter((value) => !isExpired(value) && predicate(value));
+      // Memory mode: read from Map
+      if (textMatchIds) {
+        records = [];
+        for (const id of textMatchIds) {
+          const value = this.store.get(id);
+          if (value && !isExpired(value) && predicate(value)) records.push(value);
+        }
+      } else if (candidateIds) {
+        records = [];
+        for (const id of candidateIds) {
+          const value = this.store.get(id);
+          if (value && !isExpired(value) && predicate(value)) {
+            records.push(value);
+          }
+        }
+      } else {
+        records = this.store.filter((value) => !isExpired(value) && predicate(value));
+      }
     }
 
     // Sort if requested
@@ -536,8 +583,8 @@ export class Collection {
       return candidateIds.size;
     }
 
-    if (this._diskStore) {
-      if (!filter) return this._diskStore.recordCount;
+    if (this._diskStore?.hasParquetData) {
+      // Disk mode: use find() which merges Map + Parquet
       const result = await this.find({ filter, limit: 100_000 });
       return result.total;
     }

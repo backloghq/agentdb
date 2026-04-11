@@ -129,4 +129,60 @@ describe("Disk-backed mode", () => {
       expect(bugs.records).toHaveLength(1);
     });
   });
+
+  describe("skipLoad behavior", () => {
+    it("records served from Parquet after reopen, not memory", async () => {
+      // Session 1: create records, close (compacts to Parquet)
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col1 = await db.collection("skip-test");
+      await col1.insert({ _id: "s1", title: "From Parquet" });
+      await col1.insert({ _id: "s2", title: "Also Parquet" });
+      await db.close();
+
+      // Session 2: reopen with skipLoad — records come from Parquet
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection("skip-test");
+
+      // findOne should work (DiskStore → Parquet)
+      const record = await col2.findOne("s1");
+      expect(record?.title).toBe("From Parquet");
+
+      // find should return all records from Parquet
+      const all = await col2.find();
+      expect(all.records).toHaveLength(2);
+
+      // count should work
+      const n = await col2.count();
+      expect(n).toBe(2);
+    });
+
+    it("session writes visible alongside Parquet records", async () => {
+      // Session 1: seed data
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col1 = await db.collection("merge-test");
+      await col1.insert({ _id: "old1", title: "Existing" });
+      await db.close();
+
+      // Session 2: add new records
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection("merge-test");
+
+      // Old record from Parquet
+      expect((await col2.findOne("old1"))?.title).toBe("Existing");
+
+      // New record written this session
+      await col2.insert({ _id: "new1", title: "Fresh" });
+      expect((await col2.findOne("new1"))?.title).toBe("Fresh");
+
+      // find returns both old (Parquet) + new (Map)
+      const all = await col2.find();
+      expect(all.records).toHaveLength(2);
+      const titles = all.records.map((r) => r.title).sort();
+      expect(titles).toEqual(["Existing", "Fresh"]);
+    });
+  });
 });
