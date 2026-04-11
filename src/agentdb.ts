@@ -230,6 +230,26 @@ export class AgentDB {
         if (schema.hooks.afterInsert) schema.hooks.afterInsert(id, record, ctx);
         return id;
       };
+      // Wrap insertMany to apply defaults + hooks per doc
+      const originalInsertMany = col.insertMany.bind(col);
+      col.insertMany = async (docs, opts?) => {
+        const processed = docs.map((doc) => {
+          let record = schema.applyDefaults(doc);
+          if (schema.hooks.beforeInsert) {
+            const modified = schema.hooks.beforeInsert(record, ctx);
+            if (modified) record = modified;
+          }
+          return record;
+        });
+        const ids = await originalInsertMany(processed, opts);
+        if (schema.hooks.afterInsert) {
+          for (let i = 0; i < ids.length; i++) {
+            const record = col.findOne(ids[i]);
+            if (record) schema.hooks.afterInsert(ids[i], record, ctx);
+          }
+        }
+        return ids;
+      };
       // Wrap upsertMany to apply defaults + hooks per doc
       const originalUpsertMany = col.upsertMany.bind(col);
       col.upsertMany = async (docs, opts?) => {

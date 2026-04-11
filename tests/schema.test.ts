@@ -332,6 +332,50 @@ describe("defineSchema", () => {
     });
   });
 
+  describe("insertMany with schema", () => {
+    it("applies defaults and validation on insertMany", async () => {
+      const afterFn = vi.fn();
+      const col = await db.collection(defineSchema({
+        name: "insertmany-schema",
+        fields: {
+          title: { type: "string", required: true },
+          status: { type: "enum", values: ["open", "closed"], default: "open" },
+          id: { type: "autoIncrement" },
+        },
+        hooks: { afterInsert: afterFn },
+      }));
+
+      const ids = await col.insertMany([
+        { title: "First" },
+        { title: "Second" },
+        { title: "Third" },
+      ]);
+
+      // Defaults applied
+      expect(col.findOne(ids[0])?.status).toBe("open");
+      expect(col.findOne(ids[1])?.status).toBe("open");
+
+      // Auto-increment applied
+      expect(col.findOne(ids[0])?.id).toBe(1);
+      expect(col.findOne(ids[1])?.id).toBe(2);
+      expect(col.findOne(ids[2])?.id).toBe(3);
+
+      // Hooks fired
+      expect(afterFn).toHaveBeenCalledTimes(3);
+    });
+
+    it("rejects invalid records in insertMany", async () => {
+      const col = await db.collection(defineSchema({
+        name: "insertmany-validate",
+        fields: {
+          title: { type: "string", required: true },
+        },
+      }));
+
+      await expect(col.insertMany([{ title: "ok" }, {}])).rejects.toThrow("'title' is required");
+    });
+  });
+
   describe("upsertMany with schema", () => {
     it("applies defaults and validation on upsertMany", async () => {
       const afterFn = vi.fn();

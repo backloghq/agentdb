@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.1.1] - 2026-04-11
+
+### Fixed
+- **`insertMany()` schema bypass** — `insertMany()` now applies schema defaults, `beforeInsert`/`afterInsert` hooks, and auto-increment counters. Previously bypassed the schema pipeline, causing missing defaults and IDs when used with `defineSchema()`.
+
 ## [1.1.0] - 2026-04-10
 
 ### Added
