@@ -539,7 +539,15 @@ export class AgentDB {
         }
         await ds.saveIndexes(col.getIndexManager(), col.getTextIndex());
       }
+      // Clean up WAL ops after close — data is safe in JSONL + Parquet
+      const diskBackend = ds ? col.getBackend() : null;
       await col.close();
+      if (diskBackend) {
+        try {
+          const ops = await diskBackend.listBlobs("ops");
+          for (const f of ops) await diskBackend.deleteBlob(`ops/${f}`);
+        } catch { /* best-effort cleanup */ }
+      }
     }
     this.open.clear();
     this.collectionListeners.clear();
