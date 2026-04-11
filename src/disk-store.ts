@@ -339,11 +339,21 @@ export class DiskStore {
     return found;
   }
 
+  private _indexLoadPromise: Promise<void> | null = null;
+
   /** Ensure all pending indexes are loaded. Called lazily before first query that needs indexes. */
   async ensureIndexesLoaded(): Promise<void> {
     if (this._pendingIndexFiles.size === 0) return;
     if (!this._indexManager) return;
+    // Serialize concurrent callers — only one loads, others wait
+    if (this._indexLoadPromise) return this._indexLoadPromise;
+    this._indexLoadPromise = this._doLoadIndexes();
+    await this._indexLoadPromise;
+    this._indexLoadPromise = null;
+  }
 
+  private async _doLoadIndexes(): Promise<void> {
+    const im = this._indexManager!;
     for (const [key, filename] of this._pendingIndexFiles) {
       let content: Buffer;
       try {
@@ -356,17 +366,13 @@ export class DiskStore {
         continue;
       }
       if (key.startsWith("btree:")) {
-        const data = JSON.parse(content.toString("utf-8"));
-        this._indexManager.loadBTreeIndex(data);
+        im.loadBTreeIndex(JSON.parse(content.toString("utf-8")));
       } else if (key.startsWith("array:")) {
-        const data = JSON.parse(content.toString("utf-8"));
-        this._indexManager.loadArrayIndex(data);
+        im.loadArrayIndex(JSON.parse(content.toString("utf-8")));
       } else if (key === "text" && this._textIndex) {
-        const data = JSON.parse(content.toString("utf-8"));
-        this._textIndex.loadFromJSON(data);
+        this._textIndex.loadFromJSON(JSON.parse(content.toString("utf-8")));
       }
     }
-
     this._pendingIndexFiles.clear();
   }
 }
