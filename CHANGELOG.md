@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Parquet buffer caching** — Parquet file read once on first query, cached as ArrayBuffer for all subsequent reads. Eliminates per-query file I/O. Cleared on compaction.
 - **JSONL record store** — compaction writes `records.jsonl` alongside Parquet. Point lookups (`findOne`, `find(limit:N)`) use byte-range reads via `readBlobRange` instead of Parquet row group parsing. O(1) per record on filesystem, single HTTP Range request on S3.
 - **Parquet is now a column index** — `_data` column removed from Parquet. Full records live in JSONL only. Parquet stores `_id` + extracted columns for count/column-scan. Reduces storage duplication.
+- **find() short-circuit at limit** — disk mode fetches candidates in batches of 2x limit, stops when enough found. `find({ status: "open" }, limit: 10)` with 30K candidates now fetches ~20 records instead of 30K.
+- **Sorted JSONL reads** — byte-range reads sorted by offset for sequential I/O locality. Small batches parallel, larger batches sequential.
 - **opslog v0.8.0** — `readBlobRange(path, offset, length)` for byte-range reads on StorageBackend.
 
 ### Performance
