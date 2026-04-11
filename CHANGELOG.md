@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Changed (BREAKING)
 - **Async Collection read methods** — `findOne`, `find`, `findAll`, `count`, `search`, `queryView` now return Promises. All callers must `await` them. Enables disk-backed reads without loading all records into memory. `searchByVector` stays synchronous.
+- **Disk mode uses `skipLoad`** — records NOT loaded into memory on open. Reads merge DiskStore (Parquet) with Map (session writes). Initial open compacts snapshot to Parquet. Subsequent opens load offset index only.
 
 ## [1.1.1] - 2026-04-11
 

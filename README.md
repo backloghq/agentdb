@@ -171,7 +171,7 @@ const db = new AgentDB("./data", {
 });
 ```
 
-Disk mode compacts to Parquet on close, persists B-tree/array/text indexes, and loads both on next open. Records stay in memory during the session — Parquet provides faster open times and persistent index state.
+Disk mode opens with `skipLoad` — records are NOT loaded into memory. Reads go through a Parquet reader with LRU cache. Writes go to WAL + cache. On close, all records (Map + Parquet) are compacted to a fresh Parquet file with persisted indexes. Next open loads the offset index + persisted indexes without touching record data.
 
 ## S3 Backend
 
