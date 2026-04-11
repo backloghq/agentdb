@@ -213,9 +213,12 @@ export class AgentDB {
       (mode === "auto" && await this.shouldUseDiskMode(colDir));
 
     if (useDisk) {
-      // Disk mode: open with skipLoad (writes only), DiskStore handles reads
+      // Disk mode: open with skipLoad (writes only), DiskStore handles reads.
+      // Disable opslog checkpoints — persistence is via JSONL + Parquet compaction on close.
+      // Without this, opslog writes quadratic snapshot files (full copy every N ops).
       await col.open(colDir, {
-        checkpointThreshold: this.opts.checkpointThreshold,
+        checkpointThreshold: Number.MAX_SAFE_INTEGER,
+        checkpointOnClose: false,
         backend: this.opts.backend,
         agentId: this.opts.agentId,
         writeMode: this.opts.writeMode,

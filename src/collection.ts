@@ -288,7 +288,7 @@ export class Collection {
   }
 
   /** Open the underlying opslog store at the given directory. */
-  async open(dir: string, options?: { checkpointThreshold?: number; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean; skipLoad?: boolean }): Promise<void> {
+  async open(dir: string, options?: { checkpointThreshold?: number; checkpointOnClose?: boolean; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean; skipLoad?: boolean }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
     if (options?.backend) {
