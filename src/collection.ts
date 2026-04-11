@@ -120,6 +120,9 @@ export class Collection {
   /** Get the text index (for persistence). */
   getTextIndex(): TextIndex | null { return this.textIdx; }
 
+  /** Get the storage backend (for DiskStore I/O). */
+  getBackend(): import("@backloghq/opslog").StorageBackend { return this.backend; }
+
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
     this.store = store;

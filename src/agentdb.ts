@@ -225,7 +225,7 @@ export class AgentDB {
         skipLoad: true,
       });
 
-      const diskStore = new DiskStore(colDir, {
+      const diskStore = new DiskStore(col.getBackend(), {
         cacheSize: this.opts.cacheSize ?? 1_000,
         rowGroupSize: this.opts.rowGroupSize ?? 5000,
         extractColumns: schema?.indexes ?? [],
@@ -252,7 +252,7 @@ export class AgentDB {
       } else {
         // Replay WAL since last compaction into DiskStore cache (skip if Parquet is fresh)
         const { readCompactionMeta } = await import("./parquet.js");
-        const compactionMeta = await readCompactionMeta(colDir);
+        const compactionMeta = await readCompactionMeta(col.getBackend());
         if (compactionMeta) {
           let walOpsReplayed = 0;
           for await (const op of store.getWalOps(compactionMeta.lastTimestamp)) {
@@ -555,8 +555,12 @@ export class AgentDB {
   private async shouldUseDiskMode(colDir: string): Promise<boolean> {
     const threshold = this.opts.diskThreshold ?? 10_000;
     try {
+      // Use a temporary backend to check compaction metadata
+      const { FsBackend } = await import("@backloghq/opslog");
+      const tmpBackend = new FsBackend();
+      await tmpBackend.initialize(colDir, { readOnly: true });
       const { readCompactionMeta } = await import("./parquet.js");
-      const meta = await readCompactionMeta(colDir);
+      const meta = await readCompactionMeta(tmpBackend);
       if (meta && meta.rowCount >= threshold) return true;
       // Check manifest stats for record count
       const { readFile } = await import("node:fs/promises");

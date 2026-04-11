@@ -4,13 +4,15 @@
  * Compaction: WAL + snapshot → Parquet file with extracted columns for skip-scanning.
  * Reader: point lookup, indexed query, row group skip-scan, full scan.
  *
+ * All I/O goes through StorageBackend (writeBlob/readBlob/listBlobs/deleteBlob),
+ * so this works on both filesystem and S3 transparently.
+ *
  * Uses hyparquet (reader) and hyparquet-writer (writer) — both pure JS, zero native deps.
  */
-import { writeFile, readFile, mkdir, readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { asyncBufferFromFile, parquetReadObjects, parquetMetadata } from "hyparquet";
+import { parquetReadObjects, parquetMetadata } from "hyparquet";
 import type { FileMetaData } from "hyparquet";
+import type { StorageBackend } from "@backloghq/opslog";
 
 // --- Types ---
 
@@ -37,11 +39,9 @@ export interface ParquetFileInfo {
 /**
  * Compact records into a Parquet file.
  * Each record is stored as _id + _data (JSON) + optional extracted columns for skip-scanning.
- *
- * @returns Parquet file info and offset index mapping _id → { rowGroup, row }
  */
 export async function compactToParquet(
-  dir: string,
+  backend: StorageBackend,
   records: AsyncIterable<[string, Record<string, unknown>]> | Iterable<[string, Record<string, unknown>]>,
   options?: CompactionOptions,
 ): Promise<{ file: ParquetFileInfo; offsetIndex: Map<string, OffsetEntry>; columnCardinality: Record<string, number> }> {
@@ -63,19 +63,16 @@ export async function compactToParquet(
   }
 
   if (ids.length === 0) {
-    // Empty collection — write empty Parquet
     const filename = `data-${Date.now()}.parquet`;
-    const dataDir = join(dir, "data");
-    await mkdir(dataDir, { recursive: true });
-    const filePath = join(dataDir, filename);
+    const relativePath = `data/${filename}`;
     const columnData = [
       { name: "_id", data: [] as string[] },
       { name: "_data", data: [] as string[] },
     ];
     const buffer = parquetWriteBuffer({ columnData });
-    await writeFile(filePath, Buffer.from(buffer));
+    await backend.writeBlob(relativePath, Buffer.from(buffer));
     return {
-      file: { path: `data/${filename}`, rowCount: 0, rowGroups: 0 },
+      file: { path: relativePath, rowCount: 0, rowGroups: 0 },
       offsetIndex: new Map(),
       columnCardinality: {},
     };
@@ -87,7 +84,6 @@ export async function compactToParquet(
     { name: "_data", data: dataJsons },
   ];
   for (const [col, values] of extracted) {
-    // Only include columns with at least one non-null value and consistent type
     const nonNull = values.filter((v) => v !== null && v !== undefined);
     if (nonNull.length > 0 && nonNull.every((v) => typeof v === typeof nonNull[0])) {
       columnData.push({ name: col, data: values });
@@ -97,10 +93,8 @@ export async function compactToParquet(
   const buffer = parquetWriteBuffer({ columnData, rowGroupSize });
 
   const filename = `data-${Date.now()}.parquet`;
-  const dataDir = join(dir, "data");
-  await mkdir(dataDir, { recursive: true });
-  const filePath = join(dataDir, filename);
-  await writeFile(filePath, Buffer.from(buffer));
+  const relativePath = `data/${filename}`;
+  await backend.writeBlob(relativePath, Buffer.from(buffer));
 
   // Build offset index
   const offsetIndex = new Map<string, OffsetEntry>();
@@ -125,7 +119,7 @@ export async function compactToParquet(
 
   return {
     file: {
-      path: `data/${filename}`,
+      path: relativePath,
       rowCount: ids.length,
       rowGroups: metadata.row_groups.length,
     },
@@ -136,18 +130,16 @@ export async function compactToParquet(
 
 // --- Offset Index Persistence ---
 
-export async function writeOffsetIndex(dir: string, offsetIndex: Map<string, OffsetEntry>): Promise<void> {
-  const indexDir = join(dir, "indexes");
-  await mkdir(indexDir, { recursive: true });
+export async function writeOffsetIndex(backend: StorageBackend, offsetIndex: Map<string, OffsetEntry>): Promise<void> {
   const entries: Record<string, OffsetEntry> = {};
   for (const [id, entry] of offsetIndex) entries[id] = entry;
-  await writeFile(join(indexDir, "offset-index.json"), JSON.stringify({ version: 1, entries }));
+  await backend.writeBlob("indexes/offset-index.json", Buffer.from(JSON.stringify({ version: 1, entries })));
 }
 
-export async function readOffsetIndex(dir: string): Promise<Map<string, OffsetEntry>> {
+export async function readOffsetIndex(backend: StorageBackend): Promise<Map<string, OffsetEntry>> {
   try {
-    const content = await readFile(join(dir, "indexes", "offset-index.json"), "utf-8");
-    const data = JSON.parse(content) as { entries: Record<string, OffsetEntry> };
+    const buf = await backend.readBlob("indexes/offset-index.json");
+    const data = JSON.parse(buf.toString("utf-8")) as { entries: Record<string, OffsetEntry> };
     return new Map(Object.entries(data.entries));
   } catch {
     return new Map();
@@ -165,17 +157,14 @@ export interface CompactionMeta {
   columnCardinality?: Record<string, number>;
 }
 
-export async function writeCompactionMeta(dir: string, meta: CompactionMeta): Promise<void> {
-  const metaDir = join(dir, "meta");
-  await mkdir(metaDir, { recursive: true });
-  await writeFile(join(metaDir, "compaction.json"), JSON.stringify(meta));
+export async function writeCompactionMeta(backend: StorageBackend, meta: CompactionMeta): Promise<void> {
+  await backend.writeBlob("meta/compaction.json", Buffer.from(JSON.stringify(meta)));
 }
 
-export async function readCompactionMeta(dir: string): Promise<CompactionMeta | null> {
+export async function readCompactionMeta(backend: StorageBackend): Promise<CompactionMeta | null> {
   try {
-    const content = await readFile(join(dir, "meta", "compaction.json"), "utf-8");
-    const meta = JSON.parse(content) as CompactionMeta;
-    // Sanitize parquetFile path to prevent traversal
+    const buf = await backend.readBlob("meta/compaction.json");
+    const meta = JSON.parse(buf.toString("utf-8")) as CompactionMeta;
     if (meta.parquetFile && (meta.parquetFile.includes("..") || meta.parquetFile.startsWith("/"))) {
       throw new Error(`Invalid parquetFile path in compaction metadata: '${meta.parquetFile}'`);
     }
@@ -188,13 +177,26 @@ export async function readCompactionMeta(dir: string): Promise<CompactionMeta | 
 
 // --- Reader ---
 
+/** Helper: read a Parquet file as ArrayBuffer via backend. */
+async function readParquetBuffer(backend: StorageBackend, parquetPath: string): Promise<ArrayBuffer> {
+  const buf = await backend.readBlob(parquetPath);
+  // Copy to a clean ArrayBuffer (buf.buffer may be SharedArrayBuffer or oversized)
+  const ab = new ArrayBuffer(buf.byteLength);
+  new Uint8Array(ab).set(buf);
+  return ab;
+}
+
+/** Helper: create an AsyncBuffer for hyparquet from backend. */
+async function getAsyncBuffer(backend: StorageBackend, parquetPath: string) {
+  const ab = await readParquetBuffer(backend, parquetPath);
+  return { byteLength: ab.byteLength, slice: (start: number, end?: number) => Promise.resolve(ab.slice(start, end)) };
+}
+
 /**
  * Read all records from a Parquet file.
- * Returns [id, record] pairs.
  */
-export async function readAllFromParquet(dir: string, parquetPath: string): Promise<Map<string, Record<string, unknown>>> {
-  const filePath = join(dir, parquetPath);
-  const file = await asyncBufferFromFile(filePath);
+export async function readAllFromParquet(backend: StorageBackend, parquetPath: string): Promise<Map<string, Record<string, unknown>>> {
+  const file = await getAsyncBuffer(backend, parquetPath);
   const rows = await parquetReadObjects({ file }) as Array<{ _id: string; _data: string }>;
   const records = new Map<string, Record<string, unknown>>();
   for (const row of rows) {
@@ -208,7 +210,7 @@ export async function readAllFromParquet(dir: string, parquetPath: string): Prom
  * Groups reads by row group for efficiency.
  */
 export async function readByIds(
-  dir: string,
+  backend: StorageBackend,
   parquetPath: string,
   ids: string[],
   offsetIndex: Map<string, OffsetEntry>,
@@ -216,8 +218,7 @@ export async function readByIds(
 ): Promise<Map<string, Record<string, unknown>>> {
   if (ids.length === 0) return new Map();
 
-  const filePath = join(dir, parquetPath);
-  const file = await asyncBufferFromFile(filePath);
+  const file = await getAsyncBuffer(backend, parquetPath);
   const results = new Map<string, Record<string, unknown>>();
 
   // Group IDs by row group
@@ -255,35 +256,30 @@ export async function readByIds(
 /**
  * Get Parquet file metadata (row group stats) for skip-scanning.
  */
-export async function getParquetMetadata(dir: string, parquetPath: string): Promise<FileMetaData> {
-  const filePath = join(dir, parquetPath);
-  const buf = await readFile(filePath);
-  return parquetMetadata(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+export async function getParquetMetadata(backend: StorageBackend, parquetPath: string): Promise<FileMetaData> {
+  const ab = await readParquetBuffer(backend, parquetPath);
+  return parquetMetadata(ab);
 }
 
 /**
  * Count records matching a simple equality filter by reading only the target column.
- * Skips _data deserialization entirely — reads ~1MB instead of ~50MB at 100K records.
- * Returns null if the column doesn't exist in the Parquet file (not an extracted column).
+ * Skips _data deserialization entirely.
+ * Returns null if the column doesn't exist in the Parquet file.
  */
 export async function countByColumn(
-  dir: string,
+  backend: StorageBackend,
   parquetPath: string,
   field: string,
   value: unknown,
 ): Promise<number | null> {
-  const filePath = join(dir, parquetPath);
-  const file = await asyncBufferFromFile(filePath);
-
-  // Check if the column exists in the Parquet schema
-  const buf = await readFile(filePath);
-  const metadata = parquetMetadata(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+  const ab = await readParquetBuffer(backend, parquetPath);
+  const metadata = parquetMetadata(ab);
   const columns = metadata.row_groups[0]?.columns.map(
     (c) => c.meta_data?.path_in_schema?.[0],
   ) ?? [];
   if (!columns.includes(field)) return null;
 
-  // Read only the target column
+  const file = { byteLength: ab.byteLength, slice: (start: number, end?: number) => Promise.resolve(ab.slice(start, end)) };
   const rows = await parquetReadObjects({ file, columns: [field] }) as Array<Record<string, unknown>>;
   let count = 0;
   for (const row of rows) {
@@ -294,25 +290,22 @@ export async function countByColumn(
 
 /**
  * Read only specific columns from Parquet (no _data deserialization).
- * For find() with extracted columns — scan column, collect matching _ids, then fetch full records only for matches.
  * Returns null if the column doesn't exist.
  */
 export async function scanColumn(
-  dir: string,
+  backend: StorageBackend,
   parquetPath: string,
   field: string,
   predicate: (value: unknown) => boolean,
 ): Promise<string[] | null> {
-  const filePath = join(dir, parquetPath);
-  const file = await asyncBufferFromFile(filePath);
-
-  const buf = await readFile(filePath);
-  const metadata = parquetMetadata(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+  const ab = await readParquetBuffer(backend, parquetPath);
+  const metadata = parquetMetadata(ab);
   const columns = metadata.row_groups[0]?.columns.map(
     (c) => c.meta_data?.path_in_schema?.[0],
   ) ?? [];
   if (!columns.includes(field)) return null;
 
+  const file = { byteLength: ab.byteLength, slice: (start: number, end?: number) => Promise.resolve(ab.slice(start, end)) };
   const rows = await parquetReadObjects({ file, columns: ["_id", field] }) as Array<Record<string, unknown>>;
   const matchingIds: string[] = [];
   for (const row of rows) {
@@ -324,13 +317,12 @@ export async function scanColumn(
 /**
  * Clean up old Parquet data files (keeps only the specified file).
  */
-export async function cleanupOldParquetFiles(dir: string, keepFile: string): Promise<void> {
-  const dataDir = join(dir, "data");
+export async function cleanupOldParquetFiles(backend: StorageBackend, keepFile: string): Promise<void> {
   try {
-    const files = await readdir(dataDir);
+    const files = await backend.listBlobs("data");
     for (const f of files) {
       if (f.endsWith(".parquet") && `data/${f}` !== keepFile) {
-        await rm(join(dataDir, f), { force: true });
+        await backend.deleteBlob(`data/${f}`);
       }
     }
   } catch {

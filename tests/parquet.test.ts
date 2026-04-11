@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FsBackend } from "@backloghq/opslog";
 import {
   compactToParquet,
   writeOffsetIndex,
@@ -18,9 +19,12 @@ import {
 
 describe("Parquet compaction and reader", () => {
   let tmpDir: string;
+  let backend: FsBackend;
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "agentdb-parquet-"));
+    backend = new FsBackend();
+    await backend.initialize(tmpDir, { readOnly: false });
   });
 
   afterEach(async () => {
@@ -41,7 +45,7 @@ describe("Parquet compaction and reader", () => {
 
   describe("compactToParquet", () => {
     it("compacts records into a Parquet file", async () => {
-      const { file, offsetIndex } = await compactToParquet(tmpDir, generateRecords(100));
+      const { file, offsetIndex } = await compactToParquet(backend, generateRecords(100));
 
       expect(file.path).toMatch(/^data\/data-\d+\.parquet$/);
       expect(file.rowCount).toBe(100);
@@ -51,17 +55,17 @@ describe("Parquet compaction and reader", () => {
     });
 
     it("respects rowGroupSize", async () => {
-      const { file } = await compactToParquet(tmpDir, generateRecords(100), { rowGroupSize: 25 });
+      const { file } = await compactToParquet(backend, generateRecords(100), { rowGroupSize: 25 });
       expect(file.rowGroups).toBe(4);
     });
 
     it("extracts columns for skip-scanning", async () => {
-      const { file } = await compactToParquet(tmpDir, generateRecords(100), {
+      const { file } = await compactToParquet(backend, generateRecords(100), {
         rowGroupSize: 25,
         extractColumns: ["status", "score"],
       });
 
-      const metadata = await getParquetMetadata(tmpDir, file.path);
+      const metadata = await getParquetMetadata(backend, file.path);
       // Should have _id, _data, status, score columns
       const colNames = metadata.row_groups[0].columns.map(
         (c) => c.meta_data?.path_in_schema?.[0],
@@ -74,14 +78,14 @@ describe("Parquet compaction and reader", () => {
 
     it("handles empty records", async () => {
       async function* empty() { /* yields nothing */ }
-      const { file, offsetIndex } = await compactToParquet(tmpDir, empty());
+      const { file, offsetIndex } = await compactToParquet(backend, empty());
       expect(file.rowCount).toBe(0);
       expect(offsetIndex.size).toBe(0);
     });
 
     it("round-trips: compact then read all", async () => {
-      const { file } = await compactToParquet(tmpDir, generateRecords(50));
-      const records = await readAllFromParquet(tmpDir, file.path);
+      const { file } = await compactToParquet(backend, generateRecords(50));
+      const records = await readAllFromParquet(backend, file.path);
 
       expect(records.size).toBe(50);
       expect(records.get("id-0")?.title).toBe("Record 0");
@@ -93,10 +97,10 @@ describe("Parquet compaction and reader", () => {
   describe("readByIds", () => {
     it("reads specific records by ID", async () => {
       const { file, offsetIndex } = await compactToParquet(
-        tmpDir, generateRecords(100), { rowGroupSize: 25 },
+        backend, generateRecords(100), { rowGroupSize: 25 },
       );
 
-      const results = await readByIds(tmpDir, file.path, ["id-0", "id-50", "id-99"], offsetIndex, 25);
+      const results = await readByIds(backend, file.path, ["id-0", "id-50", "id-99"], offsetIndex, 25);
       expect(results.size).toBe(3);
       expect(results.get("id-0")?.title).toBe("Record 0");
       expect(results.get("id-50")?.score).toBe(50);
@@ -104,8 +108,8 @@ describe("Parquet compaction and reader", () => {
     });
 
     it("returns empty for nonexistent IDs", async () => {
-      const { file, offsetIndex } = await compactToParquet(tmpDir, generateRecords(10));
-      const results = await readByIds(tmpDir, file.path, ["nonexistent"], offsetIndex, 5000);
+      const { file, offsetIndex } = await compactToParquet(backend, generateRecords(10));
+      const results = await readByIds(backend, file.path, ["nonexistent"], offsetIndex, 5000);
       expect(results.size).toBe(0);
     });
 
@@ -113,28 +117,28 @@ describe("Parquet compaction and reader", () => {
       // With 100 records and rowGroupSize=25, reading IDs from the same row group
       // should only read that row group
       const { file, offsetIndex } = await compactToParquet(
-        tmpDir, generateRecords(100), { rowGroupSize: 25 },
+        backend, generateRecords(100), { rowGroupSize: 25 },
       );
 
       // IDs 0-24 are in row group 0
-      const results = await readByIds(tmpDir, file.path, ["id-0", "id-10", "id-24"], offsetIndex, 25);
+      const results = await readByIds(backend, file.path, ["id-0", "id-10", "id-24"], offsetIndex, 25);
       expect(results.size).toBe(3);
     });
   });
 
   describe("offset index persistence", () => {
     it("writes and reads offset index", async () => {
-      const { offsetIndex } = await compactToParquet(tmpDir, generateRecords(50));
-      await writeOffsetIndex(tmpDir, offsetIndex);
+      const { offsetIndex } = await compactToParquet(backend, generateRecords(50));
+      await writeOffsetIndex(backend, offsetIndex);
 
-      const loaded = await readOffsetIndex(tmpDir);
+      const loaded = await readOffsetIndex(backend);
       expect(loaded.size).toBe(50);
       expect(loaded.get("id-0")).toEqual(offsetIndex.get("id-0"));
       expect(loaded.get("id-49")).toEqual(offsetIndex.get("id-49"));
     });
 
     it("returns empty map when no index file", async () => {
-      const loaded = await readOffsetIndex(tmpDir);
+      const loaded = await readOffsetIndex(backend);
       expect(loaded.size).toBe(0);
     });
   });
@@ -147,14 +151,14 @@ describe("Parquet compaction and reader", () => {
         rowCount: 1000,
         rowGroups: 4,
       };
-      await writeCompactionMeta(tmpDir, meta);
+      await writeCompactionMeta(backend, meta);
 
-      const loaded = await readCompactionMeta(tmpDir);
+      const loaded = await readCompactionMeta(backend);
       expect(loaded).toEqual(meta);
     });
 
     it("returns null when no metadata", async () => {
-      const loaded = await readCompactionMeta(tmpDir);
+      const loaded = await readCompactionMeta(backend);
       expect(loaded).toBeNull();
     });
   });
@@ -162,29 +166,29 @@ describe("Parquet compaction and reader", () => {
   describe("cleanup", () => {
     it("removes old Parquet files but keeps the specified one", async () => {
       // Create two Parquet files (delay to ensure different timestamps)
-      const { file: file1 } = await compactToParquet(tmpDir, generateRecords(10));
+      const { file: file1 } = await compactToParquet(backend, generateRecords(10));
       await new Promise((r) => setTimeout(r, 10));
-      const { file: file2 } = await compactToParquet(tmpDir, generateRecords(20));
+      const { file: file2 } = await compactToParquet(backend, generateRecords(20));
 
-      await cleanupOldParquetFiles(tmpDir, file2.path);
+      await cleanupOldParquetFiles(backend, file2.path);
 
       // file2 should still exist (readAll works)
-      const records = await readAllFromParquet(tmpDir, file2.path);
+      const records = await readAllFromParquet(backend, file2.path);
       expect(records.size).toBe(20);
 
       // file1 should be gone
-      await expect(readAllFromParquet(tmpDir, file1.path)).rejects.toThrow();
+      await expect(readAllFromParquet(backend, file1.path)).rejects.toThrow();
     });
   });
 
   describe("row group metadata", () => {
     it("provides min/max stats for extracted columns", async () => {
-      const { file } = await compactToParquet(tmpDir, generateRecords(100), {
+      const { file } = await compactToParquet(backend, generateRecords(100), {
         rowGroupSize: 25,
         extractColumns: ["score"],
       });
 
-      const metadata = await getParquetMetadata(tmpDir, file.path);
+      const metadata = await getParquetMetadata(backend, file.path);
       expect(metadata.row_groups.length).toBe(4);
 
       // Check score column stats in first row group (records 0-24)
@@ -201,33 +205,33 @@ describe("Parquet compaction and reader", () => {
 
   describe("column-only scan", () => {
     it("countByColumn counts matches without reading _data", async () => {
-      const { file } = await compactToParquet(tmpDir, generateRecords(100), {
+      const { file } = await compactToParquet(backend, generateRecords(100), {
         extractColumns: ["status"],
       });
 
       // status is "open" for i % 3 === 0, "closed" otherwise
-      const openCount = await countByColumn(tmpDir, file.path, "status", "open");
+      const openCount = await countByColumn(backend, file.path, "status", "open");
       expect(openCount).toBe(34); // 0,3,6,...,99 → 34 records
 
-      const closedCount = await countByColumn(tmpDir, file.path, "status", "closed");
+      const closedCount = await countByColumn(backend, file.path, "status", "closed");
       expect(closedCount).toBe(66);
     });
 
     it("countByColumn returns null for non-extracted column", async () => {
-      const { file } = await compactToParquet(tmpDir, generateRecords(50), {
+      const { file } = await compactToParquet(backend, generateRecords(50), {
         extractColumns: ["status"],
       });
 
-      const result = await countByColumn(tmpDir, file.path, "nonexistent", "value");
+      const result = await countByColumn(backend, file.path, "nonexistent", "value");
       expect(result).toBeNull();
     });
 
     it("scanColumn returns matching IDs", async () => {
-      const { file } = await compactToParquet(tmpDir, generateRecords(50), {
+      const { file } = await compactToParquet(backend, generateRecords(50), {
         extractColumns: ["status"],
       });
 
-      const openIds = await scanColumn(tmpDir, file.path, "status", (v) => v === "open");
+      const openIds = await scanColumn(backend, file.path, "status", (v) => v === "open");
       expect(openIds).not.toBeNull();
       expect(openIds!.length).toBe(17); // 0,3,6,...,48
 
@@ -238,8 +242,8 @@ describe("Parquet compaction and reader", () => {
     });
 
     it("scanColumn returns null for non-extracted column", async () => {
-      const { file } = await compactToParquet(tmpDir, generateRecords(10));
-      const result = await scanColumn(tmpDir, file.path, "title", () => true);
+      const { file } = await compactToParquet(backend, generateRecords(10));
+      const result = await scanColumn(backend, file.path, "title", () => true);
       expect(result).toBeNull();
     });
   });

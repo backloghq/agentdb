@@ -2,13 +2,17 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FsBackend } from "@backloghq/opslog";
 import { DiskStore } from "../src/disk-store.js";
 
 describe("DiskStore", () => {
   let tmpDir: string;
+  let backend: FsBackend;
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), "agentdb-disk-"));
+    backend = new FsBackend();
+    await backend.initialize(tmpDir, { readOnly: false });
   });
 
   afterEach(async () => {
@@ -24,7 +28,7 @@ describe("DiskStore", () => {
 
   describe("compact + get", () => {
     it("compacts records and reads by ID", async () => {
-      const store = new DiskStore(tmpDir, { rowGroupSize: 25 });
+      const store = new DiskStore(backend, { rowGroupSize: 25 });
       await store.compact(makeRecords(100));
       await store.load();
 
@@ -37,7 +41,7 @@ describe("DiskStore", () => {
     });
 
     it("returns undefined for nonexistent ID", async () => {
-      const store = new DiskStore(tmpDir);
+      const store = new DiskStore(backend);
       await store.compact(makeRecords(10));
       await store.load();
 
@@ -45,7 +49,7 @@ describe("DiskStore", () => {
     });
 
     it("cache hit avoids Parquet read", async () => {
-      const store = new DiskStore(tmpDir, { cacheSize: 10 });
+      const store = new DiskStore(backend, { cacheSize: 10 });
       await store.compact(makeRecords(50));
       await store.load();
 
@@ -64,7 +68,7 @@ describe("DiskStore", () => {
 
   describe("getMany", () => {
     it("batch reads multiple IDs", async () => {
-      const store = new DiskStore(tmpDir, { rowGroupSize: 25 });
+      const store = new DiskStore(backend, { rowGroupSize: 25 });
       await store.compact(makeRecords(100));
       await store.load();
 
@@ -78,7 +82,7 @@ describe("DiskStore", () => {
 
   describe("entries", () => {
     it("iterates all records", async () => {
-      const store = new DiskStore(tmpDir);
+      const store = new DiskStore(backend);
       await store.compact(makeRecords(50));
       await store.load();
 
@@ -90,7 +94,7 @@ describe("DiskStore", () => {
     });
 
     it("yields nothing when no Parquet data", async () => {
-      const store = new DiskStore(tmpDir);
+      const store = new DiskStore(backend);
       await store.load();
 
       const records: Array<[string, Record<string, unknown>]> = [];
@@ -103,7 +107,7 @@ describe("DiskStore", () => {
 
   describe("write-through cache", () => {
     it("cacheWrite makes record available via get", async () => {
-      const store = new DiskStore(tmpDir);
+      const store = new DiskStore(backend);
       await store.load();
 
       store.cacheWrite("new-1", { _id: "new-1", title: "New" });
@@ -112,7 +116,7 @@ describe("DiskStore", () => {
     });
 
     it("cacheDelete removes from cache", async () => {
-      const store = new DiskStore(tmpDir);
+      const store = new DiskStore(backend);
       await store.compact(makeRecords(10));
       await store.load();
 
@@ -125,7 +129,7 @@ describe("DiskStore", () => {
 
   describe("has", () => {
     it("checks offset index without Parquet read", async () => {
-      const store = new DiskStore(tmpDir);
+      const store = new DiskStore(backend);
       await store.compact(makeRecords(50));
       await store.load();
 
@@ -138,7 +142,7 @@ describe("DiskStore", () => {
 
   describe("re-compaction", () => {
     it("replaces old Parquet file with new one", async () => {
-      const store = new DiskStore(tmpDir);
+      const store = new DiskStore(backend);
       await store.compact(makeRecords(50));
       await store.load();
 
@@ -158,11 +162,11 @@ describe("DiskStore", () => {
 
   describe("persistence across instances", () => {
     it("new DiskStore loads state from disk", async () => {
-      const store1 = new DiskStore(tmpDir, { rowGroupSize: 25 });
+      const store1 = new DiskStore(backend, { rowGroupSize: 25 });
       await store1.compact(makeRecords(100));
 
       // New instance, same dir
-      const store2 = new DiskStore(tmpDir, { rowGroupSize: 25 });
+      const store2 = new DiskStore(backend, { rowGroupSize: 25 });
       await store2.load();
 
       expect(store2.recordCount).toBe(100);

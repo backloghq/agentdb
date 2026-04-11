@@ -1,15 +1,9 @@
 /**
  * DiskStore — disk-backed record storage using Parquet files.
  *
- * Provides the same get/entries/find interface as opslog's in-memory Map,
- * but reads from Parquet files with an LRU cache layer.
- *
- * Architecture:
- *   get(id) → cache hit? → return : offset index → Parquet seek → cache + return
- *   find(filter) → indexed? → batch Parquet read : full Parquet scan
+ * All I/O goes through StorageBackend, so this works on both
+ * filesystem (FsBackend) and S3 (S3Backend) transparently.
  */
-import { readFile, stat, writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
 import { RecordCache } from "./record-cache.js";
 import {
   compactToParquet,
@@ -28,9 +22,10 @@ import {
 } from "./parquet.js";
 import type { IndexManager } from "./collection-indexes.js";
 import type { TextIndex } from "./text-index.js";
+import type { StorageBackend } from "@backloghq/opslog";
 
 export interface DiskStoreOptions {
-  /** Max records in LRU cache (default: 10000). */
+  /** Max records in LRU cache (default: 1000). */
   cacheSize?: number;
   /** Parquet row group size (default: 5000). */
   rowGroupSize?: number;
@@ -39,7 +34,7 @@ export interface DiskStoreOptions {
 }
 
 export class DiskStore {
-  readonly dir: string;
+  private backend: StorageBackend;
   private cache: RecordCache<Record<string, unknown>>;
   private offsetIndex: Map<string, OffsetEntry> = new Map();
   private compactionMeta: CompactionMeta | null = null;
@@ -48,8 +43,8 @@ export class DiskStore {
   private _recordCount = 0;
   private _dirty = false;
 
-  constructor(dir: string, options?: DiskStoreOptions) {
-    this.dir = dir;
+  constructor(backend: StorageBackend, options?: DiskStoreOptions) {
+    this.backend = backend;
     this.cache = new RecordCache(options?.cacheSize ?? 1_000);
     this.rowGroupSize = options?.rowGroupSize ?? 5000;
     this.extractColumns = options?.extractColumns ?? [];
@@ -57,19 +52,14 @@ export class DiskStore {
 
   /** Load persisted state: offset index + compaction metadata. */
   async load(): Promise<void> {
-    this.offsetIndex = await readOffsetIndex(this.dir);
-    this.compactionMeta = await readCompactionMeta(this.dir);
+    this.offsetIndex = await readOffsetIndex(this.backend);
+    this.compactionMeta = await readCompactionMeta(this.backend);
     this._recordCount = this.offsetIndex.size;
   }
 
   /** Whether a Parquet file exists from a previous compaction. */
   get hasParquetData(): boolean {
     return this.compactionMeta !== null;
-  }
-
-  /** Whether there are unsaved writes since last compaction. */
-  get isDirty(): boolean {
-    return this._dirty;
   }
 
   /** Cardinality per extracted column from last compaction. */
@@ -90,6 +80,11 @@ export class DiskStore {
     return cardinality <= DiskStore.MAX_INDEX_CARDINALITY;
   }
 
+  /** Whether there are unsaved writes since last compaction. */
+  get isDirty(): boolean {
+    return this._dirty;
+  }
+
   /** Number of records in the offset index. */
   get recordCount(): number {
     return this._recordCount;
@@ -104,15 +99,13 @@ export class DiskStore {
 
   /** Get a record by ID. Checks cache first, then Parquet. */
   async get(id: string): Promise<Record<string, unknown> | undefined> {
-    // 1. Cache
     const cached = this.cache.get(id);
     if (cached !== undefined) return cached;
 
-    // 2. Offset index → Parquet
     if (!this.compactionMeta || !this.offsetIndex.has(id)) return undefined;
 
     const results = await readByIds(
-      this.dir, this.compactionMeta.parquetFile, [id], this.offsetIndex, this.rowGroupSize,
+      this.backend, this.compactionMeta.parquetFile, [id], this.offsetIndex, this.rowGroupSize,
     );
     const record = results.get(id);
     if (record) this.cache.set(id, record);
@@ -140,7 +133,7 @@ export class DiskStore {
 
     if (uncached.length > 0 && this.compactionMeta) {
       const fromParquet = await readByIds(
-        this.dir, this.compactionMeta.parquetFile, uncached, this.offsetIndex, this.rowGroupSize,
+        this.backend, this.compactionMeta.parquetFile, uncached, this.offsetIndex, this.rowGroupSize,
       );
       for (const [id, record] of fromParquet) {
         this.cache.set(id, record);
@@ -158,30 +151,29 @@ export class DiskStore {
    */
   async countByColumn(field: string, value: unknown): Promise<number | null> {
     if (!this.compactionMeta) return null;
-    return countByColumn(this.dir, this.compactionMeta.parquetFile, field, value);
+    return countByColumn(this.backend, this.compactionMeta.parquetFile, field, value);
   }
 
   /**
    * Scan an extracted column and return matching _ids.
-   * Reads only _id + target column — no _data deserialization.
    * Returns null if column not available.
    */
   async scanColumn(field: string, predicate: (value: unknown) => boolean): Promise<string[] | null> {
     if (!this.compactionMeta) return null;
-    return scanColumn(this.dir, this.compactionMeta.parquetFile, field, predicate);
+    return scanColumn(this.backend, this.compactionMeta.parquetFile, field, predicate);
   }
 
-  /** Iterate all records (streams from Parquet). */
+  /** Iterate all records (reads from Parquet). */
   async *entries(): AsyncGenerator<[string, Record<string, unknown>]> {
     if (!this.compactionMeta) return;
-    const all = await readAllFromParquet(this.dir, this.compactionMeta.parquetFile);
+    const all = await readAllFromParquet(this.backend, this.compactionMeta.parquetFile);
     for (const [id, record] of all) {
       this.cache.set(id, record);
       yield [id, record];
     }
   }
 
-  // --- Write-through cache ---
+  // --- Write-through ---
 
   /** Mark as dirty (mutations occurred this session). */
   markDirty(): void {
@@ -195,7 +187,7 @@ export class DiskStore {
     this._dirty = true;
   }
 
-  /** Evict from cache and offset index after a delete (caller handles WAL persistence). */
+  /** Evict from cache and offset index after a delete. */
   cacheDelete(id: string): void {
     this.cache.delete(id);
     this._dirty = true;
@@ -212,10 +204,6 @@ export class DiskStore {
 
   // --- Compaction ---
 
-  /**
-   * Compact records into a new Parquet file.
-   * Reads all records (from Parquet + WAL cache), writes new Parquet, updates indexes.
-   */
   async compact(
     allRecords: AsyncIterable<[string, Record<string, unknown>]> | Iterable<[string, Record<string, unknown>]>,
   ): Promise<void> {
@@ -224,9 +212,8 @@ export class DiskStore {
       extractColumns: this.extractColumns,
     };
 
-    const { file, offsetIndex, columnCardinality } = await compactToParquet(this.dir, allRecords, options);
+    const { file, offsetIndex, columnCardinality } = await compactToParquet(this.backend, allRecords, options);
 
-    // Update state
     this.offsetIndex = offsetIndex;
     this._recordCount = offsetIndex.size;
     this.compactionMeta = {
@@ -237,79 +224,75 @@ export class DiskStore {
       columnCardinality,
     };
 
-    // Persist
-    await writeOffsetIndex(this.dir, offsetIndex);
-    await writeCompactionMeta(this.dir, this.compactionMeta);
+    await writeOffsetIndex(this.backend, offsetIndex);
+    await writeCompactionMeta(this.backend, this.compactionMeta);
+    await cleanupOldParquetFiles(this.backend, file.path);
 
-    // Clean up old Parquet files
-    await cleanupOldParquetFiles(this.dir, file.path);
-
-    // Clear cache (offsets changed) and reset dirty flag
     this.cache.clear();
     this._dirty = false;
   }
 
   // --- Index persistence ---
 
+  /** Max index file size to load (256MB). */
+  private static readonly MAX_INDEX_FILE_SIZE = 256 * 1024 * 1024;
+
   /** Save index data to disk. Also updates cardinality for all indexed fields. */
   async saveIndexes(indexManager: IndexManager, textIndex?: TextIndex | null): Promise<void> {
-    const indexDir = join(this.dir, "indexes");
-    await mkdir(indexDir, { recursive: true });
-
     const { btree, array } = indexManager.serializeIndexes();
-    // Update cardinality from all B-tree indexes (covers programmatic + schema indexes)
+    // Update cardinality from all B-tree indexes
     if (this.compactionMeta) {
       const cardinality = { ...this.compactionMeta.columnCardinality };
       for (const { data } of btree) {
-        cardinality[data.field] = data.entries.length; // number of unique values
+        cardinality[data.field] = data.entries.length;
       }
       this.compactionMeta.columnCardinality = cardinality;
-      await writeCompactionMeta(this.dir, this.compactionMeta);
+      await writeCompactionMeta(this.backend, this.compactionMeta);
     }
     for (const { data } of btree) {
-      await writeFile(join(indexDir, `btree-${data.field}.json`), JSON.stringify(data));
+      await this.backend.writeBlob(`indexes/btree-${data.field}.json`, Buffer.from(JSON.stringify(data)));
     }
     for (const { data } of array) {
-      await writeFile(join(indexDir, `array-${data.field}.json`), JSON.stringify(data));
+      await this.backend.writeBlob(`indexes/array-${data.field}.json`, Buffer.from(JSON.stringify(data)));
     }
     if (textIndex) {
-      await writeFile(join(indexDir, "text-index.json"), JSON.stringify(textIndex.toJSON()));
+      await this.backend.writeBlob("indexes/text-index.json", Buffer.from(JSON.stringify(textIndex.toJSON())));
     }
   }
 
-  /** Max index file size to load (256MB). Prevents DoS via crafted index files. */
-  private static readonly MAX_INDEX_FILE_SIZE = 256 * 1024 * 1024;
-
   /** Load persisted indexes from disk. Returns true if indexes were loaded. */
   async loadIndexes(indexManager: IndexManager, textIndex?: TextIndex | null): Promise<boolean> {
-    const indexDir = join(this.dir, "indexes");
     let loaded = false;
 
     try {
-      const { readdir } = await import("node:fs/promises");
-      const files = await readdir(indexDir);
+      const files = await this.backend.listBlobs("indexes");
 
       for (const f of files) {
-        const filePath = join(indexDir, f);
-        const fileStat = await stat(filePath);
-        if (fileStat.size > DiskStore.MAX_INDEX_FILE_SIZE) {
-          console.warn(`agentdb: skipping oversized index file ${f} (${fileStat.size} bytes)`);
+        // Size check — read blob and check length
+        let content: Buffer;
+        try {
+          content = await this.backend.readBlob(`indexes/${f}`);
+        } catch {
+          continue;
+        }
+        if (content.length > DiskStore.MAX_INDEX_FILE_SIZE) {
+          console.warn(`agentdb: skipping oversized index file ${f} (${content.length} bytes)`);
           continue;
         }
         if (f.startsWith("btree-") && f.endsWith(".json")) {
-          const field = f.slice(6, -5); // "btree-status.json" → "status"
-          if (!this.shouldUseInMemoryIndex(field)) continue; // high cardinality — skip
-          const data = JSON.parse(await readFile(filePath, "utf-8"));
+          const field = f.slice(6, -5);
+          if (!this.shouldUseInMemoryIndex(field)) continue;
+          const data = JSON.parse(content.toString("utf-8"));
           indexManager.loadBTreeIndex(data);
           loaded = true;
         }
         if (f.startsWith("array-") && f.endsWith(".json")) {
-          const data = JSON.parse(await readFile(filePath, "utf-8"));
+          const data = JSON.parse(content.toString("utf-8"));
           indexManager.loadArrayIndex(data);
           loaded = true;
         }
         if (f === "text-index.json" && textIndex) {
-          const data = JSON.parse(await readFile(filePath, "utf-8"));
+          const data = JSON.parse(content.toString("utf-8"));
           textIndex.loadFromJSON(data);
           loaded = true;
         }
