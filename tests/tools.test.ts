@@ -36,8 +36,8 @@ describe("Tool Definitions", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns 30 tools", () => {
-    expect(tools).toHaveLength(30);
+  it("returns 32 tools", () => {
+    expect(tools).toHaveLength(32);
   });
 
   it("every tool has required fields", () => {
@@ -228,6 +228,88 @@ describe("Tool Definitions", () => {
       expect(result.sampleCount).toBe(2);
       const nameField = result.fields.find((f: { name: string }) => f.name === "name");
       expect(nameField?.type).toBe("string");
+    });
+  });
+
+  describe("db_get_schema", () => {
+    it("returns null when no schema defined", async () => {
+      await exec("db_create", { collection: "empty" });
+      const result = await exec("db_get_schema", { collection: "empty" });
+      expect(result.schema).toBeNull();
+      expect(result.hasCodeSchema).toBe(false);
+    });
+
+    it("returns persisted schema", async () => {
+      // Persist a schema manually via db_set_schema
+      await exec("db_set_schema", {
+        collection: "typed",
+        schema: {
+          version: 1,
+          description: "Typed collection",
+          instructions: "Always set priority",
+          fields: {
+            title: { type: "string", required: true, description: "Short title" },
+            priority: { type: "enum", values: ["H", "M", "L"], description: "Task priority" },
+          },
+          indexes: ["priority"],
+        },
+      });
+
+      const result = await exec("db_get_schema", { collection: "typed" });
+      expect(result.schema).not.toBeNull();
+      expect(result.schema.description).toBe("Typed collection");
+      expect(result.schema.instructions).toBe("Always set priority");
+      expect(result.schema.fields.title.description).toBe("Short title");
+      expect(result.schema.fields.priority.values).toEqual(["H", "M", "L"]);
+      expect(result.schema.indexes).toEqual(["priority"]);
+    });
+  });
+
+  describe("db_set_schema", () => {
+    it("creates a new schema", async () => {
+      await exec("db_set_schema", {
+        collection: "new-schema",
+        schema: {
+          version: 1,
+          description: "Test collection",
+          fields: { title: { type: "string", required: true } },
+        },
+      });
+
+      const result = await exec("db_get_schema", { collection: "new-schema" });
+      expect(result.schema.description).toBe("Test collection");
+      expect(result.schema.version).toBe(1);
+    });
+
+    it("merges with existing schema", async () => {
+      // Create initial schema
+      await exec("db_set_schema", {
+        collection: "mergeable",
+        schema: {
+          version: 1,
+          description: "Initial",
+          fields: { title: { type: "string" } },
+          indexes: ["title"],
+        },
+      });
+
+      // Update with additional fields and indexes
+      await exec("db_set_schema", {
+        collection: "mergeable",
+        schema: {
+          description: "Updated",
+          fields: { status: { type: "enum", values: ["open", "done"] } },
+          indexes: ["status"],
+        },
+      });
+
+      const result = await exec("db_get_schema", { collection: "mergeable" });
+      expect(result.schema.description).toBe("Updated");
+      expect(result.schema.version).toBe(1); // version preserved from original
+      expect(result.schema.fields.title).toBeDefined(); // original field kept
+      expect(result.schema.fields.status).toBeDefined(); // new field added
+      expect(result.schema.indexes).toContain("title");
+      expect(result.schema.indexes).toContain("status");
     });
   });
 

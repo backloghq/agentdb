@@ -399,6 +399,97 @@ export function getTools(db: AgentDB): AgentTool[] {
     },
 
     {
+      name: "db_get_schema",
+      title: "Get Collection Schema",
+      description: "Get the persisted schema for a collection including field definitions, descriptions, instructions, and indexes. Use this to understand what data a collection holds, how fields should be used, and what indexes are available. Returns null if no schema has been defined." + API_NOTE,
+      schema: z.object({
+        collection: collectionParam,
+      }),
+      outputSchema: z.object({
+        schema: z.unknown().meta({ description: "Persisted schema or null" }),
+        hasCodeSchema: z.boolean().meta({ description: "Whether a code-level schema is also active" }),
+      }),
+      annotations: READ,
+      execute: safe("db_get_schema", READ)(async (args) => {
+        const name = args.collection as string;
+        const schema = await db.loadPersistedSchema(name);
+        const hasCodeSchema = db.getSchema(name) !== undefined;
+        return { schema: schema ?? null, hasCodeSchema };
+      }),
+    },
+
+    {
+      name: "db_set_schema",
+      title: "Set Collection Schema",
+      description: "Create or update the persisted schema for a collection. Requires admin permission. The schema defines field types, descriptions, instructions for agents, and index configuration. Partial updates are merged with the existing schema." + API_NOTE,
+      schema: z.object({
+        collection: collectionParam,
+        schema: z.object({
+          version: z.number().optional().meta({ description: "Schema version number" }),
+          description: z.string().optional().meta({ description: "What this collection is for" }),
+          instructions: z.string().optional().meta({ description: "Instructions for agents on how to use this collection" }),
+          fields: z.record(z.string(), z.object({
+            type: z.enum(["string", "number", "boolean", "date", "enum", "string[]", "number[]", "object", "autoIncrement"]).meta({ description: "Field data type" }),
+            required: z.boolean().optional().meta({ description: "Field is required on insert" }),
+            default: z.unknown().optional().meta({ description: "Default value when not provided" }),
+            values: z.array(z.string()).optional().meta({ description: "Allowed values for enum type" }),
+            maxLength: z.number().optional().meta({ description: "Max string length" }),
+            min: z.number().optional().meta({ description: "Min for numbers" }),
+            max: z.number().optional().meta({ description: "Max for numbers" }),
+            description: z.string().optional().meta({ description: "Human-readable field description for agent discovery" }),
+          })).optional().meta({ description: "Field definitions" }),
+          indexes: z.array(z.string()).optional().meta({ description: "Fields to create B-tree indexes on" }),
+          compositeIndexes: z.array(z.array(z.string())).optional().meta({ description: "Composite indexes" }),
+          arrayIndexes: z.array(z.string()).optional().meta({ description: "Array-element indexes for $contains queries" }),
+          tagField: z.string().optional().meta({ description: "Array field for +tag/-tag compact filter syntax" }),
+          storageMode: z.enum(["memory", "disk", "auto"]).optional().meta({ description: "Storage mode" }),
+        }).meta({ description: "Schema definition (partial updates merged with existing)" }),
+        ...mutationOpts,
+      }),
+      outputSchema: z.object({
+        schema: z.unknown().meta({ description: "The resulting persisted schema after merge" }),
+      }),
+      annotations: DESTRUCTIVE,
+      execute: safe("db_set_schema", DESTRUCTIVE)(async (args) => {
+        const name = args.collection as string;
+        const input = args.schema as Record<string, unknown>;
+        const agent = args.agent as string | undefined;
+
+        // Build the schema to persist
+        const incoming = { name, ...input } as import("../schema.js").PersistedSchema;
+
+        // Merge with existing if present
+        const existing = await db.loadPersistedSchema(name);
+        if (existing) {
+          // Manual merge: incoming fields override existing
+          const merged = { ...existing };
+          if (incoming.version !== undefined) merged.version = incoming.version;
+          if (incoming.description !== undefined) merged.description = incoming.description;
+          if (incoming.instructions !== undefined) merged.instructions = incoming.instructions;
+          if (incoming.tagField !== undefined) merged.tagField = incoming.tagField;
+          if (incoming.storageMode !== undefined) merged.storageMode = incoming.storageMode;
+          if (incoming.indexes) merged.indexes = [...new Set([...(existing.indexes ?? []), ...incoming.indexes])];
+          if (incoming.compositeIndexes) {
+            const keys = new Set((existing.compositeIndexes ?? []).map(ci => ci.join(",")));
+            merged.compositeIndexes = [...(existing.compositeIndexes ?? [])];
+            for (const ci of incoming.compositeIndexes) {
+              if (!keys.has(ci.join(","))) merged.compositeIndexes.push(ci);
+            }
+          }
+          if (incoming.arrayIndexes) merged.arrayIndexes = [...new Set([...(existing.arrayIndexes ?? []), ...incoming.arrayIndexes])];
+          if (incoming.fields) {
+            merged.fields = { ...(existing.fields ?? {}), ...incoming.fields };
+          }
+          await db.persistSchema(name, merged, { agent });
+          return { schema: merged };
+        } else {
+          await db.persistSchema(name, incoming, { agent });
+          return { schema: incoming };
+        }
+      }),
+    },
+
+    {
       name: "db_distinct",
       title: "Distinct Values",
       description: "Get unique values for a specific field across all records in a collection. Supports dot notation for nested fields (e.g. 'metadata.category'). Useful for discovering what values exist before writing filters." + API_NOTE,
