@@ -480,9 +480,14 @@ export class AgentDB {
 
   // --- Schema persistence ---
 
-  /** Persist a schema for a collection. Writes to meta/{name}.schema.json. */
-  async persistSchema(collectionName: string, schema: PersistedSchema): Promise<void> {
+  /**
+   * Persist a schema for a collection. Writes to meta/{name}.schema.json.
+   * Requires admin permission when called via tools (agent parameter).
+   * Internal calls (auto-persist on collection open) skip the permission check.
+   */
+  async persistSchema(collectionName: string, schema: PersistedSchema, opts?: { agent?: string }): Promise<void> {
     this.ensureOpen();
+    if (opts?.agent) this.permissions.require(opts.agent, "admin", "persistSchema");
     validateCollectionName(collectionName);
     validatePersistedSchema(schema);
     const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
@@ -508,8 +513,9 @@ export class AgentDB {
   }
 
   /** Delete the persisted schema for a collection. No-op if none exists. */
-  async deletePersistedSchema(collectionName: string): Promise<void> {
+  async deletePersistedSchema(collectionName: string, opts?: { agent?: string }): Promise<void> {
     this.ensureOpen();
+    if (opts?.agent) this.permissions.require(opts.agent, "admin", "deletePersistedSchema");
     validateCollectionName(collectionName);
     const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
     try {

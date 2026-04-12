@@ -984,6 +984,56 @@ describe("schema persistence", () => {
     await db.init();
   });
 
+  it("persistSchema requires admin when agent is specified", async () => {
+    await db.close();
+    const dbWithPerms = new AgentDB(tmpDir, {
+      permissions: {
+        reader: { read: true, write: false, admin: false },
+        writer: { read: true, write: true, admin: false },
+        admin: { read: true, write: true, admin: true },
+      },
+    });
+    await dbWithPerms.init();
+
+    const schema: PersistedSchema = { name: "guarded", version: 1 };
+
+    // Reader and writer should be denied
+    await expect(dbWithPerms.persistSchema("guarded", schema, { agent: "reader" }))
+      .rejects.toThrow("Permission denied");
+    await expect(dbWithPerms.persistSchema("guarded", schema, { agent: "writer" }))
+      .rejects.toThrow("Permission denied");
+
+    // Admin should succeed
+    await dbWithPerms.persistSchema("guarded", schema, { agent: "admin" });
+    expect(await dbWithPerms.loadPersistedSchema("guarded")).toEqual(schema);
+
+    // Delete also requires admin
+    await expect(dbWithPerms.deletePersistedSchema("guarded", { agent: "writer" }))
+      .rejects.toThrow("Permission denied");
+    await dbWithPerms.deletePersistedSchema("guarded", { agent: "admin" });
+    expect(await dbWithPerms.loadPersistedSchema("guarded")).toBeUndefined();
+
+    await dbWithPerms.close();
+    db = new AgentDB(tmpDir);
+    await db.init();
+  });
+
+  it("persistSchema skips permission check when no agent specified", async () => {
+    await db.close();
+    const dbWithPerms = new AgentDB(tmpDir, {
+      permissions: { reader: { read: true } },
+    });
+    await dbWithPerms.init();
+
+    // Internal call (no agent) should succeed even with restrictive permissions
+    await dbWithPerms.persistSchema("internal", { name: "internal", version: 1 });
+    expect(await dbWithPerms.loadPersistedSchema("internal")).toBeDefined();
+
+    await dbWithPerms.close();
+    db = new AgentDB(tmpDir);
+    await db.init();
+  });
+
   it("getSchema returns in-memory schema", async () => {
     expect(db.getSchema("nonexistent")).toBeUndefined();
 
