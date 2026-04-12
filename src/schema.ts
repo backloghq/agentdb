@@ -7,9 +7,12 @@ import type { CollectionOptions } from "./collection.js";
 
 // --- Field types ---
 
+/** Allowed field type identifiers. */
+export type FieldType = "string" | "number" | "boolean" | "date" | "enum" | "string[]" | "number[]" | "object" | "autoIncrement";
+
 export interface FieldDef {
   /** Field type. "autoIncrement" assigns sequential integer IDs (1, 2, 3...). */
-  type: "string" | "number" | "boolean" | "date" | "enum" | "string[]" | "number[]" | "object" | "autoIncrement";
+  type: FieldType;
   /** Field is required on insert. Default: false. */
   required?: boolean;
   /** Default value — applied on insert if field is missing. */
@@ -26,6 +29,8 @@ export interface FieldDef {
   pattern?: RegExp;
   /** Transform value before validation (e.g. resolve "tomorrow" → ISO date string). */
   resolve?: (value: unknown) => unknown;
+  /** Human-readable description of this field — used for agent discovery. */
+  description?: string;
 }
 
 // --- Hooks ---
@@ -53,6 +58,12 @@ export interface SchemaHooks {
 export interface SchemaDefinition {
   /** Collection name. */
   name: string;
+  /** Schema version — for tracking changes over time. */
+  version?: number;
+  /** Human-readable description of this collection — used for agent discovery. */
+  description?: string;
+  /** Instructions for agents on how to use this collection. */
+  instructions?: string;
   /** Field definitions. Keys are field names. */
   fields?: Record<string, FieldDef>;
   /** Fields to create B-tree indexes on (auto-created on open). */
@@ -253,4 +264,163 @@ function compileDefaults(fields: Record<string, FieldDef>, counters: Map<string,
     }
     return result;
   };
+}
+
+// --- Persisted schema (JSON-serializable subset) ---
+
+/** JSON-serializable field definition — no functions or RegExp. */
+export interface PersistedFieldDef {
+  type: FieldType;
+  required?: boolean;
+  /** Static default value only (function defaults are not persisted). */
+  default?: unknown;
+  values?: string[];
+  maxLength?: number;
+  min?: number;
+  max?: number;
+  /** Human-readable description of this field — used for agent discovery. */
+  description?: string;
+}
+
+/**
+ * JSON-serializable schema stored in collection metadata.
+ * Contains structural information and agent context, but no runtime
+ * behaviors (hooks, computed, virtualFilters, resolve, pattern).
+ */
+export interface PersistedSchema {
+  name: string;
+  version?: number;
+  /** What this collection is for. */
+  description?: string;
+  /** Instructions for agents on how to use this collection. */
+  instructions?: string;
+  fields?: Record<string, PersistedFieldDef>;
+  indexes?: string[];
+  compositeIndexes?: string[][];
+  arrayIndexes?: string[];
+  tagField?: string;
+  storageMode?: "memory" | "disk" | "auto";
+}
+
+/**
+ * Extract the JSON-serializable subset from a SchemaDefinition.
+ * Strips functions (hooks, computed, virtualFilters, resolve, pattern)
+ * and non-serializable defaults.
+ */
+export function extractPersistedSchema(def: SchemaDefinition): PersistedSchema {
+  const persisted: PersistedSchema = { name: def.name };
+
+  if (def.version !== undefined) persisted.version = def.version;
+  if (def.description !== undefined) persisted.description = def.description;
+  if (def.instructions !== undefined) persisted.instructions = def.instructions;
+  if (def.indexes?.length) persisted.indexes = [...def.indexes];
+  if (def.compositeIndexes?.length) persisted.compositeIndexes = def.compositeIndexes.map(ci => [...ci]);
+  if (def.arrayIndexes?.length) persisted.arrayIndexes = [...def.arrayIndexes];
+  if (def.tagField !== undefined) persisted.tagField = def.tagField;
+  if (def.storageMode !== undefined) persisted.storageMode = def.storageMode;
+
+  if (def.fields) {
+    persisted.fields = {};
+    for (const [name, field] of Object.entries(def.fields)) {
+      const pf: PersistedFieldDef = { type: field.type };
+      if (field.required) pf.required = true;
+      // Only persist static defaults, not function defaults
+      if (field.default !== undefined && typeof field.default !== "function") pf.default = field.default;
+      if (field.values?.length) pf.values = [...field.values];
+      if (field.maxLength !== undefined) pf.maxLength = field.maxLength;
+      if (field.min !== undefined) pf.min = field.min;
+      if (field.max !== undefined) pf.max = field.max;
+      if (field.description !== undefined) pf.description = field.description;
+      persisted.fields[name] = pf;
+    }
+  }
+
+  return persisted;
+}
+
+/** Valid field types for schema validation. */
+const VALID_FIELD_TYPES = new Set<string>([
+  "string", "number", "boolean", "date", "enum",
+  "string[]", "number[]", "object", "autoIncrement",
+]);
+
+/**
+ * Validate a PersistedSchema structure (e.g. loaded from JSON).
+ * Throws on invalid input.
+ */
+export function validatePersistedSchema(schema: unknown): asserts schema is PersistedSchema {
+  if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
+    throw new Error("Schema must be a non-null object");
+  }
+  const s = schema as Record<string, unknown>;
+
+  if (typeof s.name !== "string" || !s.name.trim()) {
+    throw new Error("Schema 'name' must be a non-empty string");
+  }
+  if (s.version !== undefined && (typeof s.version !== "number" || !Number.isInteger(s.version) || s.version < 1)) {
+    throw new Error("Schema 'version' must be a positive integer");
+  }
+  if (s.description !== undefined && typeof s.description !== "string") {
+    throw new Error("Schema 'description' must be a string");
+  }
+  if (s.instructions !== undefined && typeof s.instructions !== "string") {
+    throw new Error("Schema 'instructions' must be a string");
+  }
+  if (s.tagField !== undefined && typeof s.tagField !== "string") {
+    throw new Error("Schema 'tagField' must be a string");
+  }
+  if (s.storageMode !== undefined && !["memory", "disk", "auto"].includes(s.storageMode as string)) {
+    throw new Error("Schema 'storageMode' must be 'memory', 'disk', or 'auto'");
+  }
+
+  // Validate indexes arrays
+  for (const key of ["indexes", "arrayIndexes"] as const) {
+    if (s[key] !== undefined) {
+      if (!Array.isArray(s[key]) || !(s[key] as unknown[]).every(v => typeof v === "string")) {
+        throw new Error(`Schema '${key}' must be an array of strings`);
+      }
+    }
+  }
+  if (s.compositeIndexes !== undefined) {
+    if (!Array.isArray(s.compositeIndexes) ||
+        !(s.compositeIndexes as unknown[]).every(ci => Array.isArray(ci) && (ci as unknown[]).every(v => typeof v === "string"))) {
+      throw new Error("Schema 'compositeIndexes' must be an array of string arrays");
+    }
+  }
+
+  // Validate fields
+  if (s.fields !== undefined) {
+    if (typeof s.fields !== "object" || s.fields === null || Array.isArray(s.fields)) {
+      throw new Error("Schema 'fields' must be an object");
+    }
+    for (const [fieldName, fieldDef] of Object.entries(s.fields as Record<string, unknown>)) {
+      if (typeof fieldDef !== "object" || fieldDef === null || Array.isArray(fieldDef)) {
+        throw new Error(`Field '${fieldName}' must be an object`);
+      }
+      const fd = fieldDef as Record<string, unknown>;
+      if (!VALID_FIELD_TYPES.has(fd.type as string)) {
+        throw new Error(`Field '${fieldName}' has invalid type '${fd.type}'. Valid types: ${[...VALID_FIELD_TYPES].join(", ")}`);
+      }
+      if (fd.required !== undefined && typeof fd.required !== "boolean") {
+        throw new Error(`Field '${fieldName}.required' must be a boolean`);
+      }
+      if (fd.values !== undefined) {
+        if (!Array.isArray(fd.values) || !(fd.values as unknown[]).every(v => typeof v === "string")) {
+          throw new Error(`Field '${fieldName}.values' must be an array of strings`);
+        }
+      }
+      if (fd.maxLength !== undefined && typeof fd.maxLength !== "number") {
+        throw new Error(`Field '${fieldName}.maxLength' must be a number`);
+      }
+      if (fd.min !== undefined && typeof fd.min !== "number") {
+        throw new Error(`Field '${fieldName}.min' must be a number`);
+      }
+      if (fd.max !== undefined && typeof fd.max !== "number") {
+        throw new Error(`Field '${fieldName}.max' must be a number`);
+      }
+      if (fd.description !== undefined && typeof fd.description !== "string") {
+        throw new Error(`Field '${fieldName}.description' must be a string`);
+      }
+    }
+  }
 }
