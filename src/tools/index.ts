@@ -91,12 +91,36 @@ export function getTools(db: AgentDB): AgentTool[] {
     {
       name: "db_collections",
       title: "List Collections",
-      description: "List all collections with record counts. Use this first to discover what data is available." + API_NOTE,
+      description: "List all collections with record counts and schema summaries. Use this first to discover what data is available and how collections are structured." + API_NOTE,
       schema: z.object({}),
-      outputSchema: z.object({ collections: z.array(z.object({ name: z.string(), recordCount: z.number() })) }),
+      outputSchema: z.object({ collections: z.array(z.object({
+        name: z.string(),
+        recordCount: z.number(),
+        schema: z.object({
+          description: z.string().optional(),
+          fieldCount: z.number(),
+          hasInstructions: z.boolean(),
+          version: z.number().optional(),
+        }).optional(),
+      })) }),
       annotations: READ,
       execute: safe("db_collections", READ)(async () => {
-        return { collections: await db.listCollections() };
+        const infos = await db.listCollections();
+        const collections = await Promise.all(infos.map(async (info) => {
+          const persisted = await db.loadPersistedSchema(info.name);
+          return {
+            ...info,
+            ...(persisted ? {
+              schema: {
+                description: persisted.description,
+                fieldCount: persisted.fields ? Object.keys(persisted.fields).length : 0,
+                hasInstructions: !!persisted.instructions,
+                version: persisted.version,
+              },
+            } : {}),
+          };
+        }));
+        return { collections };
       }),
     },
 

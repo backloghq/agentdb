@@ -62,6 +62,34 @@ describe("Tool Definitions", () => {
       expect(result.collections).toHaveLength(1);
       expect(result.collections[0].name).toBe("users");
     });
+
+    it("includes schema summary when schema exists", async () => {
+      await exec("db_create", { collection: "typed" });
+      await exec("db_set_schema", {
+        collection: "typed",
+        schema: {
+          version: 1,
+          description: "Typed data",
+          instructions: "Handle carefully",
+          fields: { x: { type: "string" }, y: { type: "number" } },
+        },
+      });
+
+      const result = await exec("db_collections");
+      const typed = result.collections.find((c: { name: string }) => c.name === "typed");
+      expect(typed.schema).toBeDefined();
+      expect(typed.schema.description).toBe("Typed data");
+      expect(typed.schema.fieldCount).toBe(2);
+      expect(typed.schema.hasInstructions).toBe(true);
+      expect(typed.schema.version).toBe(1);
+    });
+
+    it("omits schema when none defined", async () => {
+      await exec("db_create", { collection: "untyped" });
+      const result = await exec("db_collections");
+      const untyped = result.collections.find((c: { name: string }) => c.name === "untyped");
+      expect(untyped.schema).toBeUndefined();
+    });
   });
 
   describe("db_create", () => {
