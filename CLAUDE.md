@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** v1.2 ready. 756 tests. Disk mode: JSONL for point lookups, Parquet for column scans, short-circuit at limit, sorted reads, lazy index loading Disk mode works on filesystem + S3. Benchmarked at 1M records: 30ms cold open, 1M ops/s findOne cache hit, 187MB heap, hybrid cardinality indexing BREAKING: Collection read methods (findOne, find, findAll, count, search) are now async. Disk mode uses skipLoad — records served from Parquet with LRU cache, not loaded into memory. Review-hardened: prototype pollution fixed, WAL replay O(1), dirty compaction, stale delete prevention, index size validation, path traversal sanitization, 32 tools (30 core + db_subscribe/db_unsubscribe on HTTP). 5 runnable demos. Auth + security hardened. Group commit ~12x faster writes. Sorted-array indexed queries with range support ($gt/$lt/$gte/$lte). Count-from-index fast path. Predicate cache. HNSW MaxHeap optimized. Incremental index rebuild on tail/watch/undo. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints. Blob storage via StorageBackend (filesystem + S3). Declarative schemas with defineSchema(). RecordCache LRU, ArrayIndex for O(1) $contains, persistent index serialization. Disk-backed storage via hyparquet (Parquet).
+**Status:** v1.3 in progress. 810+ tests. Persisted schemas with agent context (description, instructions, field descriptions), schema merge logic, version tracking, admin-guarded modifications, db_get_schema/db_set_schema tools, portable JSON import/export. Disk mode: JSONL for point lookups, Parquet for column scans, short-circuit at limit, sorted reads, lazy index loading. Disk mode works on filesystem + S3. 34 tools (32 core + db_subscribe/db_unsubscribe on HTTP). Auth + security hardened.
 
 ## Commands
 
@@ -40,7 +40,7 @@ agentdb/mcp      — MCP server adapter (stdio + HTTP/Streamable transport)
 src/
   index.ts              # Core exports
   auth-context.ts       # Shared auth identity (AsyncLocalStorage) — used by tools + mcp
-  schema.ts             # defineSchema() — declarative collection definitions with field validation
+  schema.ts             # defineSchema(), PersistedSchema, extractPersistedSchema, mergeSchemas, import/export
   agentdb.ts            # AgentDB class: collection manager, lazy loading, LRU, memory monitor
   collection.ts         # Collection: CRUD, middleware, search, views, TTL, tailing (~1130 lines)
   collection-helpers.ts # Pure utilities: stripMeta, isExpired, applyUpdate, compositeKey, filter cache
@@ -68,7 +68,7 @@ src/
     http.ts             # Custom HTTP embedding provider
     quantize.ts         # Int8 quantization for vector storage
     index.ts            # Provider factory
-  tools/index.ts        # 30 tool definitions with zod schemas + safe() wrapper (32 total with db_subscribe/db_unsubscribe on HTTP)
+  tools/index.ts        # 32 tool definitions with zod schemas + safe() wrapper (34 total with db_subscribe/db_unsubscribe on HTTP)
   mcp/index.ts          # MCP server (stdio + HTTP/Streamable transport)
   mcp/auth.ts           # Auth middleware (bearer token, rate limiter, audit logger)
   mcp/jwt.ts            # JWT validation with jose

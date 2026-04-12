@@ -54,10 +54,13 @@ await db.init();
 
 const tasks = await db.collection(defineSchema({
   name: "tasks",
+  version: 1,
+  description: "Project tasks tracked by the team",
+  instructions: "Set priority based on urgency. Close done tasks after review.",
   fields: {
-    title: { type: "string", required: true, maxLength: 200 },
-    status: { type: "enum", values: ["pending", "done"], default: "pending" },
-    priority: { type: "enum", values: ["H", "M", "L"], default: "M" },
+    title: { type: "string", required: true, maxLength: 200, description: "Short task summary" },
+    status: { type: "enum", values: ["pending", "done"], default: "pending", description: "Current state" },
+    priority: { type: "enum", values: ["H", "M", "L"], default: "M", description: "H=urgent, M=normal, L=backlog" },
     score: { type: "number", min: 0, max: 100 },
     tags: { type: "string[]" },
   },
@@ -73,6 +76,7 @@ const tasks = await db.collection(defineSchema({
     beforeInsert: (record) => ({ ...record, createdAt: new Date().toISOString() }),
   },
 }));
+// Schema auto-persisted to meta/tasks.schema.json — any agent can discover it
 
 await tasks.insert({ title: "Fix critical bug", priority: "H" });
 // → status defaults to "pending", priority validated, createdAt auto-set
@@ -130,7 +134,7 @@ npx agentdb --path ./data              # stdio (single client)
 npx agentdb --path ./data --http       # HTTP (multiple clients)
 ```
 
-All 30 tools exposed as MCP tools (32 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
+All 32 tools exposed as MCP tools (34 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
 
 ```json
 {
@@ -307,11 +311,11 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 
 ## Tool Definitions
 
-`getTools(db)` returns 30 tools:
+`getTools(db)` returns 32 tools:
 
 | Tool | Description |
 |------|-------------|
-| `db_collections` | List all collections with record counts |
+| `db_collections` | List all collections with record counts and schema summaries |
 | `db_create` | Create a collection (idempotent) |
 | `db_drop` | Soft-delete a collection |
 | `db_purge` | Permanently delete a dropped collection |
@@ -326,6 +330,8 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 | `db_undo` | Undo last mutation |
 | `db_history` | Mutation history for a record |
 | `db_schema` | Inspect record shape (fields, types, examples) |
+| `db_get_schema` | Get persisted schema with context, instructions, fields, indexes |
+| `db_set_schema` | Create/update persisted schema (admin-only, partial merge) |
 | `db_distinct` | Unique values for a field |
 | `db_stats` | Database-level statistics |
 | `db_archive` | Move records to cold storage |

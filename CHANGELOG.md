@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased] - v1.3.0
+
+### Added
+- **Persisted schemas** — schemas stored as `{dbPath}/meta/{collection}.schema.json`. Auto-persisted on first `defineSchema()` open, survives restart.
+- **Agent context on schemas** — `description`, `instructions` on collections, `description` on fields. Any agent can discover how to use a collection via `db_get_schema`.
+- **Schema version tracking** — `version` field on schemas, warnings on mismatch between code-level and persisted schemas.
+- **`PersistedSchema` / `PersistedFieldDef` interfaces** — JSON-serializable schema subset (no functions, RegExp, or non-static defaults).
+- **`extractPersistedSchema()`** — extract serializable parts from a `SchemaDefinition`.
+- **`validatePersistedSchema()`** — validate schema structure loaded from JSON.
+- **`mergeSchemas()`** — merge code-level and persisted schemas with clear precedence rules. Persisted wins for agent context, code wins for runtime config, indexes unioned.
+- **`loadSchemaFromJSON()` / `exportSchemaToJSON()`** — portable JSON import/export for schema definitions.
+- **`db_get_schema` tool** — read-only tool returns full persisted schema with context, instructions, fields, and indexes.
+- **`db_set_schema` tool** — admin-only tool to create or update persisted schema with partial merge support.
+- **Enhanced `db_collections` tool** — now includes schema summary (description, field count, has instructions, version) per collection.
+- **Admin-guarded schema modifications** — `persistSchema` and `deletePersistedSchema` require admin permission when called with agent identity.
+- **`AgentDB.persistSchema()` / `loadPersistedSchema()` / `deletePersistedSchema()`** — programmatic schema persistence API.
+- **`AgentDB.getSchema()`** — access in-memory compiled schema for a collection.
+- **`CollectionSchema.definition`** — retains original `SchemaDefinition` for persistence extraction.
+
 ## [1.2.1] - 2026-04-11
 
 ### Fixed
