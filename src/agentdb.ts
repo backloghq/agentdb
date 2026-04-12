@@ -8,7 +8,8 @@ import type { EmbeddingConfig, EmbeddingProvider } from "./embeddings/index.js";
 import { resolveProvider } from "./embeddings/index.js";
 import { PermissionManager } from "./permissions.js";
 import type { AgentPermissions } from "./permissions.js";
-import type { CollectionSchema } from "./schema.js";
+import type { CollectionSchema, PersistedSchema } from "./schema.js";
+import { extractPersistedSchema, validatePersistedSchema } from "./schema.js";
 import { MemoryMonitor } from "./memory.js";
 import type { MemoryStats } from "./memory.js";
 import { DiskStore } from "./disk-store.js";
@@ -390,6 +391,16 @@ export class AgentDB {
       await this.writeMeta();
     }
 
+    // Auto-persist schema when collection is opened with defineSchema()
+    if (schema?.definition) {
+      const persisted = extractPersistedSchema(schema.definition);
+      // Only write if no persisted schema exists yet (don't overwrite user edits)
+      const existing = await this.loadPersistedSchema(name);
+      if (!existing) {
+        await this.persistSchema(name, persisted);
+      }
+    }
+
     return col;
   }
 
@@ -465,6 +476,52 @@ export class AgentDB {
   listDropped(): string[] {
     this.ensureOpen();
     return [...this.meta.dropped];
+  }
+
+  // --- Schema persistence ---
+
+  /** Persist a schema for a collection. Writes to meta/{name}.schema.json. */
+  async persistSchema(collectionName: string, schema: PersistedSchema): Promise<void> {
+    this.ensureOpen();
+    validateCollectionName(collectionName);
+    validatePersistedSchema(schema);
+    const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
+    const tmpPath = schemaPath + ".tmp";
+    await writeFile(tmpPath, JSON.stringify(schema, null, 2), "utf-8");
+    await rename(tmpPath, schemaPath);
+  }
+
+  /** Load the persisted schema for a collection. Returns undefined if none stored. */
+  async loadPersistedSchema(collectionName: string): Promise<PersistedSchema | undefined> {
+    this.ensureOpen();
+    validateCollectionName(collectionName);
+    const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
+    try {
+      const content = await readFile(schemaPath, "utf-8");
+      const parsed = JSON.parse(content);
+      validatePersistedSchema(parsed);
+      return parsed;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw err;
+    }
+  }
+
+  /** Delete the persisted schema for a collection. No-op if none exists. */
+  async deletePersistedSchema(collectionName: string): Promise<void> {
+    this.ensureOpen();
+    validateCollectionName(collectionName);
+    const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
+    try {
+      await rm(schemaPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+
+  /** Get the in-memory schema for a collection (from defineSchema). */
+  getSchema(collectionName: string): CollectionSchema | undefined {
+    return this.schemas.get(collectionName);
   }
 
   /** Database-level stats. */

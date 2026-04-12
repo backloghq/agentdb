@@ -103,6 +103,8 @@ export interface CollectionSchema {
   counters: Map<string, number>;
   /** Array field name for +tag/-tag compact filter. Default: "tags". */
   tagField: string;
+  /** Original schema definition — retained for persistence extraction. */
+  definition: SchemaDefinition;
 }
 
 // --- Compile ---
@@ -155,6 +157,7 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     autoIncrementFields,
     counters,
     tagField: def.tagField ?? "tags",
+    definition: def,
   };
 }
 

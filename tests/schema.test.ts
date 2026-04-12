@@ -860,3 +860,138 @@ describe("validatePersistedSchema", () => {
     })).toThrow("storageMode");
   });
 });
+
+describe("schema persistence", () => {
+  let tmpDir: string;
+  let db: AgentDB;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "agentdb-persist-"));
+    db = new AgentDB(tmpDir);
+    await db.init();
+  });
+
+  afterEach(async () => {
+    await db.close();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("persist and load round-trip", async () => {
+    const schema: PersistedSchema = {
+      name: "tickets",
+      version: 1,
+      description: "Support tickets",
+      instructions: "Set priority based on tier",
+      fields: {
+        title: { type: "string", required: true, description: "Short summary" },
+        status: { type: "enum", values: ["open", "closed"], default: "open" },
+      },
+      indexes: ["status"],
+    };
+
+    await db.persistSchema("tickets", schema);
+    const loaded = await db.loadPersistedSchema("tickets");
+    expect(loaded).toEqual(schema);
+  });
+
+  it("loadPersistedSchema returns undefined for non-existent", async () => {
+    const result = await db.loadPersistedSchema("nonexistent");
+    expect(result).toBeUndefined();
+  });
+
+  it("deletePersistedSchema removes the file", async () => {
+    await db.persistSchema("temp", { name: "temp", version: 1 });
+    expect(await db.loadPersistedSchema("temp")).toBeDefined();
+
+    await db.deletePersistedSchema("temp");
+    expect(await db.loadPersistedSchema("temp")).toBeUndefined();
+  });
+
+  it("deletePersistedSchema is no-op for non-existent", async () => {
+    await expect(db.deletePersistedSchema("ghost")).resolves.toBeUndefined();
+  });
+
+  it("persistSchema rejects invalid schema", async () => {
+    await expect(db.persistSchema("bad", { name: "" } as PersistedSchema)).rejects.toThrow("non-empty string");
+  });
+
+  it("rejects invalid collection names", async () => {
+    await expect(db.persistSchema("../escape", { name: "escape" })).rejects.toThrow("Invalid collection name");
+    await expect(db.loadPersistedSchema("../escape")).rejects.toThrow("Invalid collection name");
+  });
+
+  it("auto-persists schema on first collection open with defineSchema", async () => {
+    await db.collection(defineSchema({
+      name: "auto-persist",
+      version: 1,
+      description: "Auto-persisted collection",
+      instructions: "Handle with care",
+      fields: {
+        title: { type: "string", required: true, description: "The title" },
+        status: { type: "enum", values: ["open", "done"], default: "open" },
+      },
+      indexes: ["status"],
+    }));
+
+    const loaded = await db.loadPersistedSchema("auto-persist");
+    expect(loaded).toBeDefined();
+    expect(loaded!.name).toBe("auto-persist");
+    expect(loaded!.description).toBe("Auto-persisted collection");
+    expect(loaded!.instructions).toBe("Handle with care");
+    expect(loaded!.fields?.title.description).toBe("The title");
+    expect(loaded!.indexes).toEqual(["status"]);
+  });
+
+  it("does not overwrite existing persisted schema on reopen", async () => {
+    // Manually persist a schema with custom instructions
+    await db.persistSchema("no-overwrite", {
+      name: "no-overwrite",
+      version: 1,
+      instructions: "Original instructions",
+    });
+
+    // Open with different instructions in code
+    await db.collection(defineSchema({
+      name: "no-overwrite",
+      version: 2,
+      instructions: "New instructions",
+      fields: { title: { type: "string" } },
+    }));
+
+    // Persisted schema should still have original instructions
+    const loaded = await db.loadPersistedSchema("no-overwrite");
+    expect(loaded!.instructions).toBe("Original instructions");
+    expect(loaded!.version).toBe(1);
+  });
+
+  it("survives close and reopen", async () => {
+    await db.collection(defineSchema({
+      name: "survive",
+      description: "Survives restart",
+      fields: { x: { type: "number" } },
+    }));
+    await db.close();
+
+    const db2 = new AgentDB(tmpDir);
+    await db2.init();
+    const loaded = await db2.loadPersistedSchema("survive");
+    expect(loaded).toBeDefined();
+    expect(loaded!.description).toBe("Survives restart");
+    await db2.close();
+
+    // Reopen for afterEach cleanup
+    db = new AgentDB(tmpDir);
+    await db.init();
+  });
+
+  it("getSchema returns in-memory schema", async () => {
+    expect(db.getSchema("nonexistent")).toBeUndefined();
+
+    await db.collection(defineSchema({
+      name: "in-memory",
+      fields: { x: { type: "string" } },
+    }));
+    expect(db.getSchema("in-memory")).toBeDefined();
+    expect(db.getSchema("in-memory")!.name).toBe("in-memory");
+  });
+});
