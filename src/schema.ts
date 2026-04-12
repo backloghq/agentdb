@@ -541,3 +541,22 @@ export function validatePersistedSchema(schema: unknown): asserts schema is Pers
     }
   }
 }
+
+// --- Schema import/export ---
+
+/**
+ * Parse and validate a JSON schema string or object.
+ * Throws on invalid input.
+ */
+export function loadSchemaFromJSON(input: string | object): PersistedSchema {
+  const parsed = typeof input === "string" ? JSON.parse(input) : input;
+  validatePersistedSchema(parsed);
+  return parsed;
+}
+
+/**
+ * Export a persisted schema to a pretty-printed JSON string.
+ */
+export function exportSchemaToJSON(schema: PersistedSchema): string {
+  return JSON.stringify(schema, null, 2);
+}
