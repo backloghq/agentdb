@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
-import { defineSchema, extractPersistedSchema, validatePersistedSchema } from "../src/schema.js";
+import { defineSchema, extractPersistedSchema, validatePersistedSchema, mergeSchemas } from "../src/schema.js";
 import type { SchemaDefinition, PersistedSchema } from "../src/schema.js";
 
 describe("defineSchema", () => {
@@ -942,26 +942,42 @@ describe("schema persistence", () => {
     expect(loaded!.indexes).toEqual(["status"]);
   });
 
-  it("does not overwrite existing persisted schema on reopen", async () => {
+  it("merges code and persisted schemas on reopen, persisted context wins", async () => {
     // Manually persist a schema with custom instructions
-    await db.persistSchema("no-overwrite", {
-      name: "no-overwrite",
+    await db.persistSchema("merge-test", {
+      name: "merge-test",
       version: 1,
+      description: "Persisted description",
       instructions: "Original instructions",
+      fields: {
+        title: { type: "string", description: "Persisted title desc" },
+      },
     });
 
-    // Open with different instructions in code
+    // Open with different instructions in code + a new field
     await db.collection(defineSchema({
-      name: "no-overwrite",
+      name: "merge-test",
       version: 2,
       instructions: "New instructions",
-      fields: { title: { type: "string" } },
+      fields: {
+        title: { type: "string", description: "Code title desc" },
+        status: { type: "enum", values: ["open", "done"], default: "open" },
+      },
+      indexes: ["status"],
     }));
 
-    // Persisted schema should still have original instructions
-    const loaded = await db.loadPersistedSchema("no-overwrite");
+    const loaded = await db.loadPersistedSchema("merge-test");
+    // Persisted context wins
     expect(loaded!.instructions).toBe("Original instructions");
+    expect(loaded!.description).toBe("Persisted description");
     expect(loaded!.version).toBe(1);
+    // Persisted field description wins
+    expect(loaded!.fields?.title.description).toBe("Persisted title desc");
+    // New field from code is added
+    expect(loaded!.fields?.status).toBeDefined();
+    expect(loaded!.fields?.status.type).toBe("enum");
+    // Indexes merged
+    expect(loaded!.indexes).toContain("status");
   });
 
   it("survives close and reopen", async () => {
@@ -1043,5 +1059,122 @@ describe("schema persistence", () => {
     }));
     expect(db.getSchema("in-memory")).toBeDefined();
     expect(db.getSchema("in-memory")!.name).toBe("in-memory");
+  });
+});
+
+describe("mergeSchemas", () => {
+  it("persisted description/instructions win over code", () => {
+    const { persisted } = mergeSchemas(
+      { name: "t", description: "Code desc", instructions: "Code inst" },
+      { name: "t", description: "Persisted desc", instructions: "Persisted inst" },
+    );
+    expect(persisted.description).toBe("Persisted desc");
+    expect(persisted.instructions).toBe("Persisted inst");
+  });
+
+  it("code fills in missing description/instructions", () => {
+    const { persisted } = mergeSchemas(
+      { name: "t", description: "Code desc", instructions: "Code inst" },
+      { name: "t" },
+    );
+    expect(persisted.description).toBe("Code desc");
+    expect(persisted.instructions).toBe("Code inst");
+  });
+
+  it("persisted version wins", () => {
+    const { persisted } = mergeSchemas(
+      { name: "t", version: 3 },
+      { name: "t", version: 1 },
+    );
+    expect(persisted.version).toBe(1);
+  });
+
+  it("warns on version mismatch", () => {
+    const { warnings } = mergeSchemas(
+      { name: "t", version: 2 },
+      { name: "t", version: 1 },
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/version mismatch.*code v2.*persisted v1/);
+  });
+
+  it("no warning when versions match", () => {
+    const { warnings } = mergeSchemas(
+      { name: "t", version: 1 },
+      { name: "t", version: 1 },
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  it("no warning when version is undefined on either side", () => {
+    const { warnings: w1 } = mergeSchemas({ name: "t" }, { name: "t", version: 1 });
+    const { warnings: w2 } = mergeSchemas({ name: "t", version: 1 }, { name: "t" });
+    expect(w1).toHaveLength(0);
+    expect(w2).toHaveLength(0);
+  });
+
+  it("warns on field type mismatch", () => {
+    const { persisted, warnings } = mergeSchemas(
+      { name: "t", fields: { x: { type: "string" } } },
+      { name: "t", fields: { x: { type: "number" } } },
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/Field 'x' type mismatch/);
+    // Code type wins for validation
+    expect(persisted.fields?.x.type).toBe("string");
+  });
+
+  it("unions indexes from both sides", () => {
+    const { persisted } = mergeSchemas(
+      { name: "t", indexes: ["status", "priority"], arrayIndexes: ["tags"] },
+      { name: "t", indexes: ["status", "date"], arrayIndexes: ["labels"] },
+    );
+    expect(persisted.indexes).toEqual(["status", "date", "priority"]);
+    expect(persisted.arrayIndexes).toEqual(["labels", "tags"]);
+  });
+
+  it("unions composite indexes", () => {
+    const { persisted } = mergeSchemas(
+      { name: "t", compositeIndexes: [["a", "b"], ["c", "d"]] },
+      { name: "t", compositeIndexes: [["a", "b"], ["e", "f"]] },
+    );
+    expect(persisted.compositeIndexes).toEqual([["a", "b"], ["e", "f"], ["c", "d"]]);
+  });
+
+  it("unions fields from both sides", () => {
+    const { persisted } = mergeSchemas(
+      { name: "t", fields: { title: { type: "string" }, status: { type: "enum", values: ["a"] } } },
+      { name: "t", fields: { title: { type: "string", description: "Persisted" }, priority: { type: "number" } } },
+    );
+    expect(Object.keys(persisted.fields!).sort()).toEqual(["priority", "status", "title"]);
+    expect(persisted.fields?.title.description).toBe("Persisted"); // persisted desc wins
+    expect(persisted.fields?.status.type).toBe("enum");
+    expect(persisted.fields?.priority.type).toBe("number");
+  });
+
+  it("code tagField/storageMode wins when set", () => {
+    const { persisted } = mergeSchemas(
+      { name: "t", tagField: "labels", storageMode: "disk" },
+      { name: "t", tagField: "tags", storageMode: "memory" },
+    );
+    expect(persisted.tagField).toBe("labels");
+    expect(persisted.storageMode).toBe("disk");
+  });
+
+  it("persisted tagField/storageMode used when code is unset", () => {
+    const { persisted } = mergeSchemas(
+      { name: "t" },
+      { name: "t", tagField: "tags", storageMode: "memory" },
+    );
+    expect(persisted.tagField).toBe("tags");
+    expect(persisted.storageMode).toBe("memory");
+  });
+
+  it("strips function defaults from code fields", () => {
+    const { persisted } = mergeSchemas(
+      { name: "t", fields: { ts: { type: "string", default: () => "now" } } },
+      { name: "t" },
+    );
+    expect(persisted.fields?.ts.default).toBeUndefined();
   });
 });

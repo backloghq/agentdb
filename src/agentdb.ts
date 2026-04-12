@@ -9,7 +9,7 @@ import { resolveProvider } from "./embeddings/index.js";
 import { PermissionManager } from "./permissions.js";
 import type { AgentPermissions } from "./permissions.js";
 import type { CollectionSchema, PersistedSchema } from "./schema.js";
-import { extractPersistedSchema, validatePersistedSchema } from "./schema.js";
+import { extractPersistedSchema, validatePersistedSchema, mergeSchemas } from "./schema.js";
 import { MemoryMonitor } from "./memory.js";
 import type { MemoryStats } from "./memory.js";
 import { DiskStore } from "./disk-store.js";
@@ -393,11 +393,15 @@ export class AgentDB {
 
     // Auto-persist schema when collection is opened with defineSchema()
     if (schema?.definition) {
-      const persisted = extractPersistedSchema(schema.definition);
-      // Only write if no persisted schema exists yet (don't overwrite user edits)
       const existing = await this.loadPersistedSchema(name);
       if (!existing) {
-        await this.persistSchema(name, persisted);
+        // First time: extract and persist
+        await this.persistSchema(name, extractPersistedSchema(schema.definition));
+      } else {
+        // Merge code + persisted, warn on mismatches
+        const { persisted: merged, warnings } = mergeSchemas(schema.definition, existing);
+        for (const w of warnings) console.warn(`[AgentDB] ${w}`);
+        await this.persistSchema(name, merged);
       }
     }
 

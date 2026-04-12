@@ -341,6 +341,120 @@ export function extractPersistedSchema(def: SchemaDefinition): PersistedSchema {
   return persisted;
 }
 
+// --- Schema merge ---
+
+export interface MergeResult {
+  /** The merged persisted schema (structural source of truth + agent context). */
+  persisted: PersistedSchema;
+  /** Warnings about mismatches between code and persisted schemas. */
+  warnings: string[];
+}
+
+/**
+ * Merge a code-level SchemaDefinition with a persisted schema.
+ *
+ * Precedence:
+ * - description, instructions, version: persisted wins (agent context)
+ * - fields structure: union of both; persisted field descriptions preserved
+ * - field type conflicts: warn, code wins for validation
+ * - indexes: union of both
+ * - tagField, storageMode: code wins if set, else persisted
+ */
+export function mergeSchemas(code: SchemaDefinition, persisted: PersistedSchema): MergeResult {
+  const warnings: string[] = [];
+
+  // Version mismatch detection
+  if (code.version !== undefined && persisted.version !== undefined && code.version !== persisted.version) {
+    warnings.push(`Schema version mismatch for '${code.name}': code v${code.version}, persisted v${persisted.version}`);
+  }
+
+  const merged: PersistedSchema = {
+    name: persisted.name,
+    // Persisted wins for agent context
+    version: persisted.version ?? code.version,
+    description: persisted.description ?? code.description,
+    instructions: persisted.instructions ?? code.instructions,
+    // Code wins for runtime config if set
+    tagField: code.tagField ?? persisted.tagField,
+    storageMode: code.storageMode ?? persisted.storageMode,
+  };
+
+  // Merge indexes (union, deduplicated)
+  const codeIndexes = code.indexes ?? [];
+  const persistedIndexes = persisted.indexes ?? [];
+  const mergedIndexes = [...new Set([...persistedIndexes, ...codeIndexes])];
+  if (mergedIndexes.length > 0) merged.indexes = mergedIndexes;
+
+  const codeComposite = code.compositeIndexes ?? [];
+  const persistedComposite = persisted.compositeIndexes ?? [];
+  const compositeKeys = new Set(persistedComposite.map(ci => ci.join(",")));
+  const mergedComposite = [...persistedComposite];
+  for (const ci of codeComposite) {
+    if (!compositeKeys.has(ci.join(","))) mergedComposite.push(ci);
+  }
+  if (mergedComposite.length > 0) merged.compositeIndexes = mergedComposite;
+
+  const codeArray = code.arrayIndexes ?? [];
+  const persistedArray = persisted.arrayIndexes ?? [];
+  const mergedArray = [...new Set([...persistedArray, ...codeArray])];
+  if (mergedArray.length > 0) merged.arrayIndexes = mergedArray;
+
+  // Merge fields
+  const codeFields = code.fields ?? {};
+  const persistedFields = persisted.fields ?? {};
+  const allFieldNames = new Set([...Object.keys(persistedFields), ...Object.keys(codeFields)]);
+
+  if (allFieldNames.size > 0) {
+    merged.fields = {};
+    for (const name of allFieldNames) {
+      const cf = codeFields[name];
+      const pf = persistedFields[name];
+
+      if (cf && pf) {
+        // Both exist — check for type conflicts
+        if (cf.type !== pf.type) {
+          warnings.push(`Field '${name}' type mismatch: code '${cf.type}', persisted '${pf.type}'`);
+        }
+        // Merge: persisted description wins, code structural props win for validation
+        merged.fields[name] = {
+          type: cf.type, // code wins for validation
+          ...(cf.required ? { required: true } : pf.required ? { required: true } : {}),
+          ...(cf.default !== undefined && typeof cf.default !== "function" ? { default: cf.default } : pf.default !== undefined ? { default: pf.default } : {}),
+          ...(cf.values?.length ? { values: [...cf.values] } : pf.values?.length ? { values: [...pf.values] } : {}),
+          ...(cf.maxLength !== undefined ? { maxLength: cf.maxLength } : pf.maxLength !== undefined ? { maxLength: pf.maxLength } : {}),
+          ...(cf.min !== undefined ? { min: cf.min } : pf.min !== undefined ? { min: pf.min } : {}),
+          ...(cf.max !== undefined ? { max: cf.max } : pf.max !== undefined ? { max: pf.max } : {}),
+          // Persisted description wins (agent context)
+          ...(pf.description !== undefined ? { description: pf.description } : cf.description !== undefined ? { description: cf.description } : {}),
+        };
+      } else if (pf) {
+        // Only in persisted
+        merged.fields[name] = { ...pf };
+      } else if (cf) {
+        // Only in code — extract serializable parts
+        const pf2: PersistedFieldDef = { type: cf.type };
+        if (cf.required) pf2.required = true;
+        if (cf.default !== undefined && typeof cf.default !== "function") pf2.default = cf.default;
+        if (cf.values?.length) pf2.values = [...cf.values];
+        if (cf.maxLength !== undefined) pf2.maxLength = cf.maxLength;
+        if (cf.min !== undefined) pf2.min = cf.min;
+        if (cf.max !== undefined) pf2.max = cf.max;
+        if (cf.description !== undefined) pf2.description = cf.description;
+        merged.fields[name] = pf2;
+      }
+    }
+  }
+
+  // Clean up undefined optional fields
+  if (merged.version === undefined) delete merged.version;
+  if (merged.description === undefined) delete merged.description;
+  if (merged.instructions === undefined) delete merged.instructions;
+  if (merged.tagField === undefined) delete merged.tagField;
+  if (merged.storageMode === undefined) delete merged.storageMode;
+
+  return { persisted: merged, warnings };
+}
+
 /** Valid field types for schema validation. */
 const VALID_FIELD_TYPES = new Set<string>([
   "string", "number", "boolean", "date", "enum",
