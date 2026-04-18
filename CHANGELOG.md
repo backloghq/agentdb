@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ### Fixed
 
 - **Orphaned `meta/*.tmp` cleanup on init** — `AgentDB.init()` now scans `meta/` for `*.tmp` files after creating the directory and removes them with `rm({force:true})`. Prevents accumulation of tmp files left by hard crashes between `writeFile` and `rename` in `persistSchema` or `writeMeta`.
+- **`writeMeta()` unique tmp filename** — changed static `manifest.json.tmp` suffix to `pid+timestamp+random.tmp` (same pattern as `persistSchema`). Prevents concurrent writers in multi-process deployments from clobbering each other's in-flight writes. Rename failure cleans up tmp and re-throws.
 
 ## [1.3.0] - 2026-04-18
 

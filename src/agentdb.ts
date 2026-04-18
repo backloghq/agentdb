@@ -855,9 +855,14 @@ export class AgentDB {
 
   private async writeMeta(): Promise<void> {
     const metaPath = join(this.dir, META_DIR, "manifest.json");
-    const tmpPath = metaPath + ".tmp";
+    const tmpPath = `${metaPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     await writeFile(tmpPath, JSON.stringify(this.meta, null, 2), "utf-8");
-    await rename(tmpPath, metaPath);
+    try {
+      await rename(tmpPath, metaPath);
+    } catch (err) {
+      await rm(tmpPath, { force: true });
+      throw err;
+    }
   }
 
   private ensureOpen(): void {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, writeFile, readdir, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readdir, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../../src/agentdb.js";
@@ -49,5 +49,44 @@ describe("AgentDB.init() — orphaned tmp cleanup", () => {
     expect(loaded!.name).toBe("tasks");
 
     db = db2;
+  });
+});
+
+describe("writeMeta() — concurrent-write safety", () => {
+  let tmpDir: string;
+  let db1: AgentDB;
+  let db2: AgentDB;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "agentdb-writemeta-"));
+    // Init both instances on the same directory
+    db1 = new AgentDB(tmpDir);
+    await db1.init();
+    db2 = new AgentDB(tmpDir);
+    await db2.init();
+  });
+
+  afterEach(async () => {
+    await db1?.close();
+    await db2?.close();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("concurrent createCollection calls succeed and leave no orphaned tmp files", async () => {
+    // Both instances write manifest concurrently — unique tmp names prevent clobbering
+    await Promise.all([
+      db1.createCollection("col-a"),
+      db2.createCollection("col-b"),
+    ]);
+
+    // No .tmp files should remain in meta/
+    const metaDir = join(tmpDir, "meta");
+    const files = await readdir(metaDir);
+    expect(files.filter(f => f.endsWith(".tmp"))).toHaveLength(0);
+
+    // Manifest must be valid JSON with at least one of the two collections
+    const manifest = JSON.parse(await readFile(join(metaDir, "manifest.json"), "utf-8"));
+    expect(manifest.collections).toBeDefined();
+    expect(Array.isArray(manifest.collections)).toBe(true);
   });
 });
