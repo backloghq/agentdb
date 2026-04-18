@@ -94,9 +94,11 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
 /**
  * Start AgentDB as an MCP server on stdio (single client).
  */
-export async function startStdio(dataDir: string, dbOpts?: AgentDBOptions): Promise<void> {
+export async function startStdio(dataDir: string, dbOpts?: AgentDBOptions, extraOpts?: { schemaPaths?: string[] }): Promise<void> {
   const db = new AgentDB(dataDir, dbOpts);
   await db.init();
+
+  await loadExtraSchemas(db, extraOpts?.schemaPaths);
 
   const server = createMcpServer(db);
   const transport = new StdioServerTransport();
@@ -128,17 +130,33 @@ export interface HttpOptions {
   maxBodySize?: string;
   /** CORS allowed origins (default: none — reject cross-origin). */
   corsOrigins?: string[];
+  /** Extra schema JSON files to load after init (file-as-overlay, per-file isolation). */
+  schemaPaths?: string[];
+}
+
+async function loadExtraSchemas(db: AgentDB, schemaPaths?: string[]): Promise<void> {
+  if (!schemaPaths?.length) return;
+  const result = await db.loadSchemasFromFiles(schemaPaths);
+  const parts: string[] = [`loaded ${result.loaded}`];
+  if (result.skipped > 0) parts.push(`skipped ${result.skipped}`);
+  if (result.failed.length > 0) {
+    parts.push(`failed ${result.failed.length}`);
+    for (const f of result.failed) console.error(`[agentdb] --schemas failed (${f.path}): ${f.error}`);
+  }
+  console.error(`[agentdb] --schemas: ${parts.join(", ")}`);
 }
 
 export async function startHttp(
   dataDir: string,
   opts?: HttpOptions,
-): Promise<{ app: express.Express; close: () => Promise<void>; auditLog: AuditLogger; port: number }> {
+): Promise<{ app: express.Express; close: () => Promise<void>; auditLog: AuditLogger; port: number; db: AgentDB }> {
   const port = opts?.port ?? 3000;
   const host = opts?.host ?? "127.0.0.1";
 
   const db = new AgentDB(dataDir, opts?.dbOpts);
   await db.init();
+
+  await loadExtraSchemas(db, opts?.schemaPaths);
 
   const app = express();
   app.use(express.json({ limit: opts?.maxBodySize ?? "10mb" }));
@@ -326,5 +344,5 @@ export async function startHttp(
     await originalClose();
   };
 
-  return { app, close: cleanClose, auditLog, port: actualPort };
+  return { app, close: cleanClose, auditLog, port: actualPort, db };
 }

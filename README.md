@@ -132,7 +132,13 @@ Framework-agnostic. Each tool has a zod schema and an `execute` function that re
 ```bash
 npx agentdb --path ./data              # stdio (single client)
 npx agentdb --path ./data --http       # HTTP (multiple clients)
+
+# Bootstrap schemas at startup (multiple --schemas flags allowed; results unioned)
+npx agentdb --path ./data --schemas ./schemas/*.json
+npx agentdb --path ./data --schemas ./teams/users.json --schemas ./teams/tasks.json
 ```
+
+**Schema bootstrap order**: on `db.init()`, `<dataDir>/schemas/*.json` is auto-discovered first, then any `--schemas` paths are loaded on top as overlays. File properties win per-property; untouched persisted properties are preserved.
 
 All 33 tools exposed as MCP tools (35 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
 

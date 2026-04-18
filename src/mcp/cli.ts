@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { readdir } from "node:fs/promises";
+import { dirname, basename, resolve, join } from "node:path";
 import { startStdio, startHttp } from "./index.js";
 import type { AgentDBOptions } from "../agentdb.js";
 
@@ -26,6 +28,9 @@ let writeMode = process.env.AGENTDB_WRITE_MODE ?? "immediate";
 // Embeddings
 let embeddings = process.env.AGENTDB_EMBEDDINGS ?? "";
 
+// Schema bootstrap
+const schemaGlobs: string[] = [];
+
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   const next = args[i + 1];
@@ -44,6 +49,29 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === "--write-mode" && next) { writeMode = next; i++; }
   else if (arg === "--group-commit") { writeMode = "group"; }
   else if (arg === "--embeddings" && next) { embeddings = next; i++; }
+  else if (arg === "--schemas" && next) { schemaGlobs.push(next); i++; }
+}
+
+/** Resolve a glob pattern (supports `*` and `?` in the filename) to absolute file paths. */
+async function resolveGlob(pattern: string): Promise<string[]> {
+  const abs = resolve(pattern);
+  const dir = dirname(abs);
+  const file = basename(abs);
+
+  if (!file.includes("*") && !file.includes("?")) return [abs];
+
+  const regexStr = file
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  const re = new RegExp(`^${regexStr}$`);
+
+  try {
+    const entries = await readdir(dir);
+    return entries.filter(e => re.test(e)).map(e => join(dir, e));
+  } catch {
+    return [];
+  }
 }
 
 async function resolveBackend(): Promise<AgentDBOptions> {
@@ -98,6 +126,8 @@ async function resolveBackend(): Promise<AgentDBOptions> {
 async function main(): Promise<void> {
   const dbOpts = await resolveBackend();
 
+  const resolvedPaths = (await Promise.all(schemaGlobs.map(resolveGlob))).flat();
+
   if (mode === "http") {
     await startHttp(dataDir, {
       port,
@@ -106,12 +136,13 @@ async function main(): Promise<void> {
       authToken: authToken || undefined,
       rateLimit: rateLimit || undefined,
       corsOrigins: corsOrigins ? corsOrigins.split(",").map((s) => s.trim()) : undefined,
+      schemaPaths: resolvedPaths.length > 0 ? resolvedPaths : undefined,
     });
     console.error(`AgentDB MCP server running on http://${host}:${port}/mcp`);
     if (authToken) console.error("Authentication: bearer token required");
     if (rateLimit) console.error(`Rate limit: ${rateLimit} requests/minute`);
   } else {
-    await startStdio(dataDir, dbOpts);
+    await startStdio(dataDir, dbOpts, resolvedPaths.length > 0 ? { schemaPaths: resolvedPaths } : undefined);
   }
 }
 
