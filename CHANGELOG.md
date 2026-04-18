@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Tests
+
+- **filter**: add `$strLen { $eq: 0 }` empty-string coverage (matches `""`, rejects `null`, missing, and non-empty strings)
+
 ## [1.3.0] - 2026-04-18
 
 ### Added

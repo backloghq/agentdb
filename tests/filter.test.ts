@@ -738,5 +738,13 @@ describe("compileFilter", () => {
       expect(pred({ tag: "hello" })).toBe(true);
       expect(pred({ tag: "toolong" })).toBe(false);
     });
+
+    it("$strLen { $eq: 0 } matches empty string and rejects null, missing, and non-empty", () => {
+      const pred = compileFilter({ name: { $strLen: { $eq: 0 } } });
+      expect(pred({ name: "" })).toBe(true);
+      expect(pred({ name: null })).toBe(false);
+      expect(pred({})).toBe(false);
+      expect(pred({ name: "x" })).toBe(false);
+    });
   });
 });
