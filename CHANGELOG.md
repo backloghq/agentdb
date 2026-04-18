@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Refactor
+
+- **`validateCollectionName` dead-code removal** — removed `name.includes("..")` check; `VALID_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/` already rejects all dots.
+
 ## [1.3.0] - 2026-04-18
 
 ### Added

@@ -28,7 +28,7 @@ const DROPPED_PREFIX = "_dropped_";
 const VALID_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 
 function validateCollectionName(name: string): void {
-  if (!name || !VALID_NAME_RE.test(name) || name.includes("..")) {
+  if (!name || !VALID_NAME_RE.test(name)) {
     throw new Error(`Invalid collection name '${name}'. Must be alphanumeric with hyphens/underscores, no path traversal.`);
   }
 }
