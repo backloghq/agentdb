@@ -7,26 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
-### Added
-- **`db_infer_schema` tool** — samples existing records and proposes a `PersistedSchema` (cold-start schema bootstrap). Detects `boolean`, `number`, `string` (with `maxLength`), `date` (ISO prefix heuristic), `enum` (distinct count ≤ `enumThreshold`), `string[]`, `number[]`, `object`. Marks fields `required` when presence fraction ≥ `requiredThreshold` (default 0.95). Mixed-type fields are skipped with a note. Sampling is offset-randomised when `totalRecords > sampleSize`. Output `proposed` schema passes `validatePersistedSchema` and can be forwarded directly to `db_set_schema`. READ permission, no mutation.
-- **`db_migrate` tool** — declarative bulk record update via 5 ordered ops: `set`, `unset`, `rename`, `default`, `copy`. Per-record atomicity; validation fires normally; schema-violating records land in `errors[]`. `dryRun: true` returns counts without writing. `batchSize` (default 100) bounds memory. Agent/reason stamped on each written record; `_version` optimistic locking honored. Protected meta-fields (`_id`, `_version`, `_agent`, `_reason`, `_expires`, `_embedding`) silently skipped. Matching records are snapshotted by ID at migration start — all matches processed even if ops cause records to leave the filter mid-run; snapshot versions used for optimistic locking so concurrent writes to the same record fail into `errors[]`.
-- **`db_diff_schema` tool** — read-only tool that previews what `db_set_schema` would change before committing. Uses `mergePersistedSchemas` internally (same semantics as `db_set_schema`), so partial candidates correctly show no-change for omitted fields. Returns `{ added, removed, changed, warnings, impact? }`. `warnings` covers type changes (high), removed enum values (high), new required fields (medium), tightened constraints (medium), removed fields (medium), and removed description/instructions (low). `includeImpact: true` (default) queries the collection for affected record counts embedded in warnings and an `impact` summary.
-- **`AgentDB.getCollectionNames()`** — lightweight getter returning active collection names without opening any collections. Used by `db_diff_schema` to detect non-existent collections without creating them as a side effect.
-- **E2E subprocess test for `--schemas` argv** — spawns `dist/mcp/cli.js` with `--schemas <path>` and verifies schema is persisted and queryable via `db_get_schema` MCP tool call. Also covers multiple `--schemas` flags.
-- **`loadSchemasFromFiles` name-mismatch warning** — emits `console.warn` when a file's explicit `name` field differs from the filename-derived name. The file's `name` still wins (overlay semantics); the warning is informational.
-- **`loadSchemasFromFiles` `skipped` semantics** — files are now counted as `skipped` (not `loaded`) when the merged schema is structurally identical to the existing persisted schema. Uses key-sorted JSON for the comparison to avoid false mismatches from key-ordering differences.
-- **`--help` / `-h` CLI flag** — prints usage and all flags to stdout, exits 0.
-- **`--schemas <glob>` CLI flag** — load schema JSON files at startup. Multiple `--schemas` flags allowed (results unioned). Supports `*`/`?` glob wildcards. Per-file failures do not abort startup. Overlays on top of auto-discovered `schemas/` files. Works with both `stdio` and `--http` transports.
-- **`schemaPaths` option on `startHttp`/`startStdio`** — programmatic equivalent of `--schemas`. `startHttp` now returns `db` in its result object.
-- **Schema bootstrap auto-discover** — `db.init()` now scans `<dataDir>/schemas/*.json` on startup. Valid files are loaded as persisted schemas (file acts as overlay via `mergePersistedSchemas`). Missing directory is silently ignored; bad files are logged and skipped without aborting init.
-- **`AgentDB.loadSchemasFromFiles(paths)`** — load a list of JSON schema files into persisted storage. Per-file isolation, filename-derived name fallback, file-as-overlay precedence. Returns `{ loaded, skipped, failed }`. Exported as `SchemaLoadResult` type.
-- **`SchemaLoadResult` type** exported from main package.
-
 ## [1.3.0] - 2026-04-18
 
 ### Added
-- **`db_delete_schema` tool** — admin-only tool to delete the persisted schema for a collection. Idempotent (no-op if none exists). Returns `{ deleted: boolean }`.
-- **`mergePersistedSchemas(base, overlay)`** — merge two `PersistedSchema` objects with overlay semantics. Overlay wins per-property (not per-field), so updating one field property (e.g. `type`) preserves untouched properties (e.g. `description`, `required`). Indexes are unioned. Exported from main package.
+
+#### Persisted schemas
 - **Persisted schemas** — schemas stored as `{dbPath}/meta/{collection}.schema.json`. Auto-persisted on first `defineSchema()` open, survives restart.
 - **Agent context on schemas** — `description`, `instructions` on collections, `description` on fields. Any agent can discover how to use a collection via `db_get_schema`.
 - **Schema version tracking** — `version` field on schemas, warnings on mismatch between code-level and persisted schemas.
@@ -34,18 +19,38 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`extractPersistedSchema()`** — extract serializable parts from a `SchemaDefinition`.
 - **`validatePersistedSchema()`** — validate schema structure loaded from JSON.
 - **`mergeSchemas()`** — merge code-level and persisted schemas with clear precedence rules. Persisted wins for agent context, code wins for runtime config, indexes unioned.
+- **`mergePersistedSchemas(base, overlay)`** — merge two `PersistedSchema` objects with overlay semantics. Overlay wins per-property (not per-field), so updating one field property (e.g. `type`) preserves untouched properties (e.g. `description`, `required`). Indexes are unioned. Exported from main package.
 - **`loadSchemaFromJSON()` / `exportSchemaToJSON()`** — portable JSON import/export for schema definitions.
-- **`db_get_schema` tool** — read-only tool returns full persisted schema with context, instructions, fields, and indexes.
-- **`db_set_schema` tool** — admin-only tool to create or update persisted schema with partial merge support.
-- **Enhanced `db_collections` tool** — now includes schema summary (description, field count, has instructions, version) per collection.
 - **Admin-guarded schema modifications** — `persistSchema` and `deletePersistedSchema` require admin permission when called with agent identity.
 - **`AgentDB.persistSchema()` / `loadPersistedSchema()` / `deletePersistedSchema()`** — programmatic schema persistence API.
 - **`AgentDB.getSchema()`** — access in-memory compiled schema for a collection.
+- **`AgentDB.getCollectionNames()`** — lightweight getter returning active collection names without opening any collections. Used by `db_diff_schema` to detect non-existent collections without creating them as a side effect.
 - **`CollectionSchema.definition`** — retains original `SchemaDefinition` for persistence extraction.
+
+#### Schema bootstrap (drop-in JSON files)
+- **Schema bootstrap auto-discover** — `db.init()` now scans `<dataDir>/schemas/*.json` on startup. Valid files are loaded as persisted schemas (file acts as overlay via `mergePersistedSchemas`). Missing directory is silently ignored; bad files are logged and skipped without aborting init.
+- **`AgentDB.loadSchemasFromFiles(paths)`** — load a list of JSON schema files into persisted storage. Per-file isolation, filename-derived name fallback, file-as-overlay precedence. Returns `{ loaded, skipped, failed }`. Exported as `SchemaLoadResult` type.
+- **`SchemaLoadResult` type** exported from main package.
+- **`--schemas <glob>` CLI flag** — load schema JSON files at startup. Multiple `--schemas` flags allowed (results unioned). Supports `*`/`?` glob wildcards. Per-file failures do not abort startup. Overlays on top of auto-discovered `schemas/` files. Works with both `stdio` and `--http` transports.
+- **`schemaPaths` option on `startHttp`/`startStdio`** — programmatic equivalent of `--schemas`. `startHttp` now returns `db` in its result object.
+- **`--help` / `-h` CLI flag** — prints usage and all flags to stdout, exits 0.
+- **`loadSchemasFromFiles` name-mismatch warning** — emits `console.warn` when a file's explicit `name` field differs from the filename-derived name. The file's `name` still wins (overlay semantics); the warning is informational.
+- **`loadSchemasFromFiles` `skipped` semantics** — files are now counted as `skipped` (not `loaded`) when the merged schema is structurally identical to the existing persisted schema. Uses key-sorted JSON for the comparison to avoid false mismatches from key-ordering differences.
+- **E2E subprocess test for `--schemas` argv** — spawns `dist/mcp/cli.js` with `--schemas <path>` and verifies schema is persisted and queryable via `db_get_schema` MCP tool call. Also covers multiple `--schemas` flags.
+
+#### Schema tools (agent UX)
+- **`db_get_schema` tool** — read-only tool returns full persisted schema with context, instructions, fields, and indexes.
+- **`db_set_schema` tool** — admin-only tool to create or update persisted schema with partial merge support.
+- **`db_delete_schema` tool** — admin-only tool to delete the persisted schema for a collection. Idempotent (no-op if none exists). Returns `{ deleted: boolean }`.
+- **`db_diff_schema` tool** — read-only tool that previews what `db_set_schema` would change before committing. Uses `mergePersistedSchemas` internally (same semantics as `db_set_schema`), so partial candidates correctly show no-change for omitted fields. Returns `{ added, removed, changed, warnings, impact? }`. `warnings` covers type changes (high), removed enum values (high), new required fields (medium), tightened constraints (medium), removed fields (medium), and removed description/instructions (low). `includeImpact: true` (default) queries the collection for affected record counts embedded in warnings and an `impact` summary.
+- **`db_migrate` tool** — declarative bulk record update via 5 ordered ops: `set`, `unset`, `rename`, `default`, `copy`. Per-record atomicity; validation fires normally; schema-violating records land in `errors[]`. `dryRun: true` returns counts without writing. `batchSize` (default 100) bounds memory. Agent/reason stamped on each written record; `_version` optimistic locking honored. Protected meta-fields (`_id`, `_version`, `_agent`, `_reason`, `_expires`, `_embedding`) silently skipped. Matching records are snapshotted by ID at migration start — all matches processed even if ops cause records to leave the filter mid-run; snapshot versions used for optimistic locking so concurrent writes to the same record fail into `errors[]`.
+- **`db_infer_schema` tool** — samples existing records and proposes a `PersistedSchema` (cold-start schema bootstrap). Detects `boolean`, `number`, `string` (with `maxLength`), `date` (ISO prefix heuristic), `enum` (distinct count ≤ `enumThreshold`), `string[]`, `number[]`, `object`. Marks fields `required` when presence fraction ≥ `requiredThreshold` (default 0.95). Mixed-type fields are skipped with a note. Sampling is offset-randomised when `totalRecords > sampleSize`. Output `proposed` schema passes `validatePersistedSchema` and can be forwarded directly to `db_set_schema`. READ permission, no mutation.
+- **Enhanced `db_collections` tool** — now includes schema summary (description, field count, has instructions, version) per collection.
 
 ### Fixed
 - **`db_set_schema` field-property preservation** — partial schema updates no longer drop untouched field properties. Previously `{ title: { type: "string" } }` overwrote the entire field, losing `required`, `description`, etc. Now uses `mergePersistedSchemas()` with per-property overlay semantics.
 - **Schema cleanup on drop/purge** — `dropCollection()` now deletes the persisted schema file; `purgeCollection()` defensively removes it too.
+- **`db_migrate` pagination correctness** — original offset-based pagination silently dropped records when migrations changed a filter-matched field. Replaced with two-phase snapshot approach (collect IDs first, then process by `$in` with snapshot versions for optimistic locking) so all matching records at migration start are processed.
 
 ## [1.2.1] - 2026-04-11
 
