@@ -615,6 +615,73 @@ describe("Tool Definitions", () => {
       // Only description changed
       expect(result.changed.description).toEqual({ from: "Old description", to: "New description" });
     });
+
+    it("new field added to existing schema appears in added.fields with no warning", async () => {
+      // Set an initial schema with one field
+      await exec("db_set_schema", {
+        collection: "diff-addfield",
+        schema: { fields: { name: { type: "string" } } },
+        agent: "admin",
+      });
+      const result = await exec("db_diff_schema", {
+        collection: "diff-addfield",
+        schema: { fields: { name: { type: "string" }, age: { type: "number" } } },
+      });
+      expect(result.added.fields).toContain("age");
+      expect(result.removed.fields).toEqual([]);
+      // Adding a field generates no warning
+      const fieldWarnings = result.warnings.filter((w: { message: string }) => w.message.includes("age"));
+      expect(fieldWarnings).toHaveLength(0);
+    });
+
+    it("adding an enum value appears in changed.fields with no warning", async () => {
+      await exec("db_set_schema", {
+        collection: "diff-enumadd",
+        schema: { fields: { status: { type: "enum", values: ["open", "closed"] } } },
+        agent: "admin",
+      });
+      const result = await exec("db_diff_schema", {
+        collection: "diff-enumadd",
+        schema: { fields: { status: { type: "enum", values: ["open", "closed", "pending"] } } },
+      });
+      const statusChange = result.changed.fields.status;
+      expect(statusChange).toBeDefined();
+      expect(statusChange.values.added).toContain("pending");
+      expect(statusChange.values.removed).toHaveLength(0);
+      // Only removals generate high-severity warnings — adding values is safe
+      const highWarnings = result.warnings.filter((w: { severity: string; message: string }) =>
+        w.severity === "high" && w.message.includes("status"));
+      expect(highWarnings).toHaveLength(0);
+    });
+
+    it("includeImpact:true on non-existent collection returns sensible result without crashing", async () => {
+      const result = await exec("db_diff_schema", {
+        collection: "diff-nonexistent-xyz",
+        schema: { fields: { x: { type: "string" } } },
+        includeImpact: true,
+      });
+      expect(result.hasExisting).toBe(false);
+      expect(result.impact).toBeDefined();
+      expect(result.impact.totalRecords).toBe(0);
+      // Should have a warning about collection not existing
+      const warn = result.warnings.find((w: { message: string }) => w.message.includes("does not exist"));
+      expect(warn).toBeDefined();
+    });
+
+    it("same partial candidate run twice produces identical diff", async () => {
+      await exec("db_set_schema", {
+        collection: "diff-idempotent2",
+        schema: { fields: { x: { type: "string" } } },
+        agent: "admin",
+      });
+      const candidate = { fields: { x: { type: "string" }, y: { type: "number" } } };
+      const r1 = await exec("db_diff_schema", { collection: "diff-idempotent2", schema: candidate });
+      const r2 = await exec("db_diff_schema", { collection: "diff-idempotent2", schema: candidate });
+      expect(r1.added.fields).toEqual(r2.added.fields);
+      expect(r1.removed.fields).toEqual(r2.removed.fields);
+      expect(r1.changed.fields).toEqual(r2.changed.fields);
+      expect(r1.warnings).toEqual(r2.warnings);
+    });
   });
 
   describe("db_migrate", () => {
