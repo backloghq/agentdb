@@ -117,7 +117,7 @@ export function getSchemaTools(db: AgentDB): AgentTool[] {
     {
       name: "db_diff_schema",
       title: "Diff Schema",
-      description: "Preview what db_set_schema would change before committing. Uses the same merge semantics as db_set_schema — partial candidates correctly show no-change for omitted fields. Returns structured diff (added/removed/changed fields and indexes) with warnings about data impact (type changes, required fields, enum removals, tightened constraints). includeImpact:true (default) queries the collection for affected record counts." + API_NOTE,
+      description: "Preview what db_set_schema would change before committing. Uses the same merge semantics as db_set_schema — partial candidates correctly show no-change for omitted fields. Returns structured diff (added/removed/changed fields and indexes) with warnings about data impact (type changes, required fields, enum removals, tightened constraints). includeImpact:true (default) queries the collection for affected record counts. On disk-backed collections >50K records, includeImpact:true triggers a full Parquet scan (~175ms at 100K records, 64x overhead vs false); pass includeImpact:false for interactive/automated preview use." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
         schema: z.object({

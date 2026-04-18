@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Docs
+
+- **`db_diff_schema` disk-mode cost** — description now warns: `includeImpact:true` on disk-backed collections >50K records triggers a full Parquet scan (~175ms at 100K records, 64× overhead vs `false`); recommends `includeImpact:false` for interactive/automated use.
+
 ### Fixed
 
 - **`persistSchema` concurrent-write race** — tmp file now includes `pid + timestamp + random suffix` to guarantee uniqueness per write. The rename is wrapped in try/catch: on failure, the tmp file is cleaned up with `rm({ force: true })` before re-throwing. Previously, concurrent writes could share a `.tmp` filename when `Date.now()` collides, causing one rename to succeed and the other to fail with ENOENT when its tmp file was already gone.
