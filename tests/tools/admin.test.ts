@@ -145,6 +145,22 @@ describe("Tool Definitions — admin", () => {
       const result = await t.execute({ collection: "nonexistent", id: "x" });
       expect(result.content).toBeDefined();
     });
+
+    it("path sanitization strips terminal filename — no collection name leaks in error messages", () => {
+      // The old regex /\/[^\s'":]+\//g only matched paths with a trailing slash, so
+      // the terminal filename was left visible. The new regex /\/[^\s'":]+/g strips the
+      // full path including the filename.
+      const sanitize = (msg: string) => msg.replace(/\/[^\s'":]+/g, "<path>");
+
+      const raw = "ENOENT: no such file or directory, open '/tmp/agentdb-xyz/meta/tickets.schema.json'";
+      const result = sanitize(raw);
+      expect(result).not.toContain("tickets");
+      expect(result).toContain("<path>");
+
+      // Verify the old regex would have leaked the name
+      const oldSanitize = (msg: string) => msg.replace(/\/[^\s'":]+\//g, "<path>/");
+      expect(oldSanitize(raw)).toContain("tickets");
+    });
   });
 
   describe("agent identity", () => {

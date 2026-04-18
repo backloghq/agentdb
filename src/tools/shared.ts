@@ -62,7 +62,7 @@ export function makeSafe(db: AgentDB, toolName: string, annotations: { readOnlyH
       } catch (err) {
         let message = err instanceof Error ? err.message : String(err);
         // Sanitize filesystem paths from error messages
-        message = message.replace(/\/[^\s'":]+\//g, "<path>/");
+        message = message.replace(/\/[^\s'":]+/g, "<path>");
         return { isError: true, content: [{ type: "text" as const, text: message }] };
       }
     };
