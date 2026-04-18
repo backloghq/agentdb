@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+- **`outputSchema` on `db_diff_schema`** — declares the full structured return shape: `{ collection, hasExisting, added/removed (fields/indexes/arrayIndexes/compositeIndexes), changed (description/instructions/version/fields), warnings[{severity, message}], impact? }`.
+
 ### Fixed
 - **Stale test in `schema.test.ts`** — rewrote misleading test "no warning is emitted (current behavior)" to assert that the warning IS emitted when a file's `name` field disagrees with the filename-derived name. Added a second test documenting that an explicit valid name loads correctly even when the filename-derived name is invalid.
 

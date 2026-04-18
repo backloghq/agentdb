@@ -539,6 +539,37 @@ export function getTools(db: AgentDB): AgentTool[] {
         }).meta({ description: "Candidate schema — same shape as db_set_schema" }),
         includeImpact: z.boolean().optional().default(true).meta({ description: "Query collection for affected record counts (default: true)" }),
       }),
+      outputSchema: z.object({
+        collection: z.string(),
+        hasExisting: z.boolean(),
+        added: z.object({
+          fields: z.array(z.string()),
+          indexes: z.array(z.string()),
+          arrayIndexes: z.array(z.string()),
+          compositeIndexes: z.array(z.array(z.string())),
+        }),
+        removed: z.object({
+          fields: z.array(z.string()),
+          indexes: z.array(z.string()),
+          arrayIndexes: z.array(z.string()),
+          compositeIndexes: z.array(z.array(z.string())),
+        }),
+        changed: z.object({
+          description: z.object({ from: z.string().nullable(), to: z.string().nullable() }).optional(),
+          instructions: z.object({ from: z.string().nullable(), to: z.string().nullable() }).optional(),
+          version: z.object({ from: z.number().nullable(), to: z.number().nullable() }).optional(),
+          fields: z.record(z.string(), z.record(z.string(), z.unknown())),
+        }),
+        warnings: z.array(z.object({
+          severity: z.enum(["high", "medium", "low"]),
+          message: z.string(),
+        })),
+        impact: z.object({
+          totalRecords: z.number(),
+          recordsWithRemovedFields: z.number(),
+          recordsViolatingNewConstraints: z.number(),
+        }).optional(),
+      }),
       annotations: READ,
       execute: safe("db_diff_schema", READ)(async (args) => {
         const name = args.collection as string;
