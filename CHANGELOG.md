@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Added
 - **`db_infer_schema` date-regex false-positive fix** — tightened ISO date heuristic from `/^\d{4}-\d{2}-\d{2}/` to `/^\d{4}-\d{2}-\d{2}(T|Z|$)/`. Strings like `"2024-01-01 not a date"` no longer misclassify as `date`.
+- **`db_infer_schema` edge-case tests** — round-trip to `db_set_schema`, exactly-95% required boundary, 94% not required, all-null field excluded, sampleSize > totalRecords, null counts as missing, prototype meta-field exclusion, `enumThreshold:1` forces string.
 - **`db_diff_schema` edge-case tests** — new field added with no warning, enum value added-only with no warning, `includeImpact:true` on non-existent collection, same partial candidate twice produces identical diff.
 - **`skipIf(!existsSync(CLI))` guard on CLI test suites** — `cli-help.test.ts` and `cli-schemas-e2e.test.ts` now skip gracefully when `dist/mcp/cli.js` is missing instead of timing out.
 - **canonicalJSON key-order test** — `loadSchemasFromFiles` skipped-detection test for files with same content but reordered JSON keys.

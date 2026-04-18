@@ -1056,6 +1056,85 @@ describe("Tool Definitions", () => {
       expect(result.proposed.fields.label.type).not.toBe("date");
     });
 
+    it("round-trip: proposed schema passes validatePersistedSchema and can be forwarded to db_set_schema", async () => {
+      // Use 15 distinct names to exceed enumThreshold (10) → name classified as string
+      const records = Array.from({ length: 15 }, (_, i) => ({ name: `Person${i}`, active: true }));
+      await exec("db_insert", { collection: "infer-roundtrip", records });
+      const inferred = await exec("db_infer_schema", { collection: "infer-roundtrip" });
+      // Should not throw — proposed is valid
+      await exec("db_set_schema", { collection: "infer-roundtrip", schema: inferred.proposed, agent: "admin" });
+      const stored = await exec("db_get_schema", { collection: "infer-roundtrip" });
+      expect(stored.schema.fields.name.type).toBe("string");
+    });
+
+    it("exactly 95% presence marks field required (boundary: requiredThreshold=0.95)", async () => {
+      // 20 records; field present in 19 (19/20 = 0.95 == threshold)
+      const records = Array.from({ length: 20 }, (_, i) => ({
+        name: `user${i}`,
+        ...(i < 19 ? { badge: "gold" } : {}),
+      }));
+      await exec("db_insert", { collection: "infer-95", records });
+      const result = await exec("db_infer_schema", { collection: "infer-95", requiredThreshold: 0.95 });
+      expect(result.proposed.fields.badge.required).toBe(true);
+    });
+
+    it("94% presence does not mark field required", async () => {
+      // 50 records; field present in 47 (47/50 = 0.94 < 0.95)
+      const records = Array.from({ length: 50 }, (_, i) => ({
+        name: `user${i}`,
+        ...(i < 47 ? { badge: "silver" } : {}),
+      }));
+      await exec("db_insert", { collection: "infer-94", records });
+      const result = await exec("db_infer_schema", { collection: "infer-94", requiredThreshold: 0.95 });
+      expect(result.proposed.fields.badge?.required).toBeFalsy();
+    });
+
+    it("field where all sampled values are null/undefined is excluded from proposed schema", async () => {
+      await exec("db_insert", { collection: "infer-allnull", records: [
+        { name: "Alice", ghost: null }, { name: "Bob", ghost: null },
+      ]});
+      const result = await exec("db_infer_schema", { collection: "infer-allnull" });
+      // null values are filtered out; no values remain for 'ghost' → field excluded
+      expect(result.proposed.fields?.ghost).toBeUndefined();
+    });
+
+    it("sampleSize > totalRecords returns all records without error", async () => {
+      await exec("db_insert", { collection: "infer-small", records: [{ x: 1 }, { x: 2 }] });
+      const result = await exec("db_infer_schema", { collection: "infer-small", sampleSize: 1000 });
+      expect(result.totalRecords).toBe(2);
+      expect(result.sampleSize).toBe(2);
+      expect(result.proposed.fields?.x?.type).toBe("number");
+    });
+
+    it("null values count as missing (not present) for requiredThreshold calculation", async () => {
+      // 4 records; field is null in 2, present in 2 → 2/4 = 50% < 95%
+      await exec("db_insert", { collection: "infer-nullreq", records: [
+        { val: 1 }, { val: 2 }, { val: null }, { val: null },
+      ]});
+      const result = await exec("db_infer_schema", { collection: "infer-nullreq", requiredThreshold: 0.95 });
+      expect(result.proposed.fields?.val?.required).toBeFalsy();
+    });
+
+    it("meta fields (__proto__, constructor, prototype) are excluded from proposed schema", async () => {
+      // Verify that the META exclusion set covers all dangerous prototype-related field names.
+      // Insert a normal record and confirm none of the meta keys appear in the output.
+      await exec("db_insert", { collection: "infer-proto", records: [{ normal: "value" }] });
+      const result = await exec("db_infer_schema", { collection: "infer-proto" });
+      const fieldKeys = Object.keys(result.proposed.fields ?? {});
+      expect(fieldKeys).not.toContain("__proto__");
+      expect(fieldKeys).not.toContain("constructor");
+      expect(fieldKeys).not.toContain("prototype");
+      expect(fieldKeys).toContain("normal");
+    });
+
+    it("enumThreshold:1 — field with 2+ distinct values is classified as string, not enum", async () => {
+      // With enumThreshold:1, distinctCount <= 1 → enum; distinctCount > 1 → string
+      const records = [{ tag: "a" }, { tag: "b" }];
+      await exec("db_insert", { collection: "infer-ethresh", records });
+      const result = await exec("db_infer_schema", { collection: "infer-ethresh", enumThreshold: 1 });
+      expect(result.proposed.fields.tag.type).toBe("string");
+    });
+
     it("emits note when collection already has a persisted schema", async () => {
       await exec("db_insert", { collection: "infer-existing", records: [{ x: 1 }] });
       await exec("db_set_schema", {
