@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { startHttp } from "../src/mcp/index.js";
-import type { AgentDB } from "../src/agentdb.js";
+import { AgentDB } from "../src/agentdb.js";
 
 describe("--schemas / schemaPaths option", () => {
   describe("startHttp with schemaPaths", () => {
@@ -86,6 +86,25 @@ describe("--schemas / schemaPaths option", () => {
       const results = await resolveGlob(join(tmpDir, "nonexistent", "*.json"));
       expect(results).toEqual([]);
     });
+
+    it("glob matching zero files returns empty array (no crash)", async () => {
+      const { resolveGlob } = await importResolveGlob();
+      // Directory exists but has no .xml files
+      const results = await resolveGlob(join(tmpDir, "*.xml"));
+      expect(results).toEqual([]);
+    });
+
+    it("wildcard in directory portion is NOT expanded — returns literal path (known limitation)", async () => {
+      // resolveGlob only handles * and ? in the filename (basename), not in directory segments.
+      // ./*/schema.json resolves to a single literal path with '*' as a directory name, which
+      // will not exist and will land in failed[] when passed to loadSchemasFromFiles.
+      const { resolveGlob } = await importResolveGlob();
+      const pattern = join(tmpDir, "*", "schema.json");
+      const results = await resolveGlob(pattern);
+      // Returns the literal path (single element), not expanded
+      expect(results).toHaveLength(1);
+      expect(results[0]).toContain("schema.json");
+    });
   });
 
   describe("schemaPaths failure isolation", () => {
@@ -165,6 +184,35 @@ describe("--schemas / schemaPaths option", () => {
       const users = await db.loadPersistedSchema("users");
       expect(users!.fields?.name.required).toBe(true);
     });
+  });
+});
+
+describe("startStdio with schemaPaths", () => {
+  it("persists schemas to disk before connecting transport", async () => {
+    // startStdio blocks on stdio transport, so we verify side effects via disk:
+    // create a db, call loadSchemasFromFiles (same code path as startStdio's loadExtraSchemas),
+    // and confirm schemas are readable by a second db instance.
+    const tmpDir = await mkdtemp(join(tmpdir(), "agentdb-stdio-schemas-"));
+    try {
+      const schemaPath = join(tmpDir, "products.json");
+      await writeFile(schemaPath, JSON.stringify({ name: "products", description: "Product catalog" }), "utf-8");
+
+      // Replicate what startStdio does: init + loadSchemasFromFiles
+      const db = new AgentDB(tmpDir);
+      await db.init();
+      await db.loadSchemasFromFiles([schemaPath]);
+      await db.close();
+
+      // Verify persistence via a fresh db instance (as if process restarted)
+      const db2 = new AgentDB(tmpDir);
+      await db2.init();
+      const loaded = await db2.loadPersistedSchema("products");
+      expect(loaded).toBeDefined();
+      expect(loaded!.description).toBe("Product catalog");
+      await db2.close();
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 
