@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** v1.3 in progress. 840+ tests. Persisted schemas with agent context (description, instructions, field descriptions), schema merge logic (mergeSchemas + mergePersistedSchemas), version tracking, admin-guarded modifications, db_get_schema/db_set_schema/db_delete_schema tools, portable JSON import/export. db_set_schema uses per-property overlay merge preserving untouched field properties. Disk mode: JSONL for point lookups, Parquet for column scans, short-circuit at limit, sorted reads, lazy index loading. Disk mode works on filesystem + S3. 35 tools (33 core + db_subscribe/db_unsubscribe on HTTP). Auth + security hardened.
+**Status:** v1.4 in progress. 855+ tests. Persisted schemas with agent context (description, instructions, field descriptions), schema merge logic (mergeSchemas + mergePersistedSchemas), version tracking, admin-guarded modifications, db_get_schema/db_set_schema/db_delete_schema tools, portable JSON import/export. db_set_schema uses per-property overlay merge preserving untouched field properties. Schema bootstrap: schemas/*.json auto-loaded on init via loadSchemasFromFiles (overlay semantics, per-file isolation, filename-derived name fallback). Disk mode: JSONL for point lookups, Parquet for column scans, short-circuit at limit, sorted reads, lazy index loading. Disk mode works on filesystem + S3. 35 tools (33 core + db_subscribe/db_unsubscribe on HTTP). Auth + security hardened.
 
 ## Commands
 

@@ -40,4 +40,5 @@ export type {
   AgentDBOptions,
   CollectionInfo,
   ExportData,
+  SchemaLoadResult,
 } from "./agentdb.js";

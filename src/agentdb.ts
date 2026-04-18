@@ -9,7 +9,7 @@ import { resolveProvider } from "./embeddings/index.js";
 import { PermissionManager } from "./permissions.js";
 import type { AgentPermissions } from "./permissions.js";
 import type { CollectionSchema, PersistedSchema } from "./schema.js";
-import { extractPersistedSchema, validatePersistedSchema, mergeSchemas } from "./schema.js";
+import { extractPersistedSchema, validatePersistedSchema, mergeSchemas, mergePersistedSchemas } from "./schema.js";
 import { MemoryMonitor } from "./memory.js";
 import type { MemoryStats } from "./memory.js";
 import { DiskStore } from "./disk-store.js";
@@ -61,6 +61,15 @@ export interface AgentDBOptions {
 export interface CollectionInfo {
   name: string;
   recordCount: number;
+}
+
+export interface SchemaLoadResult {
+  /** Number of schema files successfully loaded and persisted. */
+  loaded: number;
+  /** Number of files skipped because no valid collection name could be derived. */
+  skipped: number;
+  /** Files that could not be loaded due to parse or validation errors. */
+  failed: Array<{ path: string; error: string }>;
 }
 
 export interface ExportData {
@@ -145,6 +154,29 @@ export class AgentDB {
     await mkdir(join(this.dir, COLLECTIONS_DIR), { recursive: true });
     this.meta = await this.readMeta();
     this._opened = true;
+
+    // Auto-discover schemas from <dataDir>/schemas/*.json
+    const schemasDir = join(this.dir, "schemas");
+    try {
+      const entries = await readdir(schemasDir);
+      const jsonPaths = entries
+        .filter(f => f.endsWith(".json"))
+        .map(f => join(schemasDir, f));
+      if (jsonPaths.length > 0) {
+        const result = await this.loadSchemasFromFiles(jsonPaths);
+        const parts: string[] = [`loaded ${result.loaded}`];
+        if (result.skipped > 0) parts.push(`skipped ${result.skipped}`);
+        if (result.failed.length > 0) {
+          parts.push(`failed ${result.failed.length}`);
+          for (const f of result.failed) {
+            console.warn(`[agentdb] schema load failed (${f.path}): ${f.error}`);
+          }
+        }
+        console.log(`[agentdb] schemas/*.json: ${parts.join(", ")}`);
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
   }
 
   /**
@@ -532,6 +564,69 @@ export class AgentDB {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
+  }
+
+  /**
+   * Load schemas from a list of JSON file paths into persisted storage.
+   * File content acts as an overlay: file properties win per-property via mergePersistedSchemas.
+   * If a file has no `name` field, the collection name is derived from the filename (without .json).
+   * Per-file isolation: one bad file never blocks the rest.
+   */
+  async loadSchemasFromFiles(paths: string[]): Promise<SchemaLoadResult> {
+    this.ensureOpen();
+    let loaded = 0;
+    let skipped = 0;
+    const failed: Array<{ path: string; error: string }> = [];
+
+    for (const filePath of paths) {
+      const basename = filePath.replace(/\\/g, "/").split("/").pop() ?? "";
+      const derivedName = basename.endsWith(".json") ? basename.slice(0, -5) : basename;
+
+      try {
+        const content = await readFile(filePath, "utf-8");
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(content);
+        } catch (err) {
+          failed.push({ path: filePath, error: `JSON parse error: ${err instanceof Error ? err.message : String(err)}` });
+          continue;
+        }
+
+        // Inject filename-derived name if absent
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && !("name" in parsed)) {
+          if (!VALID_NAME_RE.test(derivedName)) {
+            skipped++;
+            continue;
+          }
+          (parsed as Record<string, unknown>).name = derivedName;
+        }
+
+        try {
+          validatePersistedSchema(parsed);
+        } catch (err) {
+          failed.push({ path: filePath, error: `Validation error: ${err instanceof Error ? err.message : String(err)}` });
+          continue;
+        }
+
+        const fileSchema = parsed as PersistedSchema;
+
+        try {
+          validateCollectionName(fileSchema.name);
+        } catch (err) {
+          failed.push({ path: filePath, error: err instanceof Error ? err.message : String(err) });
+          continue;
+        }
+
+        const existing = await this.loadPersistedSchema(fileSchema.name);
+        const merged = existing ? mergePersistedSchemas(existing, fileSchema) : fileSchema;
+        await this.persistSchema(fileSchema.name, merged);
+        loaded++;
+      } catch (err) {
+        failed.push({ path: filePath, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    return { loaded, skipped, failed };
   }
 
   /** Get the in-memory schema for a collection (from defineSchema). */
