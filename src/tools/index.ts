@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { AgentDB } from "../agentdb.js";
 import { getCurrentAuth } from "../auth-context.js";
+import { mergePersistedSchemas } from "../schema.js";
 
 /** A framework-agnostic tool definition. */
 export interface AgentTool {
@@ -482,34 +483,10 @@ export function getTools(db: AgentDB): AgentTool[] {
         // Build the schema to persist
         const incoming = { name, ...input } as import("../schema.js").PersistedSchema;
 
-        // Merge with existing if present
         const existing = await db.loadPersistedSchema(name);
-        if (existing) {
-          // Manual merge: incoming fields override existing
-          const merged = { ...existing };
-          if (incoming.version !== undefined) merged.version = incoming.version;
-          if (incoming.description !== undefined) merged.description = incoming.description;
-          if (incoming.instructions !== undefined) merged.instructions = incoming.instructions;
-          if (incoming.tagField !== undefined) merged.tagField = incoming.tagField;
-          if (incoming.storageMode !== undefined) merged.storageMode = incoming.storageMode;
-          if (incoming.indexes) merged.indexes = [...new Set([...(existing.indexes ?? []), ...incoming.indexes])];
-          if (incoming.compositeIndexes) {
-            const keys = new Set((existing.compositeIndexes ?? []).map(ci => ci.join(",")));
-            merged.compositeIndexes = [...(existing.compositeIndexes ?? [])];
-            for (const ci of incoming.compositeIndexes) {
-              if (!keys.has(ci.join(","))) merged.compositeIndexes.push(ci);
-            }
-          }
-          if (incoming.arrayIndexes) merged.arrayIndexes = [...new Set([...(existing.arrayIndexes ?? []), ...incoming.arrayIndexes])];
-          if (incoming.fields) {
-            merged.fields = { ...(existing.fields ?? {}), ...incoming.fields };
-          }
-          await db.persistSchema(name, merged, { agent });
-          return { schema: merged };
-        } else {
-          await db.persistSchema(name, incoming, { agent });
-          return { schema: incoming };
-        }
+        const schema = existing ? mergePersistedSchemas(existing, incoming) : incoming;
+        await db.persistSchema(name, schema, { agent });
+        return { schema };
       }),
     },
 

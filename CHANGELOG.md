@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ## [Unreleased] - v1.3.0
 
 ### Added
+- **`mergePersistedSchemas(base, overlay)`** — merge two `PersistedSchema` objects with overlay semantics. Overlay wins per-property (not per-field), so updating one field property (e.g. `type`) preserves untouched properties (e.g. `description`, `required`). Indexes are unioned. Exported from main package.
 - **Persisted schemas** — schemas stored as `{dbPath}/meta/{collection}.schema.json`. Auto-persisted on first `defineSchema()` open, survives restart.
 - **Agent context on schemas** — `description`, `instructions` on collections, `description` on fields. Any agent can discover how to use a collection via `db_get_schema`.
 - **Schema version tracking** — `version` field on schemas, warnings on mismatch between code-level and persisted schemas.
@@ -25,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`CollectionSchema.definition`** — retains original `SchemaDefinition` for persistence extraction.
 
 ### Fixed
+- **`db_set_schema` field-property preservation** — partial schema updates no longer drop untouched field properties. Previously `{ title: { type: "string" } }` overwrote the entire field, losing `required`, `description`, etc. Now uses `mergePersistedSchemas()` with per-property overlay semantics.
 - **Schema cleanup on drop/purge** — `dropCollection()` now deletes the persisted schema file; `purgeCollection()` defensively removes it too.
 
 ## [1.2.1] - 2026-04-11

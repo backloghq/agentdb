@@ -339,6 +339,27 @@ describe("Tool Definitions", () => {
       expect(result.schema.indexes).toContain("title");
       expect(result.schema.indexes).toContain("status");
     });
+
+    it("preserves untouched field properties when updating a single property", async () => {
+      await exec("db_set_schema", {
+        collection: "partial-update",
+        schema: {
+          fields: { title: { type: "string", required: true, description: "The title field" } },
+        },
+      });
+
+      // Agent updates only the type — required and description must survive
+      await exec("db_set_schema", {
+        collection: "partial-update",
+        schema: {
+          fields: { title: { type: "string" } },
+        },
+      });
+
+      const result = await exec("db_get_schema", { collection: "partial-update" });
+      expect(result.schema.fields.title.required).toBe(true);
+      expect(result.schema.fields.title.description).toBe("The title field");
+    });
   });
 
   describe("db_distinct", () => {

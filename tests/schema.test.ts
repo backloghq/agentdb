@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
-import { defineSchema, extractPersistedSchema, validatePersistedSchema, mergeSchemas, loadSchemaFromJSON, exportSchemaToJSON } from "../src/schema.js";
+import { defineSchema, extractPersistedSchema, validatePersistedSchema, mergeSchemas, mergePersistedSchemas, loadSchemaFromJSON, exportSchemaToJSON } from "../src/schema.js";
 import type { SchemaDefinition, PersistedSchema } from "../src/schema.js";
 
 describe("defineSchema", () => {
@@ -1220,5 +1220,85 @@ describe("loadSchemaFromJSON / exportSchemaToJSON", () => {
   it("loadSchemaFromJSON accepts minimal schema", () => {
     const loaded = loadSchemaFromJSON('{"name":"minimal"}');
     expect(loaded).toEqual({ name: "minimal" });
+  });
+});
+
+describe("mergePersistedSchemas", () => {
+  it("overlay scalar properties win over base", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", version: 1, description: "Base", instructions: "Base inst" },
+      { name: "t", version: 2, description: "Overlay", instructions: "Overlay inst" },
+    );
+    expect(result.version).toBe(2);
+    expect(result.description).toBe("Overlay");
+    expect(result.instructions).toBe("Overlay inst");
+  });
+
+  it("base scalar properties preserved when overlay omits them", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", version: 1, description: "Base", instructions: "Base inst" },
+      { name: "t" },
+    );
+    expect(result.version).toBe(1);
+    expect(result.description).toBe("Base");
+    expect(result.instructions).toBe("Base inst");
+  });
+
+  it("preserves untouched field properties when overlay updates only one property", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", fields: { title: { type: "string", required: true, description: "The title" } } },
+      { name: "t", fields: { title: { type: "string" } } },
+    );
+    expect(result.fields?.title.required).toBe(true);
+    expect(result.fields?.title.description).toBe("The title");
+  });
+
+  it("overlay field properties win when both sides specify them", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", fields: { status: { type: "enum", values: ["a", "b"], description: "Base desc" } } },
+      { name: "t", fields: { status: { type: "enum", values: ["x", "y"], description: "New desc" } } },
+    );
+    expect(result.fields?.status.values).toEqual(["x", "y"]);
+    expect(result.fields?.status.description).toBe("New desc");
+  });
+
+  it("base-only fields preserved in merged result", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", fields: { existing: { type: "string", description: "Keep me" } } },
+      { name: "t", fields: { newField: { type: "number" } } },
+    );
+    expect(result.fields?.existing).toEqual({ type: "string", description: "Keep me" });
+    expect(result.fields?.newField).toEqual({ type: "number" });
+  });
+
+  it("unions indexes from both sides", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", indexes: ["a", "b"], arrayIndexes: ["tags"] },
+      { name: "t", indexes: ["b", "c"], arrayIndexes: ["labels"] },
+    );
+    expect(result.indexes).toEqual(["a", "b", "c"]);
+    expect(result.arrayIndexes).toEqual(["tags", "labels"]);
+  });
+
+  it("unions composite indexes", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", compositeIndexes: [["a", "b"]] },
+      { name: "t", compositeIndexes: [["a", "b"], ["c", "d"]] },
+    );
+    expect(result.compositeIndexes).toEqual([["a", "b"], ["c", "d"]]);
+  });
+
+  it("overlay tagField and storageMode win", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", tagField: "labels", storageMode: "memory" },
+      { name: "t", tagField: "tags", storageMode: "disk" },
+    );
+    expect(result.tagField).toBe("tags");
+    expect(result.storageMode).toBe("disk");
+  });
+
+  it("no spurious undefined keys in output", () => {
+    const result = mergePersistedSchemas({ name: "t" }, { name: "t" });
+    expect(Object.keys(result)).toEqual(["name"]);
   });
 });

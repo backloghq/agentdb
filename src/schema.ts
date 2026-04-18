@@ -455,6 +455,84 @@ export function mergeSchemas(code: SchemaDefinition, persisted: PersistedSchema)
   return { persisted: merged, warnings };
 }
 
+/**
+ * Merge two PersistedSchema objects with overlay semantics.
+ * Overlay properties win per-property (not per-field), so an agent can update
+ * a single field property (e.g. `type`) without losing others (e.g. `description`).
+ * Indexes are unioned from both sides.
+ */
+export function mergePersistedSchemas(base: PersistedSchema, overlay: PersistedSchema): PersistedSchema {
+  const merged: PersistedSchema = { name: base.name };
+
+  merged.version = overlay.version ?? base.version;
+  merged.description = overlay.description ?? base.description;
+  merged.instructions = overlay.instructions ?? base.instructions;
+  merged.tagField = overlay.tagField ?? base.tagField;
+  merged.storageMode = overlay.storageMode ?? base.storageMode;
+
+  const baseIndexes = base.indexes ?? [];
+  const overlayIndexes = overlay.indexes ?? [];
+  const mergedIndexes = [...new Set([...baseIndexes, ...overlayIndexes])];
+  if (mergedIndexes.length > 0) merged.indexes = mergedIndexes;
+
+  const baseComposite = base.compositeIndexes ?? [];
+  const overlayComposite = overlay.compositeIndexes ?? [];
+  const compositeKeys = new Set(baseComposite.map(ci => ci.join(",")));
+  const mergedComposite = [...baseComposite];
+  for (const ci of overlayComposite) {
+    if (!compositeKeys.has(ci.join(","))) mergedComposite.push(ci);
+  }
+  if (mergedComposite.length > 0) merged.compositeIndexes = mergedComposite;
+
+  const baseArray = base.arrayIndexes ?? [];
+  const overlayArray = overlay.arrayIndexes ?? [];
+  const mergedArray = [...new Set([...baseArray, ...overlayArray])];
+  if (mergedArray.length > 0) merged.arrayIndexes = mergedArray;
+
+  const baseFields = base.fields ?? {};
+  const overlayFields = overlay.fields ?? {};
+  const allFieldNames = new Set([...Object.keys(baseFields), ...Object.keys(overlayFields)]);
+
+  if (allFieldNames.size > 0) {
+    merged.fields = {};
+    for (const fieldName of allFieldNames) {
+      const bf = baseFields[fieldName];
+      const of_ = overlayFields[fieldName];
+
+      if (bf && of_) {
+        const result: PersistedFieldDef = { type: of_.type };
+        const required = of_.required !== undefined ? of_.required : bf.required;
+        if (required) result.required = true;
+        const def = of_.default !== undefined ? of_.default : bf.default;
+        if (def !== undefined) result.default = def;
+        const values = of_.values !== undefined ? of_.values : bf.values;
+        if (values?.length) result.values = [...values];
+        const maxLength = of_.maxLength !== undefined ? of_.maxLength : bf.maxLength;
+        if (maxLength !== undefined) result.maxLength = maxLength;
+        const min = of_.min !== undefined ? of_.min : bf.min;
+        if (min !== undefined) result.min = min;
+        const max = of_.max !== undefined ? of_.max : bf.max;
+        if (max !== undefined) result.max = max;
+        const description = of_.description !== undefined ? of_.description : bf.description;
+        if (description !== undefined) result.description = description;
+        merged.fields[fieldName] = result;
+      } else if (of_) {
+        merged.fields[fieldName] = { ...of_ };
+      } else if (bf) {
+        merged.fields[fieldName] = { ...bf };
+      }
+    }
+  }
+
+  if (merged.version === undefined) delete merged.version;
+  if (merged.description === undefined) delete merged.description;
+  if (merged.instructions === undefined) delete merged.instructions;
+  if (merged.tagField === undefined) delete merged.tagField;
+  if (merged.storageMode === undefined) delete merged.storageMode;
+
+  return merged;
+}
+
 /** Valid field types for schema validation. */
 const VALID_FIELD_TYPES = new Set<string>([
   "string", "number", "boolean", "date", "enum",
