@@ -7,11 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
-### Fixed
-
-- **Orphaned `meta/*.tmp` cleanup on init** — `AgentDB.init()` now scans `meta/` for `*.tmp` files after creating the directory and removes them with `rm({force:true})`. Prevents accumulation of tmp files left by hard crashes between `writeFile` and `rename` in `persistSchema` or `writeMeta`.
-- **`writeMeta()` unique tmp filename** — changed static `manifest.json.tmp` suffix to `pid+timestamp+random.tmp` (same pattern as `persistSchema`). Prevents concurrent writers in multi-process deployments from clobbering each other's in-flight writes. Rename failure cleans up tmp and re-throws.
-
 ## [1.3.0] - 2026-04-18
 
 ### Added
@@ -66,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Unified `_agent` audit stamp** — `makeSafe()` now stamps the authenticated identity (from auth context) on records, instead of self-reported `args.agent`. Previously HTTP-authenticated agents could record any string in `_agent` even though the permission gate used the real auth identity. Behavior: auth identity always wins; library/no-auth callers retain `args.agent` unchanged.
 - **`persistSchema` concurrent-write race** — tmp file name now includes pid + timestamp + random suffix to guarantee uniqueness per write. Rename is wrapped in try/catch: on failure, tmp is cleaned up with `rm({ force: true })`. Previously, concurrent writes on the same collection could share a `.tmp` filename when `Date.now()` collided within the same millisecond, causing silent content corruption and ENOENT on the loser's rename. Negative-path test verifies the cleanup fires on rename failure.
 - **Path sanitization regex in error messages** — changed `/\/[^\s'":]+\//g` to `/\/[^\s'":]+/g` (drop trailing-slash requirement). The old regex only stripped path prefixes with a trailing slash, leaving terminal filenames (e.g. `tickets.schema.json`) visible in tool error messages — exposing collection names. The new regex strips the full path including the filename.
+- **Orphaned `meta/*.tmp` cleanup on init** — `AgentDB.init()` scans `meta/` for `*.tmp` files after creating the directory and removes them with `rm({force:true})`. Prevents accumulation of tmp files left by hard crashes between `writeFile` and `rename` in `persistSchema` or `writeMeta`.
+- **`writeMeta()` unique tmp filename** — changed static `manifest.json.tmp` to `pid+timestamp+random.tmp` (same pattern as `persistSchema` from the second-pass fix). Prevents concurrent writers in multi-process deployments (shared data directory) from clobbering each other's in-flight writes. Rename failure cleans up tmp and re-throws.
 
 ### Internal
 - **`src/tools/index.ts` split into per-domain modules** — `shared.ts` (types, `makeSafe`, `getAgent`, shared schemas/annotations), `admin.ts`, `crud.ts`, `schema.ts`, `migrate.ts`, `archive.ts`, `vector.ts`, `blob.ts`, `backup.ts`. `index.ts` is now a pure aggregator. Public API (`getTools`, `AgentTool`, `ToolResult`) unchanged. Canonical tool order locked via snapshot test: admin → crud → schema → migrate → archive → vector → blob → backup.
