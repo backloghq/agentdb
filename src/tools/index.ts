@@ -788,6 +788,147 @@ export function getTools(db: AgentDB): AgentTool[] {
     },
 
     {
+      name: "db_migrate",
+      title: "Migrate Records",
+      description: "Declarative bulk record update via ordered ops: set (always assign), unset (remove), rename (move field, overwrite if target exists), default (assign only if missing), copy (duplicate field without removing source). Ops are applied in order per record. Idempotent ops (default, unset of absent field) make re-running safe. Per-record atomicity — no cross-record transaction. Validation fires normally; a schema-violating migration causes per-record failure tracked in errors[]." + API_NOTE,
+      schema: z.object({
+        collection: collectionParam,
+        ops: z.array(z.union([
+          z.object({ op: z.literal("set"), field: z.string().meta({ description: "Field to set" }), value: z.unknown().meta({ description: "Value to assign" }) }),
+          z.object({ op: z.literal("unset"), field: z.string().meta({ description: "Field to remove" }) }),
+          z.object({ op: z.literal("rename"), from: z.string().meta({ description: "Source field name" }), to: z.string().meta({ description: "Target field name (overwritten if exists)" }) }),
+          z.object({ op: z.literal("default"), field: z.string().meta({ description: "Field to set if missing" }), value: z.unknown().meta({ description: "Default value" }) }),
+          z.object({ op: z.literal("copy"), from: z.string().meta({ description: "Source field to copy from" }), to: z.string().meta({ description: "Target field to copy into" }) }),
+        ])).min(1, "ops must contain at least one operation").meta({ description: "Ordered list of operations to apply to each record" }),
+        filter: filterParam,
+        dryRun: z.boolean().optional().default(false).meta({ description: "Preview counts without writing (default: false)" }),
+        batchSize: z.number().optional().default(100).meta({ description: "Records per batch (default: 100)" }),
+        ...mutationOpts,
+      }),
+      outputSchema: z.object({
+        collection: z.string(),
+        scanned: z.number(),
+        updated: z.number(),
+        unchanged: z.number(),
+        failed: z.number(),
+        errors: z.array(z.object({ id: z.string(), error: z.string() })),
+        dryRun: z.boolean(),
+        ops: z.array(z.unknown()),
+      }),
+      annotations: DESTRUCTIVE,
+      execute: safe("db_migrate", WRITE)(async (args) => {
+        const colName = args.collection as string;
+        const ops = args.ops as Array<Record<string, unknown>>;
+        const filter = args.filter as Record<string, unknown> | string | undefined;
+        const dryRun = (args.dryRun as boolean) === true;
+        const batchSize = Math.max(1, (args.batchSize as number) || 100);
+        const agent = args.agent as string | undefined;
+        const reason = args.reason as string | undefined;
+
+        if (!ops || ops.length === 0) throw new Error("ops must contain at least one operation");
+
+        const PROTECTED = new Set(["_id", "_version", "_agent", "_reason", "_expires", "_embedding"]);
+
+        function applyOps(record: Record<string, unknown>): Record<string, unknown> {
+          const r = { ...record };
+          for (const op of ops) {
+            switch (op.op) {
+              case "set":
+                if (!PROTECTED.has(op.field as string)) r[op.field as string] = op.value;
+                break;
+              case "unset":
+                if (!PROTECTED.has(op.field as string)) delete r[op.field as string];
+                break;
+              case "rename":
+                if (!PROTECTED.has(op.from as string) && !PROTECTED.has(op.to as string) && (op.from as string) in r) {
+                  r[op.to as string] = r[op.from as string];
+                  delete r[op.from as string];
+                }
+                break;
+              case "default":
+                if (!PROTECTED.has(op.field as string) && r[op.field as string] === undefined) {
+                  r[op.field as string] = op.value;
+                }
+                break;
+              case "copy":
+                if (!PROTECTED.has(op.from as string) && !PROTECTED.has(op.to as string) && (op.from as string) in r) {
+                  r[op.to as string] = r[op.from as string];
+                }
+                break;
+            }
+          }
+          return r;
+        }
+
+        const col = await db.collection(colName);
+        let scanned = 0;
+        let updated = 0;
+        let unchanged = 0;
+        let failed = 0;
+        const errors: Array<{ id: string; error: string }> = [];
+
+        let offset = 0;
+        while (true) {
+          const result = await col.find({ filter, limit: batchSize, offset });
+          if (result.records.length === 0) break;
+
+          for (const record of result.records) {
+            scanned++;
+            const id = record._id as string;
+            const version = record._version as number | undefined;
+
+            // Apply ops to user fields only (exclude _id for comparison)
+            const original: Record<string, unknown> = {};
+            const withoutId: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(record)) {
+              if (k !== "_id") { original[k] = v; withoutId[k] = v; }
+            }
+            const migrated = applyOps(withoutId);
+
+            // Diff: only non-protected fields
+            const $set: Record<string, unknown> = {};
+            const $unset: Record<string, true> = {};
+            for (const [k, v] of Object.entries(migrated)) {
+              if (PROTECTED.has(k)) continue;
+              if (!(k in original) || JSON.stringify(original[k]) !== JSON.stringify(v)) $set[k] = v;
+            }
+            for (const k of Object.keys(original)) {
+              if (PROTECTED.has(k)) continue;
+              if (!(k in migrated)) $unset[k] = true;
+            }
+            const hasChanges = Object.keys($set).length > 0 || Object.keys($unset).length > 0;
+
+            if (!hasChanges) { unchanged++; continue; }
+
+            if (dryRun) { updated++; continue; }
+
+            try {
+              const updateOps: Record<string, unknown> = {};
+              if (Object.keys($set).length > 0) updateOps.$set = $set;
+              if (Object.keys($unset).length > 0) updateOps.$unset = $unset;
+              await col.update(
+                { _id: id } as import("../collection-helpers.js").Filter,
+                updateOps as import("../collection-helpers.js").UpdateOps,
+                { agent, reason, expectedVersion: version },
+              );
+              updated++;
+            } catch (err) {
+              failed++;
+              if (errors.length < 10) {
+                errors.push({ id, error: err instanceof Error ? err.message : String(err) });
+              }
+            }
+          }
+
+          if (result.records.length < batchSize) break;
+          offset += batchSize;
+        }
+
+        return { collection: colName, scanned, updated, unchanged, failed, errors, dryRun, ops };
+      }),
+    },
+
+    {
       name: "db_distinct",
       title: "Distinct Values",
       description: "Get unique values for a specific field across all records in a collection. Supports dot notation for nested fields (e.g. 'metadata.category'). Useful for discovering what values exist before writing filters." + API_NOTE,
