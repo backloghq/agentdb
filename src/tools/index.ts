@@ -884,7 +884,7 @@ export function getTools(db: AgentDB): AgentTool[] {
           }
         }
 
-        const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}/;
+        const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(T|Z|$)/;
 
         const fields: Record<string, import("../schema.js").PersistedFieldDef> = {};
 

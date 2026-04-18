@@ -980,6 +980,15 @@ describe("Tool Definitions", () => {
       expect(result.proposed.fields?.x).toBeDefined();
     });
 
+    it("does not classify strings with non-date suffix as date (regression: false positive)", async () => {
+      // Use 15 distinct values so type is string (not enum), and verify it's not misclassified as date
+      const records = Array.from({ length: 15 }, (_, i) => ({ label: `2024-01-${String(i + 1).padStart(2, "0")} not a date ${i}` }));
+      await exec("db_insert", { collection: "infer-dateregex", records });
+      const result = await exec("db_infer_schema", { collection: "infer-dateregex" });
+      expect(result.proposed.fields.label.type).toBe("string");
+      expect(result.proposed.fields.label.type).not.toBe("date");
+    });
+
     it("emits note when collection already has a persisted schema", async () => {
       await exec("db_insert", { collection: "infer-existing", records: [{ x: 1 }] });
       await exec("db_set_schema", {
