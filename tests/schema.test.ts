@@ -1437,6 +1437,22 @@ describe("AgentDB.loadSchemasFromFiles", () => {
     expect(second).toEqual(first);
   });
 
+  it("skips file with same content but reordered JSON keys (canonicalJSON no-op detection)", async () => {
+    // Load with one key order
+    const schemaPath = join(tmpDir, "reorder.json");
+    await writeFile(schemaPath, JSON.stringify({ name: "reorder", description: "Stable", version: 1 }), "utf-8");
+
+    const r1 = await db.loadSchemasFromFiles([schemaPath]);
+    expect(r1.loaded).toBe(1);
+
+    // Write same logical content with different key ordering
+    await writeFile(schemaPath, JSON.stringify({ version: 1, name: "reorder", description: "Stable" }), "utf-8");
+
+    const r2 = await db.loadSchemasFromFiles([schemaPath]);
+    expect(r2.loaded).toBe(0);
+    expect(r2.skipped).toBe(1);
+  });
+
   it("skips file when derived name fails collection name validation", async () => {
     const schemaPath = join(tmpDir, "_invalid.json");
     await writeFile(schemaPath, JSON.stringify({ description: "no name field" }), "utf-8");

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Added
 - **`db_infer_schema` date-regex false-positive fix** — tightened ISO date heuristic from `/^\d{4}-\d{2}-\d{2}/` to `/^\d{4}-\d{2}-\d{2}(T|Z|$)/`. Strings like `"2024-01-01 not a date"` no longer misclassify as `date`.
+- **canonicalJSON key-order test** — `loadSchemasFromFiles` skipped-detection test for files with same content but reordered JSON keys.
 - **`db_infer_schema` existing-schema note** — emits a note when the collection already has a persisted schema, pointing to `db_diff_schema` and `db_set_schema` for next steps. Includes the existing schema's version when available.
 - **`outputSchema` on `db_diff_schema`** — declares the full structured return shape: `{ collection, hasExisting, added/removed (fields/indexes/arrayIndexes/compositeIndexes), changed (description/instructions/version/fields), warnings[{severity, message}], impact? }`.
 
