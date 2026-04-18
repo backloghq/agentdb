@@ -140,7 +140,7 @@ npx agentdb --path ./data --schemas ./teams/users.json --schemas ./teams/tasks.j
 
 **Schema bootstrap order**: on `db.init()`, `<dataDir>/schemas/*.json` is auto-discovered first, then any `--schemas` paths are loaded on top as overlays. File properties win per-property; untouched persisted properties are preserved.
 
-All 35 tools exposed as MCP tools (37 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
+All 36 tools exposed as MCP tools (38 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
 
 ```json
 {
@@ -317,7 +317,7 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 
 ## Tool Definitions
 
-`getTools(db)` returns 35 tools:
+`getTools(db)` returns 36 tools:
 
 | Tool | Description |
 |------|-------------|
@@ -340,6 +340,7 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 | `db_set_schema` | Create/update persisted schema (admin-only, partial merge) |
 | `db_delete_schema` | Delete persisted schema for a collection (admin-only, idempotent) |
 | `db_diff_schema` | Preview what db_set_schema would change — structured diff with warnings and record impact counts |
+| `db_infer_schema` | Sample existing records and propose a PersistedSchema — cold-start schema bootstrap |
 | `db_migrate` | Declarative bulk record update via set/unset/rename/default/copy ops with dryRun and per-record error tracking |
 | `db_distinct` | Unique values for a field |
 | `db_stats` | Database-level statistics |

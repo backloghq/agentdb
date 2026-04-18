@@ -37,8 +37,8 @@ describe("Tool Definitions", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns 35 tools", () => {
-    expect(tools).toHaveLength(35);
+  it("returns 36 tools", () => {
+    expect(tools).toHaveLength(36);
   });
 
   it("every tool has required fields", () => {
@@ -875,6 +875,109 @@ describe("Tool Definitions", () => {
       });
       expect(result.unchanged).toBe(1);
       expect(result.updated).toBe(0);
+    });
+  });
+
+  describe("db_infer_schema", () => {
+    it("returns empty fields for empty collection", async () => {
+      await db.collection("infer-empty"); // open (creates empty)
+      const result = await exec("db_infer_schema", { collection: "infer-empty" });
+      expect(result.totalRecords).toBe(0);
+      expect(result.sampleSize).toBe(0);
+      expect(result.proposed.fields).toBeUndefined();
+      expect(result.notes[0]).toMatch(/empty/i);
+    });
+
+    it("infers boolean type", async () => {
+      await exec("db_insert", { collection: "infer-bool", records: [
+        { active: true }, { active: false }, { active: true },
+      ]});
+      const result = await exec("db_infer_schema", { collection: "infer-bool" });
+      expect(result.proposed.fields.active.type).toBe("boolean");
+    });
+
+    it("infers number type", async () => {
+      await exec("db_insert", { collection: "infer-num", records: [
+        { score: 10 }, { score: 20 }, { score: 30 },
+      ]});
+      const result = await exec("db_infer_schema", { collection: "infer-num" });
+      expect(result.proposed.fields.score.type).toBe("number");
+    });
+
+    it("infers enum type when distinct values <= enumThreshold", async () => {
+      await exec("db_insert", { collection: "infer-enum", records: [
+        { status: "active" }, { status: "inactive" }, { status: "active" },
+      ]});
+      const result = await exec("db_infer_schema", { collection: "infer-enum", enumThreshold: 5 });
+      expect(result.proposed.fields.status.type).toBe("enum");
+      expect(result.proposed.fields.status.values).toEqual(["active", "inactive"]);
+      expect(result.notes.some((n: string) => n.includes("inferred as enum"))).toBe(true);
+    });
+
+    it("infers string type with maxLength when distinct values > enumThreshold", async () => {
+      const records = Array.from({ length: 15 }, (_, i) => ({ comment: `comment number ${i} with some padding` }));
+      await exec("db_insert", { collection: "infer-str", records });
+      const result = await exec("db_infer_schema", { collection: "infer-str", enumThreshold: 10 });
+      expect(result.proposed.fields.comment.type).toBe("string");
+      expect(typeof result.proposed.fields.comment.maxLength).toBe("number");
+      expect(result.proposed.fields.comment.maxLength).toBeGreaterThan(0);
+    });
+
+    it("infers date type from ISO date strings", async () => {
+      await exec("db_insert", { collection: "infer-date", records: [
+        { createdAt: "2024-01-15T10:00:00Z" },
+        { createdAt: "2024-02-20T12:00:00Z" },
+        { createdAt: "2023-12-01" },
+      ]});
+      const result = await exec("db_infer_schema", { collection: "infer-date" });
+      expect(result.proposed.fields.createdAt.type).toBe("date");
+      expect(result.notes.some((n: string) => n.includes("date string"))).toBe(true);
+    });
+
+    it("infers string[] type", async () => {
+      await exec("db_insert", { collection: "infer-strarr", records: [
+        { tags: ["a", "b"] }, { tags: ["c"] }, { tags: [] },
+      ]});
+      const result = await exec("db_infer_schema", { collection: "infer-strarr" });
+      expect(result.proposed.fields.tags.type).toBe("string[]");
+    });
+
+    it("marks field required when presence >= requiredThreshold", async () => {
+      // 20 records; name present in all 20 (100%), optional in 9 of 20 (45%)
+      const records = Array.from({ length: 20 }, (_, i) => ({
+        name: `user${i}`,
+        ...(i < 9 ? { optional: true } : {}),
+      }));
+      await exec("db_insert", { collection: "infer-req", records });
+      const result = await exec("db_infer_schema", { collection: "infer-req", requiredThreshold: 0.95 });
+      expect(result.proposed.fields.name.required).toBe(true);
+      expect(result.proposed.fields.optional?.required).toBeFalsy();
+    });
+
+    it("skips mixed-type fields with a note", async () => {
+      await exec("db_insert", { collection: "infer-mixed", records: [
+        { value: 42 }, { value: "hello" }, { value: true },
+      ]});
+      const result = await exec("db_infer_schema", { collection: "infer-mixed" });
+      expect(result.proposed.fields?.value).toBeUndefined();
+      expect(result.notes.some((n: string) => n.includes("value") && n.includes("mixed"))).toBe(true);
+    });
+
+    it("adds sampling note when totalRecords > sampleSize", async () => {
+      const records = Array.from({ length: 50 }, (_, i) => ({ n: i }));
+      await exec("db_insert", { collection: "infer-sample", records });
+      const result = await exec("db_infer_schema", { collection: "infer-sample", sampleSize: 10 });
+      expect(result.totalRecords).toBe(50);
+      expect(result.sampleSize).toBe(10);
+      expect(result.notes.some((n: string) => n.includes("Sampled"))).toBe(true);
+    });
+
+    it("excludes meta fields (_id, _version) from proposed schema", async () => {
+      await exec("db_insert", { collection: "infer-meta", records: [{ x: 1 }] });
+      const result = await exec("db_infer_schema", { collection: "infer-meta" });
+      expect(result.proposed.fields?._id).toBeUndefined();
+      expect(result.proposed.fields?._version).toBeUndefined();
+      expect(result.proposed.fields?.x).toBeDefined();
     });
   });
 

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { AgentDB } from "../agentdb.js";
 import { getCurrentAuth } from "../auth-context.js";
-import { mergePersistedSchemas } from "../schema.js";
+import { mergePersistedSchemas, validatePersistedSchema } from "../schema.js";
 
 /** A framework-agnostic tool definition. */
 export interface AgentTool {
@@ -784,6 +784,150 @@ export function getTools(db: AgentDB): AgentTool[] {
         };
         if (impact !== undefined) result.impact = impact;
         return result;
+      }),
+    },
+
+    {
+      name: "db_infer_schema",
+      title: "Infer Schema",
+      description: "Sample existing records and propose a PersistedSchema — solves the cold-start problem. Detects field types (boolean, number, string, date, enum, string[], number[], object), marks fields required when present in ≥ requiredThreshold fraction of records, and infers enum values when distinct string count ≤ enumThreshold. Mixed-type fields are skipped with a note. Sampling is offset-randomised when totalRecords > sampleSize. The proposed schema passes validatePersistedSchema and can be forwarded directly to db_set_schema. Does not mutate any data." + API_NOTE,
+      schema: z.object({
+        collection: collectionParam,
+        sampleSize: z.number().optional().default(100).meta({ description: "Max records to sample (default: 100, cap: 10000)" }),
+        enumThreshold: z.number().optional().default(10).meta({ description: "Max distinct string values before treating as free-text instead of enum (default: 10)" }),
+        requiredThreshold: z.number().optional().default(0.95).meta({ description: "Fraction of sampled records a field must appear in to be marked required (default: 0.95)" }),
+      }),
+      outputSchema: z.object({
+        collection: z.string(),
+        sampleSize: z.number(),
+        totalRecords: z.number(),
+        proposed: z.record(z.string(), z.unknown()),
+        notes: z.array(z.string()),
+      }),
+      annotations: READ,
+      execute: safe("db_infer_schema", READ)(async (args) => {
+        const colName = args.collection as string;
+        const sampleSize = Math.min(Math.max(1, (args.sampleSize as number) || 100), 10000);
+        const enumThreshold = Math.max(1, (args.enumThreshold as number) || 10);
+        const requiredThreshold = Math.max(0, Math.min(1, (args.requiredThreshold as number) ?? 0.95));
+
+        const META = new Set(["_id", "_version", "_agent", "_reason", "_expires", "_embedding", "__proto__", "constructor", "prototype"]);
+
+        const col = await db.collection(colName);
+        const totalRecords = await col.count();
+        const notes: string[] = [];
+
+        // Sampling: scan-all when totalRecords ≤ sampleSize, otherwise random offset
+        let records: Record<string, unknown>[];
+        if (totalRecords === 0) {
+          records = [];
+        } else if (totalRecords <= sampleSize) {
+          records = (await col.find({ limit: sampleSize })).records;
+        } else {
+          const maxOffset = totalRecords - sampleSize;
+          const startOffset = Math.floor(Math.random() * (maxOffset + 1));
+          records = (await col.find({ limit: sampleSize, offset: startOffset })).records;
+          notes.push(`Sampled ${records.length} of ${totalRecords} total records (random offset ${startOffset}).`);
+        }
+
+        const actualSample = records.length;
+
+        if (actualSample === 0) {
+          const proposed: import("../schema.js").PersistedSchema = { name: colName };
+          validatePersistedSchema(proposed);
+          return { collection: colName, sampleSize: actualSample, totalRecords, proposed, notes: ["Collection is empty; no fields could be inferred."] };
+        }
+
+        // Collect field names across all sample records (skip meta)
+        const fieldNames = new Set<string>();
+        for (const record of records) {
+          for (const key of Object.keys(record)) {
+            if (!META.has(key)) fieldNames.add(key);
+          }
+        }
+
+        const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}/;
+
+        const fields: Record<string, import("../schema.js").PersistedFieldDef> = {};
+
+        for (const fieldName of fieldNames) {
+          const values = records
+            .map(r => r[fieldName])
+            .filter(v => v !== undefined && v !== null);
+
+          if (values.length === 0) continue;
+
+          const presentCount = records.filter(r => r[fieldName] !== undefined && r[fieldName] !== null).length;
+
+          // Count how many values fall into each type bucket
+          let boolCount = 0, numCount = 0, strCount = 0, strArrCount = 0, numArrCount = 0, objCount = 0, otherCount = 0;
+          for (const v of values) {
+            if (typeof v === "boolean") boolCount++;
+            else if (typeof v === "number") numCount++;
+            else if (typeof v === "string") strCount++;
+            else if (Array.isArray(v)) {
+              if (v.length === 0 || v.every(e => typeof e === "string")) strArrCount++;
+              else if (v.every(e => typeof e === "number")) numArrCount++;
+              else otherCount++;
+            } else if (typeof v === "object") objCount++;
+            else otherCount++;
+          }
+
+          const activeBuckets = [boolCount, numCount, strCount, strArrCount, numArrCount, objCount, otherCount]
+            .filter(c => c > 0).length;
+
+          if (activeBuckets > 1) {
+            const typeLabels: string[] = [];
+            if (boolCount) typeLabels.push("boolean");
+            if (numCount) typeLabels.push("number");
+            if (strCount) typeLabels.push("string");
+            if (strArrCount) typeLabels.push("string[]");
+            if (numArrCount) typeLabels.push("number[]");
+            if (objCount) typeLabels.push("object");
+            if (otherCount) typeLabels.push("mixed/unknown");
+            notes.push(`Field '${fieldName}': mixed types observed (${typeLabels.join(", ")}), skipped.`);
+            continue;
+          }
+
+          const required = presentCount / actualSample >= requiredThreshold;
+          let fieldDef: import("../schema.js").PersistedFieldDef;
+
+          if (boolCount > 0) {
+            fieldDef = { type: "boolean" };
+          } else if (numCount > 0) {
+            fieldDef = { type: "number" };
+          } else if (strCount > 0) {
+            const strs = values as string[];
+            if (strs.every(s => ISO_DATE_RE.test(s))) {
+              fieldDef = { type: "date" };
+              notes.push(`Field '${fieldName}': inferred as date string.`);
+            } else {
+              const uniqueValues = new Set(strs);
+              if (uniqueValues.size <= enumThreshold) {
+                fieldDef = { type: "enum", values: [...uniqueValues].sort() };
+                notes.push(`Field '${fieldName}': inferred as enum with ${uniqueValues.size} distinct value(s).`);
+              } else {
+                const maxLength = Math.max(...strs.map(s => s.length));
+                fieldDef = { type: "string", maxLength };
+              }
+            }
+          } else if (strArrCount > 0) {
+            fieldDef = { type: "string[]" };
+          } else if (numArrCount > 0) {
+            fieldDef = { type: "number[]" };
+          } else {
+            fieldDef = { type: "object" };
+          }
+
+          if (required) fieldDef.required = true;
+          fields[fieldName] = fieldDef;
+        }
+
+        const proposed: import("../schema.js").PersistedSchema = { name: colName };
+        if (Object.keys(fields).length > 0) proposed.fields = fields;
+        validatePersistedSchema(proposed);
+
+        return { collection: colName, sampleSize: actualSample, totalRecords, proposed, notes };
       }),
     },
 
