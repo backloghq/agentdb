@@ -253,7 +253,7 @@ export function getCrudTools(db: AgentDB): AgentTool[] {
     {
       name: "db_distinct",
       title: "Distinct Values",
-      description: "Get unique values for a specific field across all records in a collection. Supports dot notation for nested fields (e.g. 'metadata.category'). Useful for discovering what values exist before writing filters." + API_NOTE,
+      description: "Get unique values for a specific field across all records in a collection. Supports dot notation for nested fields (e.g. 'metadata.category'). Useful for discovering what values exist before writing filters. On large collections, add an index on the target field via db_set_schema to avoid a full scan." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
         field: z.string().meta({ description: "Field name (supports dot notation for nested fields)" }),
