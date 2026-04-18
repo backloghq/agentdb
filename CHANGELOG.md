@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ### Docs
 
 - **`mergeSchemas` / `mergePersistedSchemas` JSDoc** — added full JSDoc covering when to call each function, precedence rules, and when NOT to use each (pointing to the other).
+- **`db_migrate` throughput docs** — description now includes: ~22K rec/sec (async mode), ~1-5K rec/sec (immediate/default), expected 20–100 sec for 100K-record migrations.
 
 ## [1.3.0] - 2026-04-18
 
