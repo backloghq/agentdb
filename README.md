@@ -102,6 +102,87 @@ defineSchema({ tagField: "labels", fields: { labels: { type: "string[]" } } })
 // +bug → { labels: { $contains: "bug" } }
 ```
 
+## Schema Lifecycle for Agents
+
+AgentDB treats schemas as first-class runtime objects that agents can inspect, evolve, and reason about — not just static type definitions. Here's the full six-step lifecycle:
+
+### 1. Define — declare your schema in code
+
+```typescript
+const tasks = await db.collection(defineSchema({
+  name: "tasks",
+  version: 1,
+  description: "Project tasks tracked by the team",
+  instructions: "Set priority based on urgency.",
+  fields: {
+    title: { type: "string", required: true, maxLength: 200 },
+    status: { type: "enum", values: ["pending", "done"], default: "pending" },
+  },
+  indexes: ["status"],
+}));
+```
+
+### 2. Persist — schema auto-saved to disk
+
+`defineSchema` collections automatically persist to `{dataDir}/meta/{name}.schema.json` on first open. The file contains the agent-facing context (description, instructions, field descriptions) but not runtime-only config (hooks, computed fields). The file can be committed to source control, loaded at startup, or shipped as a seed.
+
+### 3. Discover — agents find and read schemas at runtime
+
+```
+db_collections          → lists all collections with record count + schema summary
+db_get_schema tasks     → returns full persisted schema: description, instructions,
+                          field types, constraints, indexes, version
+```
+
+Any agent can call these without knowing the codebase. They answer "what data exists and how should I use it?"
+
+### 4. Diff — preview schema changes before committing
+
+```
+db_diff_schema tasks { fields: { priority: { type: "enum", values: ["H","M","L"] } } }
+→ { added: ["priority"], changed: [], removed: [], warnings: [], impact: { ... } }
+```
+
+`db_diff_schema` uses `mergePersistedSchemas` internally (same semantics as `db_set_schema`), so it accurately shows what would change — including record-impact counts for constraint tightening (e.g. how many strings exceed a new `maxLength`).
+
+### 5. Migrate — apply bulk data changes
+
+```
+db_migrate tasks { ops: [{ op: "default", field: "priority", value: "M" }] }
+→ { scanned: 1200, updated: 843, unchanged: 357, failed: 0 }
+```
+
+`db_migrate` supports `set`, `unset`, `rename`, `default`, and `copy` ops. Use `dryRun: true` to preview counts. Records that fail validation or are deleted mid-run land in `errors[]` with per-record context.
+
+### 6. Infer — bootstrap a schema from existing data (cold start)
+
+When you have data but no schema, `db_infer_schema` samples the collection and proposes a `PersistedSchema`:
+
+```
+db_infer_schema tasks { sampleSize: 200 }
+→ { proposed: { fields: { title: { type: "string", maxLength: 180 }, ... } }, notes: [...] }
+```
+
+The proposed schema passes `validatePersistedSchema` and can be forwarded directly to `db_set_schema`.
+
+### Library API: programmatic schema management
+
+```typescript
+// Load JSON schema files at startup (overlay semantics, per-file isolation)
+const result = await db.loadSchemasFromFiles(["./schemas/tasks.json"]);
+// → { loaded: 1, skipped: 0, failed: [] }
+
+// Merge two persisted schemas with overlay (used internally by db_set_schema)
+import { mergePersistedSchemas } from "@backloghq/agentdb";
+const merged = mergePersistedSchemas(existing, incoming);
+// Overlay wins per-property, not per-field — updating { type } preserves { description }
+
+// Reconcile code-level schema with persisted schema at collection open time
+import { mergeSchemas } from "@backloghq/agentdb";
+const { persisted, warnings } = mergeSchemas(codeSchema, persistedSchema);
+// Code wins for validation, persisted wins for agent context
+```
+
 ## Three Ways to Use It
 
 ### 1. Direct Import

@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 - **Unified `_agent` audit stamp** — `makeSafe()` now mutates `args.agent` with the resolved identity (authenticated identity wins over self-reported) before calling tool handlers. Previously, tools used `authId` for permission checks but `args.agent` (potentially undefined) for the `_agent` audit field, so HTTP-authenticated calls were not stamped. Behavior matrix: auth+no-arg → auth identity; auth+arg → auth wins; no-auth+arg → arg; no-auth+no-arg → undefined.
 
+### Docs
+
+- **README: Schema lifecycle for agents** — new section covering the 6-step schema workflow (define → persist → discover → diff → migrate → infer), with code examples for each step. Includes library API references for `loadSchemasFromFiles`, `mergePersistedSchemas`, and `mergeSchemas`.
+
 ## [1.3.0] - 2026-04-18
 
 ### Added
