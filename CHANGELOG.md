@@ -7,24 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
-### Fixed
-
-- **Path sanitization regex in error messages** — changed `/\/[^\s'":]+\//g` to `/\/[^\s'":]+/g` (drop trailing-slash requirement). The old regex only stripped path prefixes with a trailing slash, leaving terminal filenames (e.g. `tickets.schema.json`) visible in tool error messages — exposing collection names. The new regex matches and strips the full path including the filename.
-
-### Added
-
-- **`persistSchema` rename failure test** — negative-path test asserting that when the atomic rename step throws (e.g. `EXDEV: cross-device link`), the tmp file is cleaned up via `rm({force:true})` and the original error is re-thrown.
-- **`$strLen` in compact filter syntax** — `field.strLen:N` (exact character count) and `field.strLen.modifier:N` (e.g. `title.strLen.gt:10`) map to `{ field: { $strLen: N } }` and `{ field: { $strLen: { $op: N } } }` respectively. `strLen` added to modifier alias list in README.
-- **README reorder** — "Schema Lifecycle for Agents" moved to appear immediately before the "Tool Definitions" table so the lifecycle walkthrough directly precedes the tool reference.
-- **Bench drift detection fix** — `tests/bench-stress.test.ts` now uses p99 (not p50) for find-latency drift comparison, with a 0.5ms floor on both baseline values. Eliminates false `>2×` alarms caused by sub-millisecond p50 noise.
-- **Schema terminology disambiguation** — README and CLAUDE.md now clearly distinguish `defineSchema()` (code-level, never serialized), `PersistedSchema` (JSON subset in `meta/`), and `db_schema` (samples records dynamically). Tool table updated to reflect the distinction.
-- **`db_distinct` indexing guidance** — description now advises adding an index on the target field via `db_set_schema` to avoid a full scan on large collections.
-- **MCP server instructions rewrite** — `createMcpServer` now emits a 5-step "Start here" block: db_collections → db_get_schema → db_find/db_find_one → mutations → schema lifecycle (db_set_schema, db_diff_schema, db_infer_schema, db_delete_schema). Two regression tests verify all five schema lifecycle tool names appear in the instructions.
-
-### Refactor
-
-- **`validateCollectionName` dead-code removal** — removed `name.includes("..")` check; `VALID_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/` already rejects all dots.
-
 ## [1.3.0] - 2026-04-18
 
 ### Added
@@ -66,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Enhanced `db_collections` tool** — now includes schema summary (description, field count, has instructions, version) per collection.
 
 #### Filter operators
-- **`$strLen` operator** — compares the character length of a string field. Accepts a number (exact match) or operator object (`{ $gt: N }`, `{ $gte: N, $lte: M }`, etc.). Non-string values return false. Used internally by `db_diff_schema` for `maxLength` impact scans. Performance characteristic: latency is comparable to manual `find()` + JS-side filtering in both in-memory and disk-backed mode (benchmarked: ~0.8ms for 10K records in-memory, ~58ms for 100K records from Parquet); the primary benefit is ergonomics (inline pushdown syntax) rather than a throughput advantage.
+- **`$strLen` operator** — compares the character length of a string field. Accepts a number (exact match) or operator object (`{ $gt: N }`, `{ $gte: N, $lte: M }`, etc.). Non-string values return false. Used internally by `db_diff_schema` for `maxLength` impact scans. Also available in compact-filter syntax: `field.strLen:N` (exact) and `field.strLen.op:N` (e.g. `title.strLen.gt:10`). Performance characteristic: latency is comparable to manual `find()` + JS-side filtering in both in-memory and disk-backed mode (benchmarked: ~0.8ms for 10K records in-memory, ~58ms for 100K records from Parquet); the primary benefit is ergonomics (inline pushdown syntax) rather than a throughput advantage.
 
 ### Fixed
 - **`db_set_schema` field-property preservation** — partial schema updates no longer drop untouched field properties. Previously `{ title: { type: "string" } }` overwrote the entire field, losing `required`, `description`, etc. Now uses `mergePersistedSchemas()` with per-property overlay semantics.
@@ -77,7 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`db_migrate` prototype-pollution guard** — `__proto__`, `constructor`, and `prototype` added to PROTECTED set; ops targeting these fields are silently skipped, preventing in-memory prototype-chain corruption during `applyOps`.
 - **`loadSchemasFromFiles` 10MB size cap** — files larger than 10MB are skipped before `readFile` (logged warning + `failed[]` entry with `"file size exceeds 10MB limit"`). Prevents accidental OOM from oversized schema files.
 - **Unified `_agent` audit stamp** — `makeSafe()` now stamps the authenticated identity (from auth context) on records, instead of self-reported `args.agent`. Previously HTTP-authenticated agents could record any string in `_agent` even though the permission gate used the real auth identity. Behavior: auth identity always wins; library/no-auth callers retain `args.agent` unchanged.
-- **`persistSchema` concurrent-write race** — tmp file name now includes pid + timestamp + random suffix to guarantee uniqueness per write. Rename is wrapped in try/catch: on failure, tmp is cleaned up with `rm({ force: true })`. Previously, concurrent writes on the same collection could share a `.tmp` filename when `Date.now()` collided within the same millisecond, causing silent content corruption and ENOENT on the loser's rename.
+- **`persistSchema` concurrent-write race** — tmp file name now includes pid + timestamp + random suffix to guarantee uniqueness per write. Rename is wrapped in try/catch: on failure, tmp is cleaned up with `rm({ force: true })`. Previously, concurrent writes on the same collection could share a `.tmp` filename when `Date.now()` collided within the same millisecond, causing silent content corruption and ENOENT on the loser's rename. Negative-path test verifies the cleanup fires on rename failure.
+- **Path sanitization regex in error messages** — changed `/\/[^\s'":]+\//g` to `/\/[^\s'":]+/g` (drop trailing-slash requirement). The old regex only stripped path prefixes with a trailing slash, leaving terminal filenames (e.g. `tickets.schema.json`) visible in tool error messages — exposing collection names. The new regex strips the full path including the filename.
 
 ### Internal
 - **`src/tools/index.ts` split into per-domain modules** — `shared.ts` (types, `makeSafe`, `getAgent`, shared schemas/annotations), `admin.ts`, `crud.ts`, `schema.ts`, `migrate.ts`, `archive.ts`, `vector.ts`, `blob.ts`, `backup.ts`. `index.ts` is now a pure aggregator. Public API (`getTools`, `AgentTool`, `ToolResult`) unchanged. Canonical tool order locked via snapshot test: admin → crud → schema → migrate → archive → vector → blob → backup.
@@ -89,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **README: Authentication — agent identity** — new sub-section documents that over an authenticated HTTP transport, the `agent` parameter is silently overridden with the authenticated identity (3-row behavior matrix).
 - **`code-review` example refreshed for v1.3** — `defineSchema` with `description`/`instructions`/per-field descriptions; example README walks through the 3-step lifecycle (define, auto-persist, agent discovery via `db_get_schema`).
 - **JSDoc on merge functions** — `mergeSchemas` and `mergePersistedSchemas` now document precedence rules and when to use each.
+- **MCP server instructions rewrite** — `createMcpServer` emits a 5-step "Start here" block: `db_collections` → `db_get_schema` → `db_find`/`db_find_one` → mutations → schema lifecycle (`db_set_schema`, `db_diff_schema`, `db_infer_schema`, `db_delete_schema`). Regression tests verify all schema lifecycle tool names appear.
+- **Schema terminology disambiguation** — README and CLAUDE.md now clearly distinguish `defineSchema()` (code-level, never serialized), `PersistedSchema` (JSON subset in `meta/`), and `db_schema` (samples records dynamically).
+- **README reorder** — "Schema Lifecycle for Agents" section moved to appear immediately before "Tool Definitions" so the lifecycle walkthrough directly precedes the tool reference.
+- **`db_distinct` indexing guidance** — tool description now advises adding an index on the target field to avoid a full scan on large collections.
+- **`validateCollectionName` dead-code removal** — removed redundant `name.includes("..")` check; `VALID_NAME_RE` already rejects all dots.
+- **Bench drift detection fix** — stress bench uses p99 (not p50) for find-latency drift comparison, with a 0.5ms floor. Eliminates false `>2×` alarms on sub-millisecond baselines.
 
 ## [1.2.1] - 2026-04-11
 
