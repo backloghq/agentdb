@@ -685,6 +685,14 @@ describe("Tool Definitions", () => {
   });
 
   describe("db_migrate", () => {
+    it("101 ops returns a Zod validation error", async () => {
+      const ops = Array.from({ length: 101 }, (_, i) => ({ op: "set", field: `f${i}`, value: i }));
+      const t = tool("db_migrate");
+      const result = await t.execute({ collection: "migrate-ops-cap", ops });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/100/);
+    });
+
     it("set op assigns a field on all records", async () => {
       await exec("db_insert", { collection: "migrate-set", records: [
         { name: "Alice" }, { name: "Bob" },

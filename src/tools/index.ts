@@ -986,7 +986,7 @@ export function getTools(db: AgentDB): AgentTool[] {
           z.object({ op: z.literal("rename"), from: z.string().meta({ description: "Source field name" }), to: z.string().meta({ description: "Target field name (overwritten if exists)" }) }),
           z.object({ op: z.literal("default"), field: z.string().meta({ description: "Field to set if missing" }), value: z.unknown().meta({ description: "Default value" }) }),
           z.object({ op: z.literal("copy"), from: z.string().meta({ description: "Source field to copy from" }), to: z.string().meta({ description: "Target field to copy into" }) }),
-        ])).min(1, "ops must contain at least one operation").meta({ description: "Ordered list of operations to apply to each record" }),
+        ])).min(1, "ops must contain at least one operation").max(100, "ops cannot exceed 100 elements").meta({ description: "Ordered list of operations to apply to each record" }),
         filter: filterParam,
         dryRun: z.boolean().optional().default(false).meta({ description: "Preview counts without writing (default: false)" }),
         batchSize: z.number().optional().default(100).meta({ description: "Records per batch (default: 100)" }),
@@ -1013,6 +1013,7 @@ export function getTools(db: AgentDB): AgentTool[] {
         const reason = args.reason as string | undefined;
 
         if (!ops || ops.length === 0) throw new Error("ops must contain at least one operation");
+        if (ops.length > 100) throw new Error("ops cannot exceed 100 elements");
 
         const PROTECTED = new Set(["_id", "_version", "_agent", "_reason", "_expires", "_embedding"]);
 
