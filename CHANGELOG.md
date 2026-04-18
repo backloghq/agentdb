@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Refactor
 
-- **`src/tools/index.ts` split into per-domain modules** — `shared.ts` (types, `makeSafe`, shared schemas/annotations), `admin.ts`, `crud.ts`, `schema.ts`, `migrate.ts`, `archive.ts`, `vector.ts`, `blob.ts`, `backup.ts`. `index.ts` is now a pure aggregator. Public API (`getTools`, `AgentTool`, `ToolResult`) unchanged.
+- **`src/tools/index.ts` split into per-domain modules** — `shared.ts` (types, `makeSafe`, shared schemas/annotations), `admin.ts`, `crud.ts`, `schema.ts`, `migrate.ts`, `archive.ts`, `vector.ts`, `blob.ts`, `backup.ts`. `index.ts` is now a pure aggregator. Public API (`getTools`, `AgentTool`, `ToolResult`) unchanged. Tool order: admin → crud → schema → migrate → archive → vector → blob → backup (locked by canonical-order test).
 
 ## [1.3.0] - 2026-04-18
 

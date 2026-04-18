@@ -42,6 +42,28 @@ describe("Tool Definitions", () => {
     expect(tools).toHaveLength(36);
   });
 
+  it("tool order is canonical (admin → crud → schema → migrate → archive → vector → blob → backup)", () => {
+    expect(tools.map((t) => t.name)).toEqual([
+      // admin
+      "db_collections", "db_create", "db_drop", "db_purge", "db_stats",
+      // crud
+      "db_insert", "db_find", "db_find_one", "db_update", "db_upsert",
+      "db_delete", "db_batch", "db_count", "db_undo", "db_history", "db_distinct",
+      // schema
+      "db_schema", "db_get_schema", "db_set_schema", "db_delete_schema", "db_diff_schema", "db_infer_schema",
+      // migrate
+      "db_migrate",
+      // archive
+      "db_archive", "db_archive_list", "db_archive_load",
+      // vector
+      "db_semantic_search", "db_embed", "db_vector_upsert", "db_vector_search",
+      // blob
+      "db_blob_write", "db_blob_read", "db_blob_list", "db_blob_delete",
+      // backup
+      "db_export", "db_import",
+    ]);
+  });
+
   it("every tool has required fields", () => {
     for (const t of tools) {
       expect(t.name).toBeTruthy();
