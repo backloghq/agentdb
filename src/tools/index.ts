@@ -491,6 +491,27 @@ export function getTools(db: AgentDB): AgentTool[] {
     },
 
     {
+      name: "db_delete_schema",
+      title: "Delete Collection Schema",
+      description: "Delete the persisted schema for a collection. Requires admin permission. Idempotent — succeeds even if no schema exists. Does not affect the collection's data or in-memory code schema." + API_NOTE,
+      schema: z.object({
+        collection: collectionParam,
+        ...mutationOpts,
+      }),
+      outputSchema: z.object({
+        deleted: z.boolean().meta({ description: "True if a schema existed and was removed, false if there was nothing to delete" }),
+      }),
+      annotations: DESTRUCTIVE,
+      execute: safe("db_delete_schema", DESTRUCTIVE)(async (args) => {
+        const name = args.collection as string;
+        const agent = args.agent as string | undefined;
+        const existed = (await db.loadPersistedSchema(name)) !== undefined;
+        await db.deletePersistedSchema(name, { agent });
+        return { deleted: existed };
+      }),
+    },
+
+    {
       name: "db_distinct",
       title: "Distinct Values",
       description: "Get unique values for a specific field across all records in a collection. Supports dot notation for nested fields (e.g. 'metadata.category'). Useful for discovering what values exist before writing filters." + API_NOTE,

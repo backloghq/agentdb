@@ -134,7 +134,7 @@ npx agentdb --path ./data              # stdio (single client)
 npx agentdb --path ./data --http       # HTTP (multiple clients)
 ```
 
-All 32 tools exposed as MCP tools (34 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
+All 33 tools exposed as MCP tools (35 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
 
 ```json
 {
@@ -311,7 +311,7 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 
 ## Tool Definitions
 
-`getTools(db)` returns 32 tools:
+`getTools(db)` returns 33 tools:
 
 | Tool | Description |
 |------|-------------|
@@ -332,6 +332,7 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 | `db_schema` | Inspect record shape (fields, types, examples) |
 | `db_get_schema` | Get persisted schema with context, instructions, fields, indexes |
 | `db_set_schema` | Create/update persisted schema (admin-only, partial merge) |
+| `db_delete_schema` | Delete persisted schema for a collection (admin-only, idempotent) |
 | `db_distinct` | Unique values for a field |
 | `db_stats` | Database-level statistics |
 | `db_archive` | Move records to cold storage |

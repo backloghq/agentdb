@@ -36,8 +36,8 @@ describe("Tool Definitions", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns 32 tools", () => {
-    expect(tools).toHaveLength(32);
+  it("returns 33 tools", () => {
+    expect(tools).toHaveLength(33);
   });
 
   it("every tool has required fields", () => {
@@ -359,6 +359,51 @@ describe("Tool Definitions", () => {
       const result = await exec("db_get_schema", { collection: "partial-update" });
       expect(result.schema.fields.title.required).toBe(true);
       expect(result.schema.fields.title.description).toBe("The title field");
+    });
+  });
+
+  describe("db_delete_schema", () => {
+    it("deletes an existing schema and returns deleted: true", async () => {
+      await exec("db_set_schema", {
+        collection: "to-delete",
+        schema: { description: "Temporary" },
+      });
+
+      const result = await exec("db_delete_schema", { collection: "to-delete" });
+      expect(result.deleted).toBe(true);
+
+      const check = await exec("db_get_schema", { collection: "to-delete" });
+      expect(check.schema).toBeNull();
+    });
+
+    it("returns deleted: false when no schema exists (idempotent)", async () => {
+      const result = await exec("db_delete_schema", { collection: "never-had-schema" });
+      expect(result.deleted).toBe(false);
+    });
+
+    it("is idempotent — second delete returns deleted: false", async () => {
+      await exec("db_set_schema", {
+        collection: "delete-twice",
+        schema: { description: "Will be deleted" },
+      });
+      const first = await exec("db_delete_schema", { collection: "delete-twice" });
+      expect(first.deleted).toBe(true);
+      const second = await exec("db_delete_schema", { collection: "delete-twice" });
+      expect(second.deleted).toBe(false);
+    });
+
+    it("returns isError when non-admin agent attempts delete", async () => {
+      const restrictedDb = new AgentDB(tmpDir + "-restricted", {
+        permissions: { reader: { read: true, write: false, admin: false } },
+      });
+      await restrictedDb.init();
+      const restrictedTools = getTools(restrictedDb);
+      const t = restrictedTools.find((t) => t.name === "db_delete_schema")!;
+      const result = await t.execute({ collection: "any", agent: "reader" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("Permission denied");
+      await restrictedDb.close();
+      await rm(tmpDir + "-restricted", { recursive: true, force: true });
     });
   });
 
