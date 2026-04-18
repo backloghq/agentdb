@@ -1065,13 +1065,38 @@ describe("Tool Definitions", () => {
       expect(result.notes.some((n: string) => n.includes("value") && n.includes("mixed"))).toBe(true);
     });
 
-    it("adds sampling note when totalRecords > sampleSize", async () => {
+    it("adds sampling note with 'reservoir' when totalRecords > sampleSize", async () => {
       const records = Array.from({ length: 50 }, (_, i) => ({ n: i }));
       await exec("db_insert", { collection: "infer-sample", records });
       const result = await exec("db_infer_schema", { collection: "infer-sample", sampleSize: 10 });
       expect(result.totalRecords).toBe(50);
       expect(result.sampleSize).toBe(10);
-      expect(result.notes.some((n: string) => n.includes("Sampled"))).toBe(true);
+      const note = result.notes.find((n: string) => n.includes("Sampled"));
+      expect(note).toBeDefined();
+      expect(note).toContain("reservoir");
+    });
+
+    it("distributes sample uniformly (Algorithm R — 50 runs see both halves)", async () => {
+      // 20 records split evenly: group A (idx 0-9) and group B (idx 10-19).
+      // Window sampling of the first 10 would only ever see group A.
+      // Algorithm R should see both groups in the vast majority of 50 runs.
+      const records = Array.from({ length: 20 }, (_, i) => ({ group: i < 10 ? "A" : "B" }));
+      await exec("db_insert", { collection: "infer-algr", records });
+
+      let bothGroupsSeen = 0;
+      for (let run = 0; run < 50; run++) {
+        const result = await exec("db_infer_schema", {
+          collection: "infer-algr",
+          sampleSize: 10,
+          enumThreshold: 2,
+        });
+        const groupField = result.proposed.fields?.group;
+        if (groupField?.type === "enum" && Array.isArray(groupField.values) && groupField.values.length === 2) {
+          bothGroupsSeen++;
+        }
+      }
+      // At least 30 of 50 runs should see both A and B (expected ~45+ with uniform sampling)
+      expect(bothGroupsSeen).toBeGreaterThan(30);
     });
 
     it("excludes meta fields (_id, _version) from proposed schema", async () => {
