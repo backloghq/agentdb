@@ -790,7 +790,7 @@ export function getTools(db: AgentDB): AgentTool[] {
     {
       name: "db_migrate",
       title: "Migrate Records",
-      description: "Declarative bulk record update via ordered ops: set (always assign), unset (remove), rename (move field, overwrite if target exists), default (assign only if missing), copy (duplicate field without removing source). Ops are applied in order per record. Idempotent ops (default, unset of absent field) make re-running safe. Per-record atomicity — no cross-record transaction. Validation fires normally; a schema-violating migration causes per-record failure tracked in errors[]." + API_NOTE,
+      description: "Declarative bulk record update via ordered ops: set (always assign), unset (remove), rename (move field, overwrite if target exists), default (assign only if missing), copy (duplicate field without removing source). Ops are applied in order per record. Idempotent ops (default, unset of absent field) make re-running safe. Per-record atomicity — no cross-record transaction. Protected meta-fields (_id, _version, _agent, _reason, _expires, _embedding) are silently skipped. Matching records are snapshotted by ID at migration start — all matches are processed even if ops cause records to leave the filter mid-run. Uses optimistic locking via snapshot versions; concurrent writes to the same record will fail and land in errors[]. Validation fires normally; a schema-violating migration causes per-record failure tracked in errors[]." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
         ops: z.array(z.union([
@@ -861,21 +861,41 @@ export function getTools(db: AgentDB): AgentTool[] {
         }
 
         const col = await db.collection(colName);
-        let scanned = 0;
         let updated = 0;
         let unchanged = 0;
         let failed = 0;
         const errors: Array<{ id: string; error: string }> = [];
 
-        let offset = 0;
-        while (true) {
-          const result = await col.find({ filter, limit: batchSize, offset });
-          if (result.records.length === 0) break;
+        // Phase 1: snapshot all matching IDs+versions (decouples scan from mutation so
+        // records that leave the filter after being processed are still counted)
+        const snapshot: Array<{ id: string; version: number | undefined }> = [];
+        {
+          let snapOffset = 0;
+          const SNAP_CHUNK = 5000;
+          while (true) {
+            const snap = await col.find({ filter, limit: SNAP_CHUNK, offset: snapOffset });
+            for (const r of snap.records) {
+              snapshot.push({ id: r._id as string, version: r._version as number | undefined });
+            }
+            if (snap.records.length < SNAP_CHUNK) break;
+            snapOffset += SNAP_CHUNK;
+          }
+        }
+        const scanned = snapshot.length;
 
-          for (const record of result.records) {
-            scanned++;
-            const id = record._id as string;
-            const version = record._version as number | undefined;
+        // Phase 2: process in batches by ID; use snapshot version for optimistic locking
+        for (let batchStart = 0; batchStart < snapshot.length; batchStart += batchSize) {
+          const batch = snapshot.slice(batchStart, batchStart + batchSize);
+          const batchIds = batch.map(s => s.id);
+          const fetched = await col.find({
+            filter: { _id: { $in: batchIds } } as import("../collection-helpers.js").Filter,
+            limit: batchIds.length,
+          });
+          const recordMap = new Map(fetched.records.map(r => [r._id as string, r]));
+
+          for (const { id, version: snapVersion } of batch) {
+            const record = recordMap.get(id);
+            if (!record) continue;
 
             // Apply ops to user fields only (exclude _id for comparison)
             const original: Record<string, unknown> = {};
@@ -909,7 +929,7 @@ export function getTools(db: AgentDB): AgentTool[] {
               await col.update(
                 { _id: id } as import("../collection-helpers.js").Filter,
                 updateOps as import("../collection-helpers.js").UpdateOps,
-                { agent, reason, expectedVersion: version },
+                { agent, reason, expectedVersion: snapVersion },
               );
               updated++;
             } catch (err) {
@@ -919,9 +939,6 @@ export function getTools(db: AgentDB): AgentTool[] {
               }
             }
           }
-
-          if (result.records.length < batchSize) break;
-          offset += batchSize;
         }
 
         return { collection: colName, scanned, updated, unchanged, failed, errors, dryRun, ops };

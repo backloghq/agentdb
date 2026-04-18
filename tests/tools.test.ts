@@ -788,6 +788,94 @@ describe("Tool Definitions", () => {
       const result = await t.execute({ collection: "migrate-empty", ops: [] });
       expect(result.isError).toBe(true);
     });
+
+    it("processes all records even when ops cause records to leave the filter (pagination regression)", async () => {
+      // 200 records with x:0; filter={x:0}; op sets x=1 (records leave filter after update)
+      // Old offset-based code: batch 1 processes 100, they leave filter, batch 2 at offset=100 finds 0 → skips 100
+      // New snapshot code: all 200 IDs captured upfront, all 200 processed
+      const records = Array.from({ length: 200 }, (_, i) => ({ n: i, x: 0 }));
+      await exec("db_insert", { collection: "migrate-pagereg", records });
+      const result = await exec("db_migrate", {
+        collection: "migrate-pagereg",
+        ops: [{ op: "set", field: "x", value: 1 }],
+        filter: { x: 0 },
+        batchSize: 100,
+      });
+      expect(result.scanned).toBe(200);
+      expect(result.updated).toBe(200);
+      expect(result.failed).toBe(0);
+    });
+
+    it("change events fire for each updated record", async () => {
+      await exec("db_insert", { collection: "migrate-events", records: [{ n: 1 }, { n: 2 }, { n: 3 }] });
+      const col = await db.collection("migrate-events");
+      let updateCount = 0;
+      const listener = (e: import("../src/collection.js").ChangeEvent) => {
+        if (e.type === "update") updateCount += e.ids.length;
+      };
+      col.on("change", listener);
+      await exec("db_migrate", {
+        collection: "migrate-events",
+        ops: [{ op: "set", field: "migrated", value: true }],
+      });
+      col.off("change", listener);
+      expect(updateCount).toBe(3);
+    });
+
+    it("concurrent write between snapshot and processing lands in failed[]", async () => {
+      await exec("db_insert", { collection: "migrate-conc", records: [{ x: 1 }, { x: 1 }] });
+      const col = await db.collection("migrate-conc");
+      const findRes = (await exec("db_find", { collection: "migrate-conc" })).records as Array<Record<string, unknown>>;
+      const idB = findRes[1]._id as string;
+
+      // Patch col.update: on first call, bump record B's version to simulate a concurrent write
+      const origUpdate = col.update.bind(col);
+      let firstCall = true;
+      (col as unknown as { update: unknown }).update = async (...args: Parameters<typeof col.update>) => {
+        if (firstCall) {
+          firstCall = false;
+          await origUpdate({ _id: idB } as import("../src/collection-helpers.js").Filter, { $set: { bumped: true } });
+        }
+        return origUpdate(...args);
+      };
+
+      const result = await exec("db_migrate", {
+        collection: "migrate-conc",
+        ops: [{ op: "set", field: "x", value: 2 }],
+      });
+
+      // Restore
+      (col as unknown as { update: unknown }).update = origUpdate;
+
+      expect(result.failed).toBeGreaterThanOrEqual(1);
+      expect(result.errors.length).toBeGreaterThanOrEqual(1);
+      expect(result.errors[0].error).toMatch(/version/i);
+    });
+
+    it("errors[] is capped at 10 even with more than 10 failures", async () => {
+      await db.collection(defineSchema({
+        name: "migrate-errcap",
+        fields: { score: { type: "number", max: 100 } },
+      }));
+      const records = Array.from({ length: 15 }, (_, i) => ({ score: i * 5 }));
+      await exec("db_insert", { collection: "migrate-errcap", records });
+      const result = await exec("db_migrate", {
+        collection: "migrate-errcap",
+        ops: [{ op: "set", field: "score", value: 200 }],
+      });
+      expect(result.failed).toBe(15);
+      expect(result.errors).toHaveLength(10);
+    });
+
+    it("set op targeting a protected field (_agent) is silently skipped", async () => {
+      await exec("db_insert", { collection: "migrate-prot", records: [{ name: "Alice" }] });
+      const result = await exec("db_migrate", {
+        collection: "migrate-prot",
+        ops: [{ op: "set", field: "_agent", value: "evil-bot" }],
+      });
+      expect(result.unchanged).toBe(1);
+      expect(result.updated).toBe(0);
+    });
   });
 
   describe("db_distinct", () => {
