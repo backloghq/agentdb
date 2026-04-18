@@ -12,15 +12,19 @@ import { defineSchema } from "../../src/schema.js";
 const reviewsSchema = defineSchema({
   name: "reviews",
   version: 1,
-  description: "Security and quality reviews produced by the Reviewer agent.",
-  instructions: "Each record corresponds to one code_submissions record. Query by submission_id to find the review for a given submission. Do not insert directly — reviews are written by the Reviewer agent.",
+  description: "Security and quality reviews produced by the Reviewer agent on generated code.",
+  instructions: "One record per code record. Query by codeId to find the review for a given code submission. Status flows pending → testing → tested as the Tester agent picks up the review. Do not insert directly — reviews are written by the Reviewer agent.",
   fields: {
-    submission_id: { type: "string", required: true, description: "ID of the code_submissions record being reviewed" },
-    severity: { type: "enum", values: ["low", "medium", "high", "critical"], required: true, description: "Worst-case issue severity found in the submission" },
-    issues: { type: "string", description: "Structured list of issues found, in the reviewer's analysis format" },
+    codeId: { type: "string", required: true, description: "ID of the code record being reviewed" },
+    specId: { type: "string", description: "ID of the originating spec record" },
+    filename: { type: "string", description: "Generated code filename the review is about" },
     approved: { type: "boolean", required: true, description: "True if the submission passes review with no blocking issues" },
+    summary: { type: "string", maxLength: 2000, description: "One-paragraph summary of the review outcome" },
+    author: { type: "string", description: "Who wrote the review — provider/model identifier (e.g. 'reviewer (Ollama)')" },
+    status: { type: "enum", values: ["pending", "testing", "tested"], default: "pending", description: "Pipeline state — pending until Tester picks it up, then testing, then tested" },
+    timestamp: { type: "date", description: "ISO timestamp when the review was written" },
   },
-  indexes: ["submission_id", "severity"],
+  indexes: ["codeId", "status"],
 });
 
 const { port, db } = await startHttp("./review-data", {
