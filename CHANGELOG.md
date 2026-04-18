@@ -7,23 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
-### Docs
-
-- **Test file split** — `tests/tools.test.ts` split into `tests/tools/{admin,crud,schema,migrate,archive,vector,blob,backup}.test.ts`; `tests/schema.test.ts` split into `tests/schema-lib/{define,persist,merge,validate,bootstrap,json-io}.test.ts`. Pure structural move — no test logic changes, same 997 test count.
-- **`code-review` example updated for v1.3** — `server.ts` now defines the `reviews` collection with `defineSchema` including `description`, `instructions`, and per-field `description`. Schema auto-persists to `review-data/meta/reviews.schema.json` on first run. `README.md` documents the 3-step lifecycle: define with context, persistence, and `db_get_schema` discovery. `examples/README.md` and root `README.md` Examples section updated.
-- **`PersistedSchema` forward-compat policy formalized** — `validatePersistedSchema` was already lenient (unknown top-level and field-level properties are silently ignored). Now documented via JSDoc on the function. Added two unit tests (`validatePersistedSchema`) confirming unknown-property tolerance, plus a round-trip integration test: writing a schema JSON with an unknown field, loading via `loadPersistedSchema`, persisting via `persistSchema`, and re-reading — the unknown field survives intact. README Schema Lifecycle section now includes a "Forward compatibility" sub-section.
-- **`db_migrate` immediate-mode throughput docs** — replaced fixed `20–100 seconds` estimate with filesystem-dependent framing: `~1-3× slower on fast local NVMe, 5-20× on network-attached storage; bench with your target storage to set expectations`.
-- **README: `agent` arg HTTP-mode behavior** — new sub-section in Authentication documents that over an authenticated HTTP transport, the `agent` parameter is silently overridden with the authenticated identity. Includes a 3-row behavior matrix (HTTP+auth / HTTP+no-auth / in-process).
-- **`db_diff_schema` disk-mode cost** — description now warns: `includeImpact:true` on disk-backed collections >50K records triggers a full Parquet scan (~175ms at 100K records, 64× overhead vs `false`); recommends `includeImpact:false` for interactive/automated use.
-
-### Fixed
-
-- **`persistSchema` concurrent-write race** — tmp file now includes `pid + timestamp + random suffix` to guarantee uniqueness per write. The rename is wrapped in try/catch: on failure, the tmp file is cleaned up with `rm({ force: true })` before re-throwing. Previously, concurrent writes could share a `.tmp` filename when `Date.now()` collides, causing one rename to succeed and the other to fail with ENOENT when its tmp file was already gone.
-
-### Refactor
-
-- **`getAgent(args)` helper** — extracted `export function getAgent(args)` to `src/tools/shared.ts`. Replaces 9 repeated `args.agent as string | undefined` casts across `crud.ts`, `schema.ts`, and `migrate.ts`. Pure DRY — no behavior change.
-
 ## [1.3.0] - 2026-04-18
 
 ### Added
@@ -76,11 +59,17 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`db_migrate` prototype-pollution guard** — `__proto__`, `constructor`, and `prototype` added to PROTECTED set; ops targeting these fields are silently skipped, preventing in-memory prototype-chain corruption during `applyOps`.
 - **`loadSchemasFromFiles` 10MB size cap** — files larger than 10MB are skipped before `readFile` (logged warning + `failed[]` entry with `"file size exceeds 10MB limit"`). Prevents accidental OOM from oversized schema files.
 - **Unified `_agent` audit stamp** — `makeSafe()` now stamps the authenticated identity (from auth context) on records, instead of self-reported `args.agent`. Previously HTTP-authenticated agents could record any string in `_agent` even though the permission gate used the real auth identity. Behavior: auth identity always wins; library/no-auth callers retain `args.agent` unchanged.
+- **`persistSchema` concurrent-write race** — tmp file name now includes pid + timestamp + random suffix to guarantee uniqueness per write. Rename is wrapped in try/catch: on failure, tmp is cleaned up with `rm({ force: true })`. Previously, concurrent writes on the same collection could share a `.tmp` filename when `Date.now()` collided within the same millisecond, causing silent content corruption and ENOENT on the loser's rename.
 
 ### Internal
-- **`src/tools/index.ts` split into per-domain modules** — `shared.ts` (types, `makeSafe`, shared schemas/annotations), `admin.ts`, `crud.ts`, `schema.ts`, `migrate.ts`, `archive.ts`, `vector.ts`, `blob.ts`, `backup.ts`. `index.ts` is now a pure aggregator. Public API (`getTools`, `AgentTool`, `ToolResult`) unchanged. Canonical tool order locked via snapshot test: admin → crud → schema → migrate → archive → vector → blob → backup.
+- **`src/tools/index.ts` split into per-domain modules** — `shared.ts` (types, `makeSafe`, `getAgent`, shared schemas/annotations), `admin.ts`, `crud.ts`, `schema.ts`, `migrate.ts`, `archive.ts`, `vector.ts`, `blob.ts`, `backup.ts`. `index.ts` is now a pure aggregator. Public API (`getTools`, `AgentTool`, `ToolResult`) unchanged. Canonical tool order locked via snapshot test: admin → crud → schema → migrate → archive → vector → blob → backup.
+- **`tests/tools.test.ts` and `tests/schema.test.ts` split** — test files mirror the source split: `tests/tools/{admin,crud,schema,migrate,archive,vector,blob,backup}.test.ts` and `tests/schema-lib/{define,persist,merge,validate,bootstrap,json-io}.test.ts`. Pure structural move; same test count (997).
 - **`Collection.iterate()`** — new async-iterable method streams records sequentially from in-memory or disk-backed storage without buffering more than one row-group's worth in memory. Used internally by `db_infer_schema`; available for future tools needing memory-bounded full scans.
+- **`getAgent(args)` helper** — exported from `src/tools/shared.ts` to DRY the repeated `args.agent as string | undefined` cast across mutation tool handlers.
+- **`PersistedSchema` forward-compat policy** — `validatePersistedSchema` is documented as lenient on unknown top-level and field-level properties; `persistSchema` round-trip preserves unknowns. Future agentdb versions can add optional schema fields without breaking older installations reading those files. Verified by unit tests + a round-trip integration test.
 - **README: Schema lifecycle for agents** — new section walks through the 6-step workflow (define → persist → discover → diff → migrate → infer) with code examples and library API references for `loadSchemasFromFiles`, `mergePersistedSchemas`, and `mergeSchemas`.
+- **README: Authentication — agent identity** — new sub-section documents that over an authenticated HTTP transport, the `agent` parameter is silently overridden with the authenticated identity (3-row behavior matrix).
+- **`code-review` example refreshed for v1.3** — `defineSchema` with `description`/`instructions`/per-field descriptions; example README walks through the 3-step lifecycle (define, auto-persist, agent discovery via `db_get_schema`).
 - **JSDoc on merge functions** — `mergeSchemas` and `mergePersistedSchemas` now document precedence rules and when to use each.
 
 ## [1.2.1] - 2026-04-11
