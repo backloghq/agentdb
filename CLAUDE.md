@@ -88,6 +88,7 @@ src/
 
 ## Key Design Decisions
 
+- **Schema terminology** — three distinct concepts: `defineSchema()` = code-level (hooks, validators, computed fields, never serialized); `PersistedSchema` = JSON subset in `meta/{name}.schema.json` (description, instructions, field types — agent-facing); `db_schema` tool = samples records to infer shape dynamically, does not read `PersistedSchema`.
 - Library-first, MCP is just an adapter — see NOTES.md
 - opslog Store per collection, lazy-loaded with LRU eviction
 - JSON filter syntax primary, compact string syntax secondary

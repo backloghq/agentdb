@@ -104,6 +104,11 @@ defineSchema({ tagField: "labels", fields: { labels: { type: "string[]" } } })
 
 ## Schema Lifecycle for Agents
 
+> **Terminology** — three distinct "schema" concepts:
+> - **`defineSchema()`** — code-level API; includes hooks, validators, computed fields. Lives in memory only; never serialized.
+> - **`PersistedSchema`** — JSON-serializable subset (description, instructions, field types, constraints, indexes). Stored in `meta/{name}.schema.json`. This is what agents read and write.
+> - **`db_schema`** — tool that *samples actual records* to infer field shapes dynamically. Does not read the `PersistedSchema` file; works even with no schema defined.
+
 AgentDB treats schemas as first-class runtime objects that agents can inspect, evolve, and reason about — not just static type definitions. Here's the full six-step lifecycle:
 
 ### 1. Define — declare your schema in code
@@ -424,8 +429,8 @@ All mutation methods accept `opts?: { agent?: string; reason?: string }`.
 | `db_batch` | Execute multiple mutations atomically |
 | `db_undo` | Undo last mutation |
 | `db_history` | Mutation history for a record |
-| `db_schema` | Inspect record shape (fields, types, examples) |
-| `db_get_schema` | Get persisted schema with context, instructions, fields, indexes |
+| `db_schema` | Sample records to infer field shapes dynamically — no stored schema required |
+| `db_get_schema` | Read the PersistedSchema (description, instructions, field types, indexes) from `meta/` |
 | `db_set_schema` | Create/update persisted schema (admin-only, partial merge) |
 | `db_delete_schema` | Delete persisted schema for a collection (admin-only, idempotent) |
 | `db_diff_schema` | Preview what db_set_schema would change — structured diff with warnings and record impact counts |
