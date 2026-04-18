@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Store } from "@backloghq/opslog";
 import type { StorageBackend } from "@backloghq/opslog";
@@ -601,6 +601,12 @@ export class AgentDB {
       const derivedName = basename.endsWith(".json") ? basename.slice(0, -5) : basename;
 
       try {
+        const fileStats = await stat(filePath);
+        if (fileStats.size > 10 * 1024 * 1024) {
+          console.warn(`[agentdb] schema file ${filePath}: file size exceeds 10MB limit (${fileStats.size} bytes), skipping`);
+          failed.push({ path: filePath, error: "file size exceeds 10MB limit" });
+          continue;
+        }
         const content = await readFile(filePath, "utf-8");
         let parsed: unknown;
         try {

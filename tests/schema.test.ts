@@ -1541,6 +1541,20 @@ describe("AgentDB.loadSchemasFromFiles", () => {
       warnSpy.mockRestore();
     }
   });
+
+  it("skips files larger than 10MB and records them in failed[]", async () => {
+    const bigPath = join(tmpDir, "toobig.json");
+    await writeFile(bigPath, Buffer.alloc(11 * 1024 * 1024, 0x20)); // 11MB of spaces
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await db.loadSchemasFromFiles([bigPath]);
+      expect(result.loaded).toBe(0);
+      expect(result.failed).toHaveLength(1);
+      expect(result.failed[0].error).toBe("file size exceeds 10MB limit");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
 
 describe("AgentDB schemas/ auto-discover", () => {
