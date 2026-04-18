@@ -62,7 +62,7 @@ cd live-dashboard && npx tsx dashboard.ts ../multi-agent/taskboard-data
 
 Three agents from two providers (Gemini + Ollama) collaborate on a code review pipeline. Gemini generates code, Ollama reviews locally, Gemini writes tests. Real files output to disk.
 
-**Shows:** multi-provider orchestration, structured JSON output, NOTIFY/LISTEN pipeline, file generation
+**Shows:** multi-provider orchestration, structured JSON output, NOTIFY/LISTEN pipeline, file generation, v1.3 schema lifecycle (`defineSchema` with `description`/`instructions`/field descriptions, auto-persistence, `db_get_schema` discovery)
 
 ```bash
 GEMINI_API_KEY=... cd code-review && ./run.sh "Implement JWT auth middleware"
