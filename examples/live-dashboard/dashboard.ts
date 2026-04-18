@@ -32,21 +32,21 @@ async function render(): Promise<void> {
     // Tail to pick up latest changes from the writer
     try { await col.tail(); } catch { /* ignore */ }
 
-    const count = col.count();
+    const count = await col.count();
     lines.push(`\n  ${name} (${count} records)`);
 
     // Status breakdown
     const schema = col.schema(10);
     const hasStatus = schema.fields.some(f => f.name === "status");
     if (hasStatus) {
-      const pending = col.count({ status: "pending" });
-      const active = col.count({ status: "in_progress" }) + col.count({ status: "processing" });
-      const done = col.count({ status: "completed" }) + col.count({ status: "done" });
+      const pending = await col.count({ status: "pending" });
+      const active = (await col.count({ status: "in_progress" })) + (await col.count({ status: "processing" }));
+      const done = (await col.count({ status: "completed" })) + (await col.count({ status: "done" }));
       lines.push(`    pending: ${pending}  active: ${active}  done: ${done}`);
     }
 
     // Recent records
-    const recent = col.find({ limit: 3, sort: "-_version" });
+    const recent = await col.find({ limit: 3, sort: "-_version" });
     if (recent.records.length > 0) {
       lines.push("    recent:");
       for (const r of recent.records) {
