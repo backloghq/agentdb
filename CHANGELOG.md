@@ -7,34 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
-### Fixed
-
-- **`db_migrate` ops cap** — `ops` array now limited to 100 elements (Zod schema + runtime guard); exceeding the limit returns a validation error.
-- **`db_migrate` prototype-pollution guard** — `__proto__`, `constructor`, and `prototype` added to PROTECTED set; ops targeting these fields are silently skipped.
-- **`loadSchemasFromFiles` 10MB size cap** — files larger than 10MB are skipped before `readFile` (logged warning + `failed[]` entry with `"file size exceeds 10MB limit"`).
-
-### Docs
-
-- **`mergeSchemas` / `mergePersistedSchemas` JSDoc** — added full JSDoc covering when to call each function, precedence rules, and when NOT to use each (pointing to the other).
-- **`db_migrate` throughput docs** — description now includes: ~22K rec/sec (async mode), ~1-5K rec/sec (immediate/default), expected 20–100 sec for 100K-record migrations.
-
-### Performance
-
-- **`db_infer_schema` O(N) fix** — replaced offset-based pagination (O(N²)) with single `col.findAll()` call (O(N)). Root cause: `find()` with offset scans all matching records into an array first, then slices — so each offset-based chunk was O(N) regardless of offset. `findAll()` does one pass; Algorithm R sampling is applied over the returned array.
-- **`db_infer_schema` disk-mode memory fix** — replaced `col.findAll()` with new `col.iterate()` async generator (Path B). In memory mode, `findAll()` loads all records before sampling; in disk mode this causes unbounded heap growth proportional to collection size. `iterate()` streams one record at a time from either the in-memory store or `DiskStore.entries()` — heap delta stays O(sampleSize) regardless of collection size. Algorithm R sampling runs over the stream with no changes to the sampling algorithm.
-
-### Changed
-
-- **Unified `_agent` audit stamp** — `makeSafe()` now mutates `args.agent` with the resolved identity (authenticated identity wins over self-reported) before calling tool handlers. Previously, tools used `authId` for permission checks but `args.agent` (potentially undefined) for the `_agent` audit field, so HTTP-authenticated calls were not stamped. Behavior matrix: auth+no-arg → auth identity; auth+arg → auth wins; no-auth+arg → arg; no-auth+no-arg → undefined.
-
-### Docs
-
-- **README: Schema lifecycle for agents** — new section covering the 6-step schema workflow (define → persist → discover → diff → migrate → infer), with code examples for each step. Includes library API references for `loadSchemasFromFiles`, `mergePersistedSchemas`, and `mergeSchemas`.
-
-### Refactor
-
-- **`src/tools/index.ts` split into per-domain modules** — `shared.ts` (types, `makeSafe`, shared schemas/annotations), `admin.ts`, `crud.ts`, `schema.ts`, `migrate.ts`, `archive.ts`, `vector.ts`, `blob.ts`, `backup.ts`. `index.ts` is now a pure aggregator. Public API (`getTools`, `AgentTool`, `ToolResult`) unchanged. Tool order: admin → crud → schema → migrate → archive → vector → blob → backup (locked by canonical-order test).
-
 ## [1.3.0] - 2026-04-18
 
 ### Added
@@ -82,6 +54,17 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`db_set_schema` field-property preservation** — partial schema updates no longer drop untouched field properties. Previously `{ title: { type: "string" } }` overwrote the entire field, losing `required`, `description`, etc. Now uses `mergePersistedSchemas()` with per-property overlay semantics.
 - **Schema cleanup on drop/purge** — `dropCollection()` now deletes the persisted schema file; `purgeCollection()` defensively removes it too.
 - **`db_migrate` pagination correctness** — original offset-based pagination silently dropped records when migrations changed a filter-matched field. Replaced with two-phase snapshot approach (collect IDs first, then process by `$in` with snapshot versions for optimistic locking) so all matching records at migration start are processed.
+- **`db_infer_schema` O(N²) → O(N)** — original offset-based pagination scaled quadratically (446ms at 50K records, ~40s extrapolated at 1M). Root cause: `find()` with offset scans all matching records before slicing. Replaced with single-pass `col.iterate()` async generator + Algorithm R reservoir sampling. Disk-mode memory stays O(`sampleSize`) by streaming from `DiskStore.entries()` rather than loading the full collection.
+- **`db_migrate` ops cap** — `ops` array now limited to 100 elements (Zod schema + runtime guard); exceeding the limit returns a validation error. Prevents CPU exhaustion from oversized op lists.
+- **`db_migrate` prototype-pollution guard** — `__proto__`, `constructor`, and `prototype` added to PROTECTED set; ops targeting these fields are silently skipped, preventing in-memory prototype-chain corruption during `applyOps`.
+- **`loadSchemasFromFiles` 10MB size cap** — files larger than 10MB are skipped before `readFile` (logged warning + `failed[]` entry with `"file size exceeds 10MB limit"`). Prevents accidental OOM from oversized schema files.
+- **Unified `_agent` audit stamp** — `makeSafe()` now stamps the authenticated identity (from auth context) on records, instead of self-reported `args.agent`. Previously HTTP-authenticated agents could record any string in `_agent` even though the permission gate used the real auth identity. Behavior: auth identity always wins; library/no-auth callers retain `args.agent` unchanged.
+
+### Internal
+- **`src/tools/index.ts` split into per-domain modules** — `shared.ts` (types, `makeSafe`, shared schemas/annotations), `admin.ts`, `crud.ts`, `schema.ts`, `migrate.ts`, `archive.ts`, `vector.ts`, `blob.ts`, `backup.ts`. `index.ts` is now a pure aggregator. Public API (`getTools`, `AgentTool`, `ToolResult`) unchanged. Canonical tool order locked via snapshot test: admin → crud → schema → migrate → archive → vector → blob → backup.
+- **`Collection.iterate()`** — new async-iterable method streams records sequentially from in-memory or disk-backed storage without buffering more than one row-group's worth in memory. Used internally by `db_infer_schema`; available for future tools needing memory-bounded full scans.
+- **README: Schema lifecycle for agents** — new section walks through the 6-step workflow (define → persist → discover → diff → migrate → infer) with code examples and library API references for `loadSchemasFromFiles`, `mergePersistedSchemas`, and `mergeSchemas`.
+- **JSDoc on merge functions** — `mergeSchemas` and `mergePersistedSchemas` now document precedence rules and when to use each.
 
 ## [1.2.1] - 2026-04-11
 
