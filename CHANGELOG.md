@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+- **Stale test in `schema.test.ts`** — rewrote misleading test "no warning is emitted (current behavior)" to assert that the warning IS emitted when a file's `name` field disagrees with the filename-derived name. Added a second test documenting that an explicit valid name loads correctly even when the filename-derived name is invalid.
+
 ## [1.3.0] - 2026-04-18
 
 ### Added

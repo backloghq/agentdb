@@ -1481,23 +1481,49 @@ describe("AgentDB.loadSchemasFromFiles", () => {
     }
   });
 
-  it("file name field wins over filename; no warning is emitted for mismatch (current behavior)", async () => {
-    // Spec said to warn on name/filename mismatch — implementation is currently silent.
-    // This test documents the actual behavior: file's name field takes precedence.
+  it("file name field wins over filename-derived name, and warning fires for the mismatch", async () => {
     const schemaPath = join(tmpDir, "tickets.json");
     await writeFile(schemaPath, JSON.stringify({ name: "users", description: "Users, not tickets" }), "utf-8");
 
-    const result = await db.loadSchemasFromFiles([schemaPath]);
-    expect(result.loaded).toBe(1);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await db.loadSchemasFromFiles([schemaPath]);
+      expect(result.loaded).toBe(1);
+      expect(warnSpy).toHaveBeenCalledOnce();
 
-    // Loaded under the name from the file, not from the filename
-    const byName = await db.loadPersistedSchema("users");
-    expect(byName).toBeDefined();
-    expect(byName!.description).toBe("Users, not tickets");
+      // Loaded under the name from the file, not from the filename
+      const byName = await db.loadPersistedSchema("users");
+      expect(byName).toBeDefined();
+      expect(byName!.description).toBe("Users, not tickets");
 
-    // Nothing loaded under the filename-derived name
-    const byFilename = await db.loadPersistedSchema("tickets");
-    expect(byFilename).toBeUndefined();
+      // Nothing loaded under the filename-derived name
+      const byFilename = await db.loadPersistedSchema("tickets");
+      expect(byFilename).toBeUndefined();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("loads under explicit name even when filename-derived name is invalid", async () => {
+    // Filename "_badname.json" derives to "_badname" which fails collection name validation.
+    // But explicit name field "valid-collection" is valid — file should load under explicit name
+    // with a warning (name/filename mismatch), not be skipped.
+    const schemaPath = join(tmpDir, "_badname.json");
+    await writeFile(schemaPath, JSON.stringify({ name: "valid-collection", description: "Explicit wins" }), "utf-8");
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await db.loadSchemasFromFiles([schemaPath]);
+      expect(result.loaded).toBe(1);
+      expect(result.failed).toHaveLength(0);
+      expect(warnSpy).toHaveBeenCalledOnce();
+
+      const schema = await db.loadPersistedSchema("valid-collection");
+      expect(schema).toBeDefined();
+      expect(schema!.description).toBe("Explicit wins");
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
