@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 - **`persistSchema` rename failure test** — negative-path test asserting that when the atomic rename step throws (e.g. `EXDEV: cross-device link`), the tmp file is cleaned up via `rm({force:true})` and the original error is re-thrown.
 - **`$strLen` in compact filter syntax** — `field.strLen:N` (exact character count) and `field.strLen.modifier:N` (e.g. `title.strLen.gt:10`) map to `{ field: { $strLen: N } }` and `{ field: { $strLen: { $op: N } } }` respectively. `strLen` added to modifier alias list in README.
+- **README reorder** — "Schema Lifecycle for Agents" moved to appear immediately before the "Tool Definitions" table so the lifecycle walkthrough directly precedes the tool reference.
 - **Bench drift detection fix** — `tests/bench-stress.test.ts` now uses p99 (not p50) for find-latency drift comparison, with a 0.5ms floor on both baseline values. Eliminates false `>2×` alarms caused by sub-millisecond p50 noise.
 - **Schema terminology disambiguation** — README and CLAUDE.md now clearly distinguish `defineSchema()` (code-level, never serialized), `PersistedSchema` (JSON subset in `meta/`), and `db_schema` (samples records dynamically). Tool table updated to reflect the distinction.
 - **`db_distinct` indexing guidance** — description now advises adding an index on the target field via `db_set_schema` to avoid a full scan on large collections.
