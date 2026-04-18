@@ -1015,7 +1015,7 @@ export function getTools(db: AgentDB): AgentTool[] {
         if (!ops || ops.length === 0) throw new Error("ops must contain at least one operation");
         if (ops.length > 100) throw new Error("ops cannot exceed 100 elements");
 
-        const PROTECTED = new Set(["_id", "_version", "_agent", "_reason", "_expires", "_embedding"]);
+        const PROTECTED = new Set(["_id", "_version", "_agent", "_reason", "_expires", "_embedding", "__proto__", "constructor", "prototype"]);
 
         function applyOps(record: Record<string, unknown>): Record<string, unknown> {
           const r = { ...record };

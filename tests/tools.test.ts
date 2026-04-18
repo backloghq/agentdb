@@ -864,6 +864,35 @@ describe("Tool Definitions", () => {
       expect(result.isError).toBe(true);
     });
 
+    it("__proto__ set op is silently skipped (prototype-pollution guard)", async () => {
+      await exec("db_insert", { collection: "migrate-proto", records: [{ x: 1 }] });
+      const result = await exec("db_migrate", {
+        collection: "migrate-proto",
+        ops: [{ op: "set", field: "__proto__", value: { polluted: true } }],
+      });
+      // Record is not updated (no user-visible diff) — unchanged, not failed
+      expect(result.unchanged).toBe(1);
+      expect(result.updated).toBe(0);
+      // The prototype of the retrieved record should not be polluted
+      const found = await exec("db_find", { collection: "migrate-proto" });
+      const record = found.records[0];
+      expect((record as Record<string, unknown>).polluted).toBeUndefined();
+      expect(Object.getPrototypeOf(record)).toBe(Object.getPrototypeOf({}));
+    });
+
+    it("constructor and prototype set ops are silently skipped", async () => {
+      await exec("db_insert", { collection: "migrate-proto2", records: [{ x: 1 }] });
+      const result = await exec("db_migrate", {
+        collection: "migrate-proto2",
+        ops: [
+          { op: "set", field: "constructor", value: "evil" },
+          { op: "set", field: "prototype", value: { bad: true } },
+        ],
+      });
+      expect(result.unchanged).toBe(1);
+      expect(result.updated).toBe(0);
+    });
+
     it("processes all records even when ops cause records to leave the filter (pagination regression)", async () => {
       // 200 records with x:0; filter={x:0}; op sets x=1 (records leave filter after update)
       // Old offset-based code: batch 1 processes 100, they leave filter, batch 2 at offset=100 finds 0 → skips 100

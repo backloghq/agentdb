@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ### Fixed
 
 - **`db_migrate` ops cap** — `ops` array now limited to 100 elements (Zod schema + runtime guard); exceeding the limit returns a validation error.
+- **`db_migrate` prototype-pollution guard** — `__proto__`, `constructor`, and `prototype` added to PROTECTED set; ops targeting these fields are silently skipped.
 
 ## [1.3.0] - 2026-04-18
 
