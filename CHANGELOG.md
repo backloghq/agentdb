@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ### Performance
 
 - **`db_infer_schema` O(N) fix** — replaced offset-based pagination (O(N²)) with single `col.findAll()` call (O(N)). Root cause: `find()` with offset scans all matching records into an array first, then slices — so each offset-based chunk was O(N) regardless of offset. `findAll()` does one pass; Algorithm R sampling is applied over the returned array.
+- **`db_infer_schema` disk-mode memory fix** — replaced `col.findAll()` with new `col.iterate()` async generator (Path B). In memory mode, `findAll()` loads all records before sampling; in disk mode this causes unbounded heap growth proportional to collection size. `iterate()` streams one record at a time from either the in-memory store or `DiskStore.entries()` — heap delta stays O(sampleSize) regardless of collection size. Algorithm R sampling runs over the stream with no changes to the sampling algorithm.
 
 ### Changed
 

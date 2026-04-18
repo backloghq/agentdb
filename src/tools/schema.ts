@@ -443,30 +443,30 @@ export function getSchemaTools(db: AgentDB): AgentTool[] {
           notes.push(`Collection already has a persisted schema${versionPart}. Use db_diff_schema to compare or db_set_schema to replace.`);
         }
 
-        // Sampling: single findAll() pass (O(N)) + Algorithm R reservoir sampling.
-        // col.find() with offset is O(N) per call regardless of offset because the in-memory
-        // store.filter() always scans all records and slices at the end. Using offset-based
-        // chunking makes the total cost O(N * N/CHUNK) = O(N²). findAll() does one scan.
+        // Sampling: col.iterate() streaming pass + Algorithm R reservoir sampling.
+        // O(sampleSize) memory — disk-backed collections stream records one-at-a-time
+        // via the async generator so the full dataset is never accumulated in memory.
+        // O(N) time with a single pass through the collection.
         let records: Record<string, unknown>[];
         if (totalRecords === 0) {
           records = [];
         } else {
-          const allRecords = await col.findAll();
-          if (allRecords.length <= sampleSize) {
-            records = allRecords;
-          } else {
-            // Algorithm R (Vitter 1985): uniform reservoir sampling without replacement.
-            // Each position i has exactly k/i probability of being in the final reservoir.
-            const reservoir: Record<string, unknown>[] = [];
-            for (let i = 0; i < allRecords.length; i++) {
-              if (i < sampleSize) {
-                reservoir.push(allRecords[i]);
-              } else {
-                const j = Math.floor(Math.random() * (i + 1));
-                if (j < sampleSize) reservoir[j] = allRecords[i];
-              }
+          // Algorithm R (Vitter 1985): uniform reservoir sampling without replacement.
+          // Each position i has exactly k/i probability of being in the final reservoir.
+          // Memory: O(sampleSize), Time: O(N) — exactly one pass through the collection.
+          const reservoir: Record<string, unknown>[] = [];
+          let i = 0;
+          for await (const record of col.iterate()) {
+            if (i < sampleSize) {
+              reservoir.push(record);
+            } else {
+              const j = Math.floor(Math.random() * (i + 1));
+              if (j < sampleSize) reservoir[j] = record;
             }
-            records = reservoir;
+            i++;
+          }
+          records = reservoir;
+          if (i > sampleSize) {
             notes.push(`Sampled ${reservoir.length} of ${totalRecords} total records (Algorithm R reservoir sampling).`);
           }
         }

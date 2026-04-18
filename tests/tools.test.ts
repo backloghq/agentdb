@@ -1304,9 +1304,45 @@ describe("Tool Definitions", () => {
       const elapsed = performance.now() - start;
       expect(result.totalRecords).toBe(50000);
       expect(result.sampleSize).toBe(100);
-      // O(N) single-pass should complete well under 5s even in slow CI
-      expect(elapsed).toBeLessThan(5000);
+      expect(elapsed).toBeLessThan(500);
     }, 30000);
+
+    it("disk-mode: heap delta stays under 50MB for 10K records (streaming memory guard)", async () => {
+      const diskDir = await mkdtemp(join(tmpdir(), "agentdb-infer-disk-"));
+      let diskDb: AgentDB | undefined;
+      try {
+        // Session 1: insert 10K records and close (triggers Parquet compaction)
+        diskDb = new AgentDB(diskDir, { storageMode: "disk", writeMode: "async" });
+        await diskDb.init();
+        const col1 = await diskDb.collection("infer-disk");
+        const BATCH = 500;
+        for (let b = 0; b < 20; b++) {
+          const batch = Array.from({ length: BATCH }, (_, i) => ({ n: b * BATCH + i, label: `item-${b * BATCH + i}`, extra: "x".repeat(100) }));
+          for (const r of batch) await col1.insert(r);
+        }
+        await diskDb.close();
+        diskDb = undefined;
+
+        // Session 2: reopen from Parquet, measure heap growth during db_infer_schema
+        diskDb = new AgentDB(diskDir, { storageMode: "disk" });
+        await diskDb.init();
+        const diskTools = getTools(diskDb);
+        const inferTool = diskTools.find((t) => t.name === "db_infer_schema")!;
+
+        if (global.gc) global.gc();
+        const heapBefore = process.memoryUsage().heapUsed;
+        const result = await inferTool.execute({ collection: "infer-disk", sampleSize: 100 });
+        if (global.gc) global.gc();
+        const heapAfter = process.memoryUsage().heapUsed;
+
+        expect(result.isError).toBeFalsy();
+        const delta = (heapAfter - heapBefore) / (1024 * 1024);
+        expect(delta).toBeLessThan(50);
+      } finally {
+        await diskDb?.close();
+        await rm(diskDir, { recursive: true, force: true });
+      }
+    }, 60000);
   });
 
   describe("db_distinct", () => {
