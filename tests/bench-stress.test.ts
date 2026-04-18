@@ -185,15 +185,17 @@ describe("Long-running agent simulation — 3 min stress", () => {
       console.log(`  ${tool.padEnd(10)} n=${String(lats.length).padStart(4)}  p50=${p50.toFixed(1)}ms  p99=${p99.toFixed(1)}ms`);
     }
 
-    // Check for latency degradation: compare first 10% vs last 10% of find latencies
+    // Check for latency degradation: compare first 10% vs last 10% of find latencies.
+    // Uses p99 (not p50) to detect tail regression; 0.5ms floor prevents false alarms
+    // when both baselines are sub-millisecond noise.
     if (latencies.find.length >= 20) {
       const tenPct = Math.floor(latencies.find.length * 0.1);
       const early  = latencies.find.slice(0, tenPct);
       const late   = latencies.find.slice(-tenPct);
-      const earlyP50 = p50p99(early).p50;
-      const lateP50  = p50p99(late).p50;
-      const drift = lateP50 / earlyP50;
-      console.log(`\n  find latency drift (early vs late): ${earlyP50.toFixed(1)}ms → ${lateP50.toFixed(1)}ms (${drift.toFixed(2)}×)`);
+      const earlyP99 = Math.max(p50p99(early).p99, 0.5);
+      const lateP99  = Math.max(p50p99(late).p99, 0.5);
+      const drift = lateP99 / earlyP99;
+      console.log(`\n  find latency drift (early vs late p99): ${earlyP99.toFixed(1)}ms → ${lateP99.toFixed(1)}ms (${drift.toFixed(2)}×)`);
       if (drift > 2) console.log(`  ⚠ find latency degraded >2× over session`);
       else console.log(`  ✓ find latency stable`);
     }
