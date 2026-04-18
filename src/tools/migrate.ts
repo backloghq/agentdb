@@ -15,7 +15,7 @@ export function getMigrateTools(db: AgentDB): AgentTool[] {
       description: "Declarative bulk record update via ordered ops: set (always assign), unset (remove), rename (move field, overwrite if target exists), default (assign only if missing), copy (duplicate field without removing source). Ops are applied in order per record. Idempotent ops (default, unset of absent field) make re-running safe. Per-record atomicity — no cross-record transaction. Protected meta-fields (_id, _version, _agent, _reason, _expires, _embedding) are silently skipped. Matching records are snapshotted by ID at migration start — all matches are processed even if ops cause records to leave the filter mid-run. Uses optimistic locking via snapshot versions; concurrent writes to the same record will fail and land in errors[]. Validation fires normally; a schema-violating migration causes per-record failure tracked in errors[]. Throughput: ~22K rec/sec in async write mode; immediate mode (default) is filesystem-dependent: ~1-3× slower on fast local NVMe, 5-20× on network-attached storage. Bench with your target storage to set expectations." + API_NOTE,
       schema: z.object({
         collection: collectionParam,
-        ops: z.array(z.union([
+        ops: z.array(z.discriminatedUnion("op", [
           z.object({ op: z.literal("set"), field: z.string().meta({ description: "Field to set" }), value: z.unknown().meta({ description: "Value to assign" }) }),
           z.object({ op: z.literal("unset"), field: z.string().meta({ description: "Field to remove" }) }),
           z.object({ op: z.literal("rename"), from: z.string().meta({ description: "Source field name" }), to: z.string().meta({ description: "Target field name (overwritten if exists)" }) }),

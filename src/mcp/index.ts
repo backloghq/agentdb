@@ -68,7 +68,7 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
         title: "Subscribe to Changes",
         description: "Subscribe to real-time change notifications on a collection. When records are inserted, updated, or deleted, you'll receive a logging notification with the change details.",
         inputSchema: z.object({
-          collection: z.string().describe("Collection to subscribe to"),
+          collection: z.string().meta({ description: "Collection to subscribe to" }),
         }) as z.ZodObject,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
@@ -84,7 +84,7 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
         title: "Unsubscribe from Changes",
         description: "Stop receiving change notifications for a collection.",
         inputSchema: z.object({
-          collection: z.string().describe("Collection to unsubscribe from"),
+          collection: z.string().meta({ description: "Collection to unsubscribe from" }),
         }) as z.ZodObject,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
