@@ -859,6 +859,24 @@ describe("validatePersistedSchema", () => {
       storageMode: "fast",
     })).toThrow("storageMode");
   });
+
+  it("forward-compat: unknown top-level properties are silently ignored", () => {
+    expect(() => validatePersistedSchema({
+      name: "t",
+      version: 1,
+      unknownFutureFeature: "some-value",
+      anotherNewProp: { nested: true },
+    })).not.toThrow();
+  });
+
+  it("forward-compat: unknown field-level properties are silently ignored", () => {
+    expect(() => validatePersistedSchema({
+      name: "t",
+      fields: {
+        x: { type: "string", futureConstraint: "strict", anotherProp: 42 },
+      },
+    })).not.toThrow();
+  });
 });
 
 describe("schema persistence", () => {
@@ -1059,6 +1077,31 @@ describe("schema persistence", () => {
     }));
     expect(db.getSchema("in-memory")).toBeDefined();
     expect(db.getSchema("in-memory")!.name).toBe("in-memory");
+  });
+
+  it("forward-compat: unknown properties in JSON file round-trip through load → persist → re-read", async () => {
+    // Simulate a schema file written by a newer AgentDB version with an unknown property
+    const metaDir = join(tmpDir, "meta");
+    const schemaFile = join(metaDir, "fwd-compat.schema.json");
+    await writeFile(schemaFile, JSON.stringify({
+      name: "fwd-compat",
+      version: 1,
+      description: "Base description",
+      newFeatureProp: "future-value",
+      fields: { x: { type: "string", futureConstraint: "strict" } },
+    }), "utf-8");
+
+    // Load — should succeed without error; unknown props survive as runtime values
+    const loaded = await db.loadPersistedSchema("fwd-compat");
+    expect(loaded).toBeDefined();
+    expect(loaded!.name).toBe("fwd-compat");
+    expect((loaded as Record<string, unknown>).newFeatureProp).toBe("future-value");
+
+    // Persist back — unknown props should round-trip
+    await db.persistSchema("fwd-compat", loaded!);
+    const reloaded = await db.loadPersistedSchema("fwd-compat");
+    expect((reloaded as Record<string, unknown>).newFeatureProp).toBe("future-value");
+    expect((reloaded!.fields!.x as Record<string, unknown>).futureConstraint).toBe("strict");
   });
 
   it("concurrent persistSchema calls succeed without corruption (one wins, one overwrites cleanly)", async () => {

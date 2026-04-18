@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Docs
 
+- **`PersistedSchema` forward-compat policy formalized** — `validatePersistedSchema` was already lenient (unknown top-level and field-level properties are silently ignored). Now documented via JSDoc on the function. Added two unit tests (`validatePersistedSchema`) confirming unknown-property tolerance, plus a round-trip integration test: writing a schema JSON with an unknown field, loading via `loadPersistedSchema`, persisting via `persistSchema`, and re-reading — the unknown field survives intact. README Schema Lifecycle section now includes a "Forward compatibility" sub-section.
 - **`db_migrate` immediate-mode throughput docs** — replaced fixed `20–100 seconds` estimate with filesystem-dependent framing: `~1-3× slower on fast local NVMe, 5-20× on network-attached storage; bench with your target storage to set expectations`.
 - **README: `agent` arg HTTP-mode behavior** — new sub-section in Authentication documents that over an authenticated HTTP transport, the `agent` parameter is silently overridden with the authenticated identity. Includes a 3-row behavior matrix (HTTP+auth / HTTP+no-auth / in-process).
 - **`db_diff_schema` disk-mode cost** — description now warns: `includeImpact:true` on disk-backed collections >50K records triggers a full Parquet scan (~175ms at 100K records, 64× overhead vs `false`); recommends `includeImpact:false` for interactive/automated use.

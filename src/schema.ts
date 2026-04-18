@@ -566,6 +566,12 @@ const VALID_FIELD_TYPES = new Set<string>([
 /**
  * Validate a PersistedSchema structure (e.g. loaded from JSON).
  * Throws on invalid input.
+ *
+ * **Forward-compatibility policy**: unknown top-level properties and unknown
+ * field-level properties are silently ignored. This is intentional — schema
+ * files written by a newer version of AgentDB can be loaded by an older
+ * version without error. Only known properties are validated; extra properties
+ * round-trip through load → persist without modification.
  */
 export function validatePersistedSchema(schema: unknown): asserts schema is PersistedSchema {
   if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
