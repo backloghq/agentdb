@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
+import { defineSchema } from "../src/schema.js";
 import { getTools } from "../src/tools/index.js";
 import type { AgentTool } from "../src/tools/index.js";
 
@@ -404,6 +405,71 @@ describe("Tool Definitions", () => {
       expect(result.content[0].text).toContain("Permission denied");
       await restrictedDb.close();
       await rm(tmpDir + "-restricted", { recursive: true, force: true });
+    });
+
+    it("hasCodeSchema remains true after deleting persisted schema from a defineSchema collection", async () => {
+      const schema = defineSchema({
+        name: "code-schema-col",
+        fields: { title: { type: "string" } },
+      });
+      await db.collection(schema);
+
+      // Persisted schema exists now; delete it
+      const del = await exec("db_delete_schema", { collection: "code-schema-col" });
+      expect(del.deleted).toBe(true);
+
+      // In-memory code schema still active; persisted schema gone
+      const check = await exec("db_get_schema", { collection: "code-schema-col" });
+      expect(check.schema).toBeNull();
+      expect(check.hasCodeSchema).toBe(true);
+    });
+
+    it("returns deleted:false and leaves in-memory schema intact when no persisted file exists for a defineSchema collection", async () => {
+      const schema = defineSchema({
+        name: "code-only-col",
+        fields: { value: { type: "number" } },
+      });
+      await db.collection(schema);
+
+      // Delete the persisted schema first so only in-memory remains
+      await exec("db_delete_schema", { collection: "code-only-col" });
+
+      // Second delete — no persisted file, should return false without touching in-memory schema
+      const result = await exec("db_delete_schema", { collection: "code-only-col" });
+      expect(result.deleted).toBe(false);
+
+      // In-memory schema must still be registered
+      expect(db.getSchema("code-only-col")).toBeDefined();
+    });
+
+    it("auto-repersists schema after delete when database is restarted and collection is re-opened", async () => {
+      const schemaDef = defineSchema({
+        name: "repersist-col",
+        description: "Will be repersisted",
+        fields: { name: { type: "string" } },
+      });
+      await db.collection(schemaDef);
+
+      await exec("db_delete_schema", { collection: "repersist-col" });
+      const afterDelete = await exec("db_get_schema", { collection: "repersist-col" });
+      expect(afterDelete.schema).toBeNull();
+
+      // Auto-persist runs in _openCollection (first open, not cached re-open).
+      // Simulate a restart: close current db, reopen, then open the collection with defineSchema.
+      await db.close();
+      const db2 = new AgentDB(tmpDir);
+      await db2.init();
+      await db2.collection(schemaDef);
+      const tools2 = getTools(db2);
+      const getResult = await tools2.find((t) => t.name === "db_get_schema")!.execute({ collection: "repersist-col" });
+      const afterRepersist = JSON.parse(getResult.content[0].text);
+      expect(afterRepersist.schema).not.toBeNull();
+      expect(afterRepersist.schema.description).toBe("Will be repersisted");
+      await db2.close();
+      // Re-initialize db for afterEach cleanup (db.close() would double-close otherwise)
+      db = new AgentDB(tmpDir);
+      await db.init();
+      tools = getTools(db);
     });
   });
 
