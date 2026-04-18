@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`AgentDB.getSchema()`** — access in-memory compiled schema for a collection.
 - **`CollectionSchema.definition`** — retains original `SchemaDefinition` for persistence extraction.
 
+### Fixed
+- **Schema cleanup on drop/purge** — `dropCollection()` now deletes the persisted schema file; `purgeCollection()` defensively removes it too.
+
 ## [1.2.1] - 2026-04-11
 
 ### Fixed

@@ -449,6 +449,7 @@ export class AgentDB {
     this.meta.collections = this.meta.collections.filter((c) => c !== name);
     this.meta.dropped.push(droppedName);
     await this.writeMeta();
+    await this.deletePersistedSchema(name);
   }
 
   /** Permanently delete a soft-dropped collection. */
@@ -463,6 +464,9 @@ export class AgentDB {
     await rm(droppedDir, { recursive: true, force: true });
     this.meta.dropped = this.meta.dropped.filter((d) => d !== match);
     await this.writeMeta();
+    // Defensively remove the schema file using the original collection name
+    const originalName = match.slice(DROPPED_PREFIX.length).replace(/_\d+$/, "");
+    await this.deletePersistedSchema(originalName);
   }
 
   /** List all active collections with record counts. */

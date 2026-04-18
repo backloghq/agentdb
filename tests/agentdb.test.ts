@@ -166,6 +166,34 @@ describe("AgentDB", () => {
       await expect(db.purgeCollection("nonexistent")).rejects.toThrow("not found");
     });
 
+    it("dropCollection removes the schema file", async () => {
+      await db.collection("users");
+      await db.persistSchema("users", { name: "users", version: 1 });
+      expect(await db.loadPersistedSchema("users")).toBeDefined();
+
+      await db.dropCollection("users");
+      expect(await db.loadPersistedSchema("users")).toBeUndefined();
+    });
+
+    it("purgeCollection removes the schema file", async () => {
+      await db.collection("users");
+      await db.persistSchema("users", { name: "users", version: 1 });
+      await db.dropCollection("users");
+      // Schema file should already be gone after drop, but purge cleans it up defensively
+      const droppedName = db.listDropped()[0];
+      await db.purgeCollection(droppedName);
+      expect(await db.loadPersistedSchema("users")).toBeUndefined();
+    });
+
+    it("purgeCollection by original name removes the schema file", async () => {
+      await db.collection("orders");
+      await db.persistSchema("orders", { name: "orders", version: 1 });
+      await db.dropCollection("orders");
+      // Purge by original collection name
+      await db.purgeCollection("orders");
+      expect(await db.loadPersistedSchema("orders")).toBeUndefined();
+    });
+
     it("drop persists across reopen", async () => {
       await db.collection("users");
       await db.dropCollection("users");
