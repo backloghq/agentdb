@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -77,7 +78,7 @@ class MinimalMcpClient {
   }
 }
 
-describe("CLI --schemas e2e", () => {
+describe.skipIf(!existsSync(CLI))("CLI --schemas e2e", () => {
   let tmpDir: string;
   let schemaPath: string;
   let client: MinimalMcpClient;

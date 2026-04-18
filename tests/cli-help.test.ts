@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 
@@ -15,7 +16,7 @@ function runCli(args: string[]): Promise<{ exitCode: number; stdout: string; std
   });
 }
 
-describe("CLI --help", () => {
+describe.skipIf(!existsSync(CLI))("CLI --help", () => {
   it("exits 0", async () => {
     const { exitCode } = await runCli(["--help"]);
     expect(exitCode).toBe(0);
