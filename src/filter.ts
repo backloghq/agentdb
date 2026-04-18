@@ -294,8 +294,10 @@ function compileOperator(fieldPath: string, op: string, opValue: unknown): Predi
     }
 
     case "$strLen": {
-      // Compares the byte length of a string field.
-      // opValue can be a number (exact match) or an operator object (e.g. { $gt: 10 }).
+      // Compares the character length of a string field.
+      // opValue: number (exact match) or operator object (e.g. { $gt: 10 }).
+      // Note: creates a synthetic { _len } object per record; latency is comparable
+      // to manual find()+JS filtering rather than a strict improvement.
       const lenCondition = opValue;
       return (record) => {
         const fieldValue = getNestedValue(record, fieldPath);
