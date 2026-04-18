@@ -160,7 +160,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Configurable tagField** — `tagField: "labels"` in schema changes which field `+tag`/`-tag` queries target. Default: "tags".
 - **`upsertMany()`** — atomic bulk create-or-update. Each doc must have `_id`.
 - **Blob storage** — `writeBlob(id, name, content)`, `readBlob()`, `listBlobs()`, `deleteBlob()`. Stores files outside the WAL via StorageBackend — works on both filesystem and S3 transparently. Cascade delete: blobs auto-cleaned when records are deleted. For attaching code, images, PDFs to records.
-- **MCP blob tools** — `db_blob_write` (base64 content), `db_blob_read`, `db_blob_list`, `db_blob_delete`. 32 tools total (30 core + 2 HTTP-only).
+- **MCP blob tools** — `db_blob_write` (base64 content), `db_blob_read`, `db_blob_list`, `db_blob_delete`.
 
 ### Fixed
 - **Compact filter `tagField` propagation** — `+tag`/`-tag` syntax now correctly uses the schema's `tagField` setting. Previously always queried "tags" regardless of configuration.
@@ -338,7 +338,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 **Memory monitoring:**
 - `MemoryMonitor` with per-collection budgets wired into AgentDB
 
-**Tools (24 total):**
+**Tools:**
 - CRUD: db_insert, db_find, db_find_one, db_update, db_upsert, db_delete, db_count, db_batch
 - Collections: db_collections, db_create, db_drop, db_purge
 - History: db_undo, db_history
@@ -366,7 +366,5 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - Async mutation serializer, ftruncate undo, advisory directory lock, readOnly mode
 
 **Testing:**
-- 468 tests across 15 test files
-- 25 e2e tests (MCP server over JSON-RPC, 21 of 24 tools tested)
 - 15 performance benchmarks
 - 94.5% line coverage

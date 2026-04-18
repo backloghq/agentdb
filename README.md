@@ -140,7 +140,7 @@ npx agentdb --path ./data --schemas ./teams/users.json --schemas ./teams/tasks.j
 
 **Schema bootstrap order**: on `db.init()`, `<dataDir>/schemas/*.json` is auto-discovered first, then any `--schemas` paths are loaded on top as overlays. File properties win per-property; untouched persisted properties are preserved.
 
-All 36 tools exposed as MCP tools (38 on HTTP with db_subscribe/db_unsubscribe). Claude Code config (`~/.claude/settings.json`):
+All tools exposed as MCP tools (with additional `db_subscribe`/`db_unsubscribe` on HTTP transport). Claude Code config (`~/.claude/settings.json`):
 
 ```json
 {
@@ -411,7 +411,7 @@ const { persisted, warnings } = mergeSchemas(codeSchema, persistedSchema);
 
 ## Tool Definitions
 
-`getTools(db)` returns 36 tools:
+`getTools(db)` returns tools covering:
 
 | Tool | Description |
 |------|-------------|
