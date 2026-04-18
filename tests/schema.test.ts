@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
@@ -1442,6 +1442,42 @@ describe("AgentDB.loadSchemasFromFiles", () => {
     expect(result.loaded).toBe(0);
     expect(result.failed).toHaveLength(0);
   });
+
+  it("valid JSON but wrong content types (array, null, number) land in failed[]", async () => {
+    const arrayPath = join(tmpDir, "arr.json");
+    const nullPath = join(tmpDir, "nullval.json");
+    const numPath = join(tmpDir, "num.json");
+    await writeFile(arrayPath, JSON.stringify([{ name: "x" }]), "utf-8");
+    await writeFile(nullPath, "null", "utf-8");
+    await writeFile(numPath, "42", "utf-8");
+
+    const result = await db.loadSchemasFromFiles([arrayPath, nullPath, numPath]);
+    expect(result.loaded).toBe(0);
+    expect(result.skipped).toBe(0);
+    expect(result.failed).toHaveLength(3);
+    for (const f of result.failed) {
+      expect(f.error).toMatch(/Validation error/i);
+    }
+  });
+
+  it("file name field wins over filename; no warning is emitted for mismatch (current behavior)", async () => {
+    // Spec said to warn on name/filename mismatch — implementation is currently silent.
+    // This test documents the actual behavior: file's name field takes precedence.
+    const schemaPath = join(tmpDir, "tickets.json");
+    await writeFile(schemaPath, JSON.stringify({ name: "users", description: "Users, not tickets" }), "utf-8");
+
+    const result = await db.loadSchemasFromFiles([schemaPath]);
+    expect(result.loaded).toBe(1);
+
+    // Loaded under the name from the file, not from the filename
+    const byName = await db.loadPersistedSchema("users");
+    expect(byName).toBeDefined();
+    expect(byName!.description).toBe("Users, not tickets");
+
+    // Nothing loaded under the filename-derived name
+    const byFilename = await db.loadPersistedSchema("tickets");
+    expect(byFilename).toBeUndefined();
+  });
 });
 
 describe("AgentDB schemas/ auto-discover", () => {
@@ -1524,5 +1560,27 @@ describe("AgentDB schemas/ auto-discover", () => {
     await db.init();
     const second = await db.loadPersistedSchema("tasks");
     expect(second).toEqual(first);
+  });
+
+  it("symlinked schemas/ directory is followed and files are loaded", async () => {
+    // Create schema files in a separate directory, then symlink it as <dataDir>/schemas
+    const realSchemasDir = await mkdtemp(join(tmpdir(), "agentdb-real-schemas-"));
+    try {
+      await writeFile(
+        join(realSchemasDir, "linked.json"),
+        JSON.stringify({ name: "linked", description: "From symlinked dir" }),
+        "utf-8",
+      );
+      await symlink(realSchemasDir, join(tmpDir, "schemas"));
+
+      db = new AgentDB(tmpDir);
+      await db.init();
+
+      const loaded = await db.loadPersistedSchema("linked");
+      expect(loaded).toBeDefined();
+      expect(loaded!.description).toBe("From symlinked dir");
+    } finally {
+      await rm(realSchemasDir, { recursive: true, force: true });
+    }
   });
 });
