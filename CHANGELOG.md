@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Added
 - **`db_infer_schema` date-regex false-positive fix** — tightened ISO date heuristic from `/^\d{4}-\d{2}-\d{2}/` to `/^\d{4}-\d{2}-\d{2}(T|Z|$)/`. Strings like `"2024-01-01 not a date"` no longer misclassify as `date`.
+- **`$strLen` filter operator** — compares the character length of a string field. Accepts a number (exact match) or operator object (`{ $gt: N }`, `{ $gte: N, $lte: M }`, etc.). Non-string values return false. Used in `db_diff_schema` impact scan to replace `col.find()`-based JS iteration for `maxLength` constraint checks (now a single `col.count($strLen)` call). `min`/`max` constraint impact scans similarly simplified to `col.count($lt/$gt)`.
 - **`db_migrate` deleted-record accounting** — records that disappear between snapshot and processing (deleted mid-migration) now land in `failed[]` with error `"record deleted before migration"` instead of being silently skipped. Keeps the invariant `scanned == updated + unchanged + failed`.
 - **`db_infer_schema` edge-case tests** — round-trip to `db_set_schema`, exactly-95% required boundary, 94% not required, all-null field excluded, sampleSize > totalRecords, null counts as missing, prototype meta-field exclusion, `enumThreshold:1` forces string.
 - **`db_diff_schema` edge-case tests** — new field added with no warning, enum value added-only with no warning, `includeImpact:true` on non-existent collection, same partial candidate twice produces identical diff.

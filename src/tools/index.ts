@@ -753,12 +753,7 @@ export function getTools(db: AgentDB): AgentTool[] {
               if (chg.maxLength) {
                 const ml = chg.maxLength as { from: number | null; to: number | null };
                 if (ml.to !== null && (ml.from === null || ml.to < ml.from)) {
-                  const recs = await col.find({ filter: { [fn]: { $exists: true } } });
-                  let cnt = 0;
-                  for (const rec of recs.records) {
-                    const val = rec[fn];
-                    if (typeof val === "string" && val.length > ml.to!) cnt++;
-                  }
+                  const cnt = await col.count({ [fn]: { $strLen: { $gt: ml.to } } } as import("../collection-helpers.js").Filter);
                   if (cnt > 0) {
                     const w = warnings.find(w => w.severity === "medium" && w.message.includes(`Field '${fn}' maxLength tightened`));
                     if (w) w.message += ` (${cnt} records violating)`;
@@ -769,12 +764,7 @@ export function getTools(db: AgentDB): AgentTool[] {
               if (chg.min) {
                 const mn = chg.min as { from: number | null; to: number | null };
                 if (mn.to !== null && (mn.from === null || mn.to > mn.from)) {
-                  const recs = await col.find({ filter: { [fn]: { $exists: true } } });
-                  let cnt = 0;
-                  for (const rec of recs.records) {
-                    const val = rec[fn];
-                    if (typeof val === "number" && val < mn.to!) cnt++;
-                  }
+                  const cnt = await col.count({ [fn]: { $lt: mn.to } } as import("../collection-helpers.js").Filter);
                   if (cnt > 0) {
                     const w = warnings.find(w => w.severity === "medium" && w.message.includes(`Field '${fn}' min tightened`));
                     if (w) w.message += ` (${cnt} records violating)`;
@@ -785,12 +775,7 @@ export function getTools(db: AgentDB): AgentTool[] {
               if (chg.max) {
                 const mx = chg.max as { from: number | null; to: number | null };
                 if (mx.to !== null && (mx.from === null || mx.to < mx.from)) {
-                  const recs = await col.find({ filter: { [fn]: { $exists: true } } });
-                  let cnt = 0;
-                  for (const rec of recs.records) {
-                    const val = rec[fn];
-                    if (typeof val === "number" && val > mx.to!) cnt++;
-                  }
+                  const cnt = await col.count({ [fn]: { $gt: mx.to } } as import("../collection-helpers.js").Filter);
                   if (cnt > 0) {
                     const w = warnings.find(w => w.severity === "medium" && w.message.includes(`Field '${fn}' max tightened`));
                     if (w) w.message += ` (${cnt} records violating)`;

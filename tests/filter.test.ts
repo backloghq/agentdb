@@ -702,4 +702,41 @@ describe("compileFilter", () => {
       expect(pred({ a: { b: { c: "value" } } })).toBe(false);
     });
   });
+
+  describe("$strLen", () => {
+    it("exact length match with number value", () => {
+      const pred = compileFilter({ name: { $strLen: 5 } });
+      expect(pred({ name: "hello" })).toBe(true);
+      expect(pred({ name: "hi" })).toBe(false);
+      expect(pred({ name: "toolong" })).toBe(false);
+    });
+
+    it("$strLen with $gt operator", () => {
+      const pred = compileFilter({ bio: { $strLen: { $gt: 10 } } });
+      expect(pred({ bio: "short" })).toBe(false);
+      expect(pred({ bio: "exactly ten!" })).toBe(true);
+    });
+
+    it("$strLen with $lte operator", () => {
+      const pred = compileFilter({ code: { $strLen: { $lte: 3 } } });
+      expect(pred({ code: "US" })).toBe(true);
+      expect(pred({ code: "USA" })).toBe(true);
+      expect(pred({ code: "LONG" })).toBe(false);
+    });
+
+    it("$strLen returns false for non-string values", () => {
+      const pred = compileFilter({ x: { $strLen: { $gt: 0 } } });
+      expect(pred({ x: 42 })).toBe(false);
+      expect(pred({ x: null })).toBe(false);
+      expect(pred({ x: ["a", "b"] })).toBe(false);
+    });
+
+    it("$strLen with $gte/$lte range", () => {
+      const pred = compileFilter({ tag: { $strLen: { $gte: 2, $lte: 5 } } });
+      expect(pred({ tag: "a" })).toBe(false);
+      expect(pred({ tag: "ab" })).toBe(true);
+      expect(pred({ tag: "hello" })).toBe(true);
+      expect(pred({ tag: "toolong" })).toBe(false);
+    });
+  });
 });

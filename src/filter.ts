@@ -293,6 +293,25 @@ function compileOperator(fieldPath: string, op: string, opValue: unknown): Predi
       };
     }
 
+    case "$strLen": {
+      // Compares the byte length of a string field.
+      // opValue can be a number (exact match) or an operator object (e.g. { $gt: 10 }).
+      const lenCondition = opValue;
+      return (record) => {
+        const fieldValue = getNestedValue(record, fieldPath);
+        if (typeof fieldValue !== "string") return false;
+        const len = fieldValue.length;
+        if (typeof lenCondition === "number") {
+          return len === lenCondition;
+        }
+        if (isOperatorObject(lenCondition)) {
+          const lenPred = compileFieldCondition("_len", lenCondition);
+          return lenPred({ _len: len });
+        }
+        return false;
+      };
+    }
+
     case "$not": {
       if (opValue === null || opValue === undefined || typeof opValue !== "object" || Array.isArray(opValue)) {
         throw new Error(`$not requires an operator object, got ${typeof opValue}`);
