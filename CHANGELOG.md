@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 - **Path sanitization regex in error messages** — changed `/\/[^\s'":]+\//g` to `/\/[^\s'":]+/g` (drop trailing-slash requirement). The old regex only stripped path prefixes with a trailing slash, leaving terminal filenames (e.g. `tickets.schema.json`) visible in tool error messages — exposing collection names. The new regex matches and strips the full path including the filename.
 
+### Added
+
+- **`persistSchema` rename failure test** — negative-path test asserting that when the atomic rename step throws (e.g. `EXDEV: cross-device link`), the tmp file is cleaned up via `rm({force:true})` and the original error is re-thrown.
+
 ### Refactor
 
 - **`validateCollectionName` dead-code removal** — removed `name.includes("..")` check; `VALID_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/` already rejects all dots.
