@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 - **README: Schema lifecycle for agents** — new section covering the 6-step schema workflow (define → persist → discover → diff → migrate → infer), with code examples for each step. Includes library API references for `loadSchemasFromFiles`, `mergePersistedSchemas`, and `mergeSchemas`.
 
+### Refactor
+
+- **`src/tools/index.ts` split into per-domain modules** — `shared.ts` (types, `makeSafe`, shared schemas/annotations), `admin.ts`, `crud.ts`, `schema.ts`, `migrate.ts`, `archive.ts`, `vector.ts`, `blob.ts`, `backup.ts`. `index.ts` is now a pure aggregator. Public API (`getTools`, `AgentTool`, `ToolResult`) unchanged.
+
 ## [1.3.0] - 2026-04-18
 
 ### Added
