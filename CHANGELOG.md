@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+
+- **`strLen.eq:0` edge-case test** — compact filter integration test asserting `title.strLen.eq:0` matches empty strings, rejects non-empty strings, and rejects non-string values (null, missing field).
+
 ## [1.3.0] - 2026-04-18
 
 ### Added

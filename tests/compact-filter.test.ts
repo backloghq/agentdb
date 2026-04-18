@@ -206,6 +206,20 @@ describe("parseCompactFilter", () => {
       expect(result).toHaveLength(1);
       expect(result[0].title).toBe("Hello World");
     });
+
+    it("strLen.eq:0 matches empty strings, rejects non-empty and non-string values", () => {
+      const records = [
+        { title: "" },
+        { title: "x" },
+        { title: null },
+        { other: "no title" },
+      ];
+      const filter = parseCompactFilter("title.strLen.eq:0");
+      const predicate = compileFilter(filter);
+      const result = records.filter(predicate);
+      expect(result).toHaveLength(1);
+      expect(result[0].title).toBe("");
+    });
   });
 
   describe("nested field paths with modifiers", () => {
