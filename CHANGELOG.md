@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Refactor
+
+- **`getAgent(args)` helper** — extracted `export function getAgent(args)` to `src/tools/shared.ts`. Replaces 9 repeated `args.agent as string | undefined` casts across `crud.ts`, `schema.ts`, and `migrate.ts`. Pure DRY — no behavior change.
+
 ## [1.3.0] - 2026-04-18
 
 ### Added

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AgentDB } from "../agentdb.js";
-import { makeSafe, API_NOTE, collectionParam, filterParam, mutationOpts, WRITE, DESTRUCTIVE } from "./shared.js";
+import { makeSafe, getAgent, API_NOTE, collectionParam, filterParam, mutationOpts, WRITE, DESTRUCTIVE } from "./shared.js";
 import type { AgentTool } from "./shared.js";
 
 export function getMigrateTools(db: AgentDB): AgentTool[] {
@@ -44,7 +44,7 @@ export function getMigrateTools(db: AgentDB): AgentTool[] {
         const filter = args.filter as Record<string, unknown> | string | undefined;
         const dryRun = (args.dryRun as boolean) === true;
         const batchSize = Math.max(1, (args.batchSize as number) || 100);
-        const agent = args.agent as string | undefined;
+        const agent = getAgent(args);
         const reason = args.reason as string | undefined;
 
         if (!ops || ops.length === 0) throw new Error("ops must contain at least one operation");

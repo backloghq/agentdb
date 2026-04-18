@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { AgentDB } from "../agentdb.js";
 import { mergePersistedSchemas, validatePersistedSchema } from "../schema.js";
-import { makeSafe, API_NOTE, collectionParam, mutationOpts, READ, DESTRUCTIVE } from "./shared.js";
+import { makeSafe, getAgent, API_NOTE, collectionParam, mutationOpts, READ, DESTRUCTIVE } from "./shared.js";
 import type { AgentTool } from "./shared.js";
 
 export function getSchemaTools(db: AgentDB): AgentTool[] {
@@ -81,7 +81,7 @@ export function getSchemaTools(db: AgentDB): AgentTool[] {
       execute: safe("db_set_schema", DESTRUCTIVE)(async (args) => {
         const name = args.collection as string;
         const input = args.schema as Record<string, unknown>;
-        const agent = args.agent as string | undefined;
+        const agent = getAgent(args);
 
         // Build the schema to persist
         const incoming = { name, ...input } as import("../schema.js").PersistedSchema;
@@ -107,7 +107,7 @@ export function getSchemaTools(db: AgentDB): AgentTool[] {
       annotations: DESTRUCTIVE,
       execute: safe("db_delete_schema", DESTRUCTIVE)(async (args) => {
         const name = args.collection as string;
-        const agent = args.agent as string | undefined;
+        const agent = getAgent(args);
         const existed = (await db.loadPersistedSchema(name)) !== undefined;
         await db.deletePersistedSchema(name, { agent });
         return { deleted: existed };

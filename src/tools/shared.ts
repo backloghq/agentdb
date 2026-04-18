@@ -69,6 +69,11 @@ export function makeSafe(db: AgentDB, toolName: string, annotations: { readOnlyH
   };
 }
 
+/** Extract the agent identity from tool args (avoids repeated casts). */
+export function getAgent(args: Record<string, unknown>): string | undefined {
+  return args.agent as string | undefined;
+}
+
 // --- Shared schemas ---
 
 export const collectionParam = z.string().meta({ description: "Collection name" });

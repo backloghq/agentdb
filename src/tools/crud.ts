@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AgentDB } from "../agentdb.js";
-import { makeSafe, API_NOTE, collectionParam, filterParam, mutationOpts, READ, WRITE, WRITE_IDEMPOTENT, DESTRUCTIVE } from "./shared.js";
+import { makeSafe, getAgent, API_NOTE, collectionParam, filterParam, mutationOpts, READ, WRITE, WRITE_IDEMPOTENT, DESTRUCTIVE } from "./shared.js";
 import type { AgentTool } from "./shared.js";
 
 export function getCrudTools(db: AgentDB): AgentTool[] {
@@ -23,7 +23,7 @@ export function getCrudTools(db: AgentDB): AgentTool[] {
       annotations: WRITE,
       execute: safe("db_insert", WRITE)(async (args) => {
         const col = await db.collection(args.collection as string);
-        const opts = { agent: args.agent as string | undefined, reason: args.reason as string | undefined };
+        const opts = { agent: getAgent(args), reason: args.reason as string | undefined };
         if (args.records && Array.isArray(args.records)) {
           const ids = await col.insertMany(args.records as Record<string, unknown>[], opts);
           return { ids, inserted: ids.length };
@@ -103,7 +103,7 @@ export function getCrudTools(db: AgentDB): AgentTool[] {
         const modified = await col.update(
           args.filter as Record<string, unknown>,
           update,
-          { agent: args.agent as string | undefined, reason: args.reason as string | undefined },
+          { agent: getAgent(args), reason: args.reason as string | undefined },
         );
         return { modified };
       }),
@@ -126,7 +126,7 @@ export function getCrudTools(db: AgentDB): AgentTool[] {
         return col.upsert(
           args.id as string,
           args.record as Record<string, unknown>,
-          { agent: args.agent as string | undefined, reason: args.reason as string | undefined },
+          { agent: getAgent(args), reason: args.reason as string | undefined },
         );
       }),
     },
@@ -146,7 +146,7 @@ export function getCrudTools(db: AgentDB): AgentTool[] {
         const col = await db.collection(args.collection as string);
         const deleted = await col.remove(
           args.filter as Record<string, unknown>,
-          { agent: args.agent as string | undefined, reason: args.reason as string | undefined },
+          { agent: getAgent(args), reason: args.reason as string | undefined },
         );
         return { deleted };
       }),
@@ -185,7 +185,7 @@ export function getCrudTools(db: AgentDB): AgentTool[] {
         await col.batch(() => {
           for (const operation of ops) {
             if (operation.op === "insert" && operation.record) {
-              col.insert(operation.record, { agent: args.agent as string | undefined });
+              col.insert(operation.record, { agent: getAgent(args) });
               opCount++;
             } else if (operation.op === "delete" && operation.id) {
               col.deleteById(operation.id);
@@ -196,7 +196,7 @@ export function getCrudTools(db: AgentDB): AgentTool[] {
         // Handle updates outside batch (they're async)
         for (const operation of ops) {
           if (operation.op === "update" && operation.filter && operation.update) {
-            await col.update(operation.filter, operation.update, { agent: args.agent as string | undefined });
+            await col.update(operation.filter, operation.update, { agent: getAgent(args) });
             opCount++;
           }
         }
