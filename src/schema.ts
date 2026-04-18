@@ -353,12 +353,22 @@ export interface MergeResult {
 /**
  * Merge a code-level SchemaDefinition with a persisted schema.
  *
- * Precedence:
- * - description, instructions, version: persisted wins (agent context)
- * - fields structure: union of both; persisted field descriptions preserved
- * - field type conflicts: warn, code wins for validation
- * - indexes: union of both
- * - tagField, storageMode: code wins if set, else persisted
+ * **When to use:** Call this when opening a collection that has both a `defineSchema()` call
+ * in code AND a persisted schema on disk (e.g. on server startup). It reconciles developer
+ * intent (validation rules, indexes) with agent-authored context (descriptions, instructions).
+ *
+ * **Precedence rules:**
+ * - `description`, `instructions`, `version`: persisted wins (agent context survives redeploys)
+ * - Field `type`, `required`, `default`, `values`, `maxLength`, `min`, `max`: code wins (runtime validation)
+ * - Field `description`: persisted wins (agent-authored docs preserved)
+ * - Indexes (`indexes`, `compositeIndexes`, `arrayIndexes`): union of both
+ * - `tagField`, `storageMode`: code wins when set, else persisted fallback
+ * - Type conflicts between code and persisted field: warning emitted, code still wins
+ *
+ * **When NOT to use:** Do NOT use this to apply a partial schema update from an agent
+ * (e.g. `db_set_schema` payload). For agent overlay updates — where the caller only supplies
+ * changed properties and wants untouched properties preserved — use `mergePersistedSchemas`
+ * instead. That function handles the two-persisted-schema case without a code-level definition.
  */
 export function mergeSchemas(code: SchemaDefinition, persisted: PersistedSchema): MergeResult {
   const warnings: string[] = [];
@@ -456,10 +466,24 @@ export function mergeSchemas(code: SchemaDefinition, persisted: PersistedSchema)
 }
 
 /**
- * Merge two PersistedSchema objects with overlay semantics.
- * Overlay properties win per-property (not per-field), so an agent can update
- * a single field property (e.g. `type`) without losing others (e.g. `description`).
- * Indexes are unioned from both sides.
+ * Merge two PersistedSchema objects with overlay (patch) semantics.
+ *
+ * **When to use:** Call this when applying an agent-supplied partial schema update — for example,
+ * in `db_set_schema` (agent writes a new candidate) or `loadSchemasFromFiles` (JSON file acts as
+ * an overlay). The caller only needs to supply the properties they want to change; all untouched
+ * properties from `base` are preserved.
+ *
+ * **Precedence rules:**
+ * - All top-level scalar properties (`description`, `instructions`, `version`, `tagField`, `storageMode`):
+ *   overlay wins when present (non-undefined); otherwise falls back to base.
+ * - Per-field properties: overlay field wins per-property, not per-field. So overlay can set
+ *   `{ title: { type: "string" } }` and `base.fields.title.description` is preserved.
+ * - Indexes: union of base + overlay (no duplicates).
+ *
+ * **When NOT to use:** Do NOT use this when reconciling a `defineSchema()` code definition with
+ * a persisted schema at collection-open time. For that case — where one source is code-level and
+ * validation rules must win over agent context — use `mergeSchemas` instead. That function knows
+ * which properties belong to the developer (type, validation) vs. the agent (descriptions).
  */
 export function mergePersistedSchemas(base: PersistedSchema, overlay: PersistedSchema): PersistedSchema {
   const merged: PersistedSchema = { name: base.name };

@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`db_migrate` prototype-pollution guard** — `__proto__`, `constructor`, and `prototype` added to PROTECTED set; ops targeting these fields are silently skipped.
 - **`loadSchemasFromFiles` 10MB size cap** — files larger than 10MB are skipped before `readFile` (logged warning + `failed[]` entry with `"file size exceeds 10MB limit"`).
 
+### Docs
+
+- **`mergeSchemas` / `mergePersistedSchemas` JSDoc** — added full JSDoc covering when to call each function, precedence rules, and when NOT to use each (pointing to the other).
+
 ## [1.3.0] - 2026-04-18
 
 ### Added
