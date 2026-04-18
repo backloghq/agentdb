@@ -29,7 +29,14 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
   const server = new McpServer(
     { name: "agentdb", version: VERSION },
     {
-      instructions: "AgentDB — AI-first embedded database. Use db_collections to discover data, db_find with filters to query, db_schema to inspect record shapes.",
+      instructions: [
+        "AgentDB — AI-first embedded database for LLM agents. Start here:",
+        "1. db_collections — list all collections with record counts and schema summaries.",
+        "2. db_get_schema — read a collection's field types, agent instructions, and per-field descriptions.",
+        "3. db_find / db_find_one — query records; use JSON filters or compact syntax (status:active age.gt:18).",
+        "4. db_insert / db_update / db_delete / db_batch — mutate data; always pass agent and reason for audit.",
+        "5. Schema lifecycle: db_set_schema sets or updates a schema, db_diff_schema previews the impact of a change, db_infer_schema infers a schema from existing data, db_delete_schema removes it.",
+      ].join("\n"),
       capabilities: { logging: {} },
     },
   );

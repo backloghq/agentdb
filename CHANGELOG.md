@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 - **`persistSchema` rename failure test** — negative-path test asserting that when the atomic rename step throws (e.g. `EXDEV: cross-device link`), the tmp file is cleaned up via `rm({force:true})` and the original error is re-thrown.
 - **`$strLen` in compact filter syntax** — `field.strLen:N` (exact character count) and `field.strLen.modifier:N` (e.g. `title.strLen.gt:10`) map to `{ field: { $strLen: N } }` and `{ field: { $strLen: { $op: N } } }` respectively. `strLen` added to modifier alias list in README.
+- **MCP server instructions rewrite** — `createMcpServer` now emits a 5-step "Start here" block: db_collections → db_get_schema → db_find/db_find_one → mutations → schema lifecycle (db_set_schema, db_diff_schema, db_infer_schema, db_delete_schema). Two regression tests verify all five schema lifecycle tool names appear in the instructions.
 
 ### Refactor
 
