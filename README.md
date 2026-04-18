@@ -487,6 +487,18 @@ startHttp(dir, {
 });
 ```
 
+### Agent identity and the `agent` parameter
+
+All mutation tools accept an `agent` parameter to stamp who made a change. **Over an authenticated HTTP transport, this parameter is silently overridden with the authenticated identity — the value you supply is ignored.** The authenticated identity (from bearer token or JWT) always wins.
+
+Library callers without auth context (in-process `new AgentDB(...)` use) still control the field directly.
+
+| Context | Behavior |
+|---|---|
+| HTTP + auth configured | Authenticated identity wins; `agent` arg ignored |
+| HTTP + no auth | `agent` arg used as-is |
+| Library (in-process) | `agent` arg used as-is |
+
 ### JWT (production)
 
 Validate JWTs from any OAuth provider (Auth0, WorkOS, etc.):

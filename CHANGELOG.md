@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Docs
 
+- **README: `agent` arg HTTP-mode behavior** — new sub-section in Authentication documents that over an authenticated HTTP transport, the `agent` parameter is silently overridden with the authenticated identity. Includes a 3-row behavior matrix (HTTP+auth / HTTP+no-auth / in-process).
 - **`db_diff_schema` disk-mode cost** — description now warns: `includeImpact:true` on disk-backed collections >50K records triggers a full Parquet scan (~175ms at 100K records, 64× overhead vs `false`); recommends `includeImpact:false` for interactive/automated use.
 
 ### Fixed
