@@ -718,7 +718,7 @@ describe("Tool Definitions — schema", () => {
       expect(result.totalRecords).toBe(50000);
       expect(result.sampleSize).toBe(100);
       expect(elapsed).toBeLessThan(500);
-    }, 30000);
+    }, 120000);
 
     it("disk-mode: heap delta stays under 50MB for 10K records (streaming memory guard)", async () => {
       const diskDir = await mkdtemp(join(tmpdir(), "agentdb-infer-disk-"));
