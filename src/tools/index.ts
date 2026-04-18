@@ -41,11 +41,14 @@ function makeSafe(db: AgentDB, toolName: string, annotations: { readOnlyHint?: b
   return (fn: (args: Record<string, unknown>) => Promise<unknown>): (args: unknown) => Promise<ToolResult> => {
     return async (args) => {
       try {
-        // Prefer authenticated identity from HTTP auth over self-reported args.agent
+        // Resolve agent identity: authenticated identity wins over self-reported args.agent.
+        // Mutate args.agent so all tool handlers see the resolved identity without per-tool code.
         const authId = getCurrentAuth();
-        const agent = authId?.agentId ?? (args as Record<string, unknown>).agent as string | undefined;
+        const typedArgs = args as Record<string, unknown>;
+        const agent = authId?.agentId ?? typedArgs.agent as string | undefined;
+        typedArgs.agent = agent;
         db.getPermissions().require(agent, level, toolName);
-        const result = await fn(args as Record<string, unknown>);
+        const result = await fn(typedArgs);
         const structured = result as Record<string, unknown>;
         return {
           content: [{ type: "text" as const, text: JSON.stringify(structured, null, 2) }],

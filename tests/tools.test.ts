@@ -6,6 +6,7 @@ import { AgentDB } from "../src/agentdb.js";
 import { defineSchema } from "../src/schema.js";
 import { getTools } from "../src/tools/index.js";
 import type { AgentTool } from "../src/tools/index.js";
+import { authContext } from "../src/auth-context.js";
 
 describe("Tool Definitions", () => {
   let tmpDir: string;
@@ -1433,6 +1434,37 @@ describe("Tool Definitions", () => {
       const history = await exec("db_history", { collection: "users", id: "a" });
       expect(history.operations[0].data._agent).toBe("test-bot");
       expect(history.operations[0].data._reason).toBe("testing");
+    });
+
+    it("auth identity used as _agent when no args.agent supplied", async () => {
+      await authContext.run({ agentId: "auth-bot" }, async () => {
+        await exec("db_insert", { collection: "auth-id-1", record: { x: 1 } });
+      });
+      const history = await exec("db_history", { collection: "auth-id-1", id: (await exec("db_find", { collection: "auth-id-1" })).records[0]._id as string });
+      expect(history.operations[0].data._agent).toBe("auth-bot");
+    });
+
+    it("auth identity wins over args.agent when both provided", async () => {
+      await authContext.run({ agentId: "auth-wins" }, async () => {
+        await exec("db_insert", { collection: "auth-id-2", record: { x: 1 }, agent: "self-reported" });
+      });
+      const found = await exec("db_find", { collection: "auth-id-2" });
+      const history = await exec("db_history", { collection: "auth-id-2", id: found.records[0]._id as string });
+      expect(history.operations[0].data._agent).toBe("auth-wins");
+    });
+
+    it("args.agent used as _agent when no auth context is set", async () => {
+      await exec("db_insert", { collection: "auth-id-3", record: { x: 1 }, agent: "explicit-bot" });
+      const found = await exec("db_find", { collection: "auth-id-3" });
+      const history = await exec("db_history", { collection: "auth-id-3", id: found.records[0]._id as string });
+      expect(history.operations[0].data._agent).toBe("explicit-bot");
+    });
+
+    it("_agent is absent when neither auth context nor args.agent is set", async () => {
+      await exec("db_insert", { collection: "auth-id-4", record: { x: 1 } });
+      const found = await exec("db_find", { collection: "auth-id-4" });
+      const history = await exec("db_history", { collection: "auth-id-4", id: found.records[0]._id as string });
+      expect(history.operations[0].data._agent).toBeUndefined();
     });
   });
 });

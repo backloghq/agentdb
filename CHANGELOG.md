@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 - **`db_infer_schema` O(N) fix** — replaced offset-based pagination (O(N²)) with single `col.findAll()` call (O(N)). Root cause: `find()` with offset scans all matching records into an array first, then slices — so each offset-based chunk was O(N) regardless of offset. `findAll()` does one pass; Algorithm R sampling is applied over the returned array.
 
+### Changed
+
+- **Unified `_agent` audit stamp** — `makeSafe()` now mutates `args.agent` with the resolved identity (authenticated identity wins over self-reported) before calling tool handlers. Previously, tools used `authId` for permission checks but `args.agent` (potentially undefined) for the `_agent` audit field, so HTTP-authenticated calls were not stamped. Behavior matrix: auth+no-arg → auth identity; auth+arg → auth wins; no-auth+arg → arg; no-auth+no-arg → undefined.
+
 ## [1.3.0] - 2026-04-18
 
 ### Added
