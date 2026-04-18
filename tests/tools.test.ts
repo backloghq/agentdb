@@ -37,8 +37,8 @@ describe("Tool Definitions", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns 33 tools", () => {
-    expect(tools).toHaveLength(33);
+  it("returns 34 tools", () => {
+    expect(tools).toHaveLength(34);
   });
 
   it("every tool has required fields", () => {
@@ -470,6 +470,150 @@ describe("Tool Definitions", () => {
       db = new AgentDB(tmpDir);
       await db.init();
       tools = getTools(db);
+    });
+  });
+
+  describe("db_diff_schema", () => {
+    it("no existing schema — everything in candidate is added", async () => {
+      await exec("db_create", { collection: "diff-new" });
+      const result = await exec("db_diff_schema", {
+        collection: "diff-new",
+        schema: {
+          description: "A new collection",
+          fields: { name: { type: "string" }, age: { type: "number" } },
+          indexes: ["name"],
+        },
+      });
+      expect(result.hasExisting).toBe(false);
+      expect(result.added.fields).toEqual(expect.arrayContaining(["name", "age"]));
+      expect(result.added.indexes).toEqual(["name"]);
+      expect(result.removed.fields).toEqual([]);
+      expect(result.changed.fields).toEqual({});
+      expect(result.warnings).toEqual([]);
+      expect(result.impact.totalRecords).toBe(0);
+    });
+
+    it("identical candidate — no changes and no warnings", async () => {
+      await exec("db_create", { collection: "diff-same" });
+      await exec("db_set_schema", {
+        collection: "diff-same",
+        schema: { description: "Stable", fields: { x: { type: "string" } } },
+        agent: "admin",
+      });
+      const result = await exec("db_diff_schema", {
+        collection: "diff-same",
+        schema: { description: "Stable", fields: { x: { type: "string" } } },
+      });
+      expect(result.hasExisting).toBe(true);
+      expect(result.added.fields).toEqual([]);
+      expect(result.removed.fields).toEqual([]);
+      expect(result.changed.fields).toEqual({});
+      expect(result.warnings).toEqual([]);
+    });
+
+    it("type change with records — high warning with record count", async () => {
+      await exec("db_create", { collection: "diff-type" });
+      await exec("db_set_schema", {
+        collection: "diff-type",
+        schema: { fields: { score: { type: "number" } } },
+        agent: "admin",
+      });
+      await exec("db_insert", { collection: "diff-type", records: [{ score: 10 }, { score: 20 }] });
+      const result = await exec("db_diff_schema", {
+        collection: "diff-type",
+        schema: { fields: { score: { type: "string" } } },
+      });
+      expect(result.changed.fields.score.type).toEqual({ from: "number", to: "string" });
+      const highWarn = result.warnings.find((w: { severity: string; message: string }) => w.severity === "high" && w.message.includes("score") && w.message.includes("type changed"));
+      expect(highWarn).toBeDefined();
+      expect(highWarn.message).toMatch(/2 records affected/);
+      expect(result.impact.totalRecords).toBe(2);
+    });
+
+    it("required:true added with records missing field — medium warning with count", async () => {
+      await exec("db_create", { collection: "diff-req" });
+      await exec("db_set_schema", {
+        collection: "diff-req",
+        schema: { fields: { email: { type: "string" } } },
+        agent: "admin",
+      });
+      await exec("db_insert", { collection: "diff-req", records: [
+        { email: "a@b.com" },
+        { name: "NoEmail" },
+      ] });
+      const result = await exec("db_diff_schema", {
+        collection: "diff-req",
+        schema: { fields: { email: { type: "string", required: true } } },
+      });
+      expect(result.changed.fields.email.required).toEqual({ from: false, to: true });
+      const medWarn = result.warnings.find((w: { severity: string; message: string }) => w.severity === "medium" && w.message.includes("email") && w.message.includes("required"));
+      expect(medWarn).toBeDefined();
+      expect(medWarn.message).toMatch(/1 records missing field/);
+      expect(result.impact.recordsViolatingNewConstraints).toBe(1);
+    });
+
+    it("enum value removed where records use it — high warning with count", async () => {
+      await exec("db_create", { collection: "diff-enum" });
+      await exec("db_set_schema", {
+        collection: "diff-enum",
+        schema: { fields: { status: { type: "enum", values: ["active", "inactive", "pending"] } } },
+        agent: "admin",
+      });
+      await exec("db_insert", { collection: "diff-enum", records: [
+        { status: "active" },
+        { status: "pending" },
+        { status: "pending" },
+      ] });
+      const result = await exec("db_diff_schema", {
+        collection: "diff-enum",
+        schema: { fields: { status: { type: "enum", values: ["active", "inactive"] } } },
+      });
+      expect(result.changed.fields.status.values.removed).toEqual(["pending"]);
+      const highWarn = result.warnings.find((w: { severity: string; message: string }) => w.severity === "high" && w.message.includes("status") && w.message.includes("enum removed"));
+      expect(highWarn).toBeDefined();
+      expect(highWarn.message).toMatch(/2 records affected/);
+      expect(result.impact.recordsViolatingNewConstraints).toBe(2);
+    });
+
+    it("includeImpact:false — no impact field, no record scanning", async () => {
+      await exec("db_create", { collection: "diff-noimpact" });
+      await exec("db_set_schema", {
+        collection: "diff-noimpact",
+        schema: { fields: { score: { type: "number" } } },
+        agent: "admin",
+      });
+      await exec("db_insert", { collection: "diff-noimpact", records: [{ score: 5 }] });
+      const result = await exec("db_diff_schema", {
+        collection: "diff-noimpact",
+        schema: { fields: { score: { type: "string" } } },
+        includeImpact: false,
+      });
+      expect(result.impact).toBeUndefined();
+      const highWarn = result.warnings.find((w: { severity: string; message: string }) => w.severity === "high" && w.message.includes("type changed"));
+      expect(highWarn).toBeDefined();
+      expect(highWarn.message).not.toMatch(/records affected/);
+    });
+
+    it("partial candidate (no fields key) — no field changes, proves merge semantics", async () => {
+      await exec("db_create", { collection: "diff-partial" });
+      await exec("db_set_schema", {
+        collection: "diff-partial",
+        schema: {
+          description: "Old description",
+          fields: { name: { type: "string" }, age: { type: "number" } },
+        },
+        agent: "admin",
+      });
+      const result = await exec("db_diff_schema", {
+        collection: "diff-partial",
+        schema: { description: "New description" },
+      });
+      // Fields should be unchanged — partial candidate preserves existing fields
+      expect(result.removed.fields).toEqual([]);
+      expect(result.added.fields).toEqual([]);
+      expect(result.changed.fields).toEqual({});
+      // Only description changed
+      expect(result.changed.description).toEqual({ from: "Old description", to: "New description" });
     });
   });
 

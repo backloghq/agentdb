@@ -525,6 +525,12 @@ export class AgentDB {
     return infos;
   }
 
+  /** Return active collection names without opening them. */
+  getCollectionNames(): string[] {
+    this.ensureOpen();
+    return [...this.meta.collections];
+  }
+
   /** List soft-deleted collection names. */
   listDropped(): string[] {
     this.ensureOpen();

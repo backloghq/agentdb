@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- **`db_diff_schema` tool** — read-only tool that previews what `db_set_schema` would change before committing. Uses `mergePersistedSchemas` internally (same semantics as `db_set_schema`), so partial candidates correctly show no-change for omitted fields. Returns `{ added, removed, changed, warnings, impact? }`. `warnings` covers type changes (high), removed enum values (high), new required fields (medium), tightened constraints (medium), removed fields (medium), and removed description/instructions (low). `includeImpact: true` (default) queries the collection for affected record counts embedded in warnings and an `impact` summary.
+- **`AgentDB.getCollectionNames()`** — lightweight getter returning active collection names without opening any collections. Used by `db_diff_schema` to detect non-existent collections without creating them as a side effect.
 - **E2E subprocess test for `--schemas` argv** — spawns `dist/mcp/cli.js` with `--schemas <path>` and verifies schema is persisted and queryable via `db_get_schema` MCP tool call. Also covers multiple `--schemas` flags.
 - **`loadSchemasFromFiles` name-mismatch warning** — emits `console.warn` when a file's explicit `name` field differs from the filename-derived name. The file's `name` still wins (overlay semantics); the warning is informational.
 - **`loadSchemasFromFiles` `skipped` semantics** — files are now counted as `skipped` (not `loaded`) when the merged schema is structurally identical to the existing persisted schema. Uses key-sorted JSON for the comparison to avoid false mismatches from key-ordering differences.
