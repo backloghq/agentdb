@@ -978,6 +978,49 @@ describe("Tool Definitions", () => {
       expect(result.errors[0].id).toBe(idToDelete);
       expect(result.errors[0].error).toBe("record deleted before migration");
     });
+
+    it("errors[] is capped at 10 with mixed deletion and validation failures", async () => {
+      // 13 records total: 5 will be deleted after snapshot, 8 will fail validation
+      await db.collection(defineSchema({
+        name: "migrate-errors-cap",
+        fields: { score: { type: "number", max: 100 } },
+      }));
+      await exec("db_insert", {
+        collection: "migrate-errors-cap",
+        records: Array.from({ length: 13 }, (_, i) => ({ score: 50 + i })),
+      });
+      const col = await db.collection("migrate-errors-cap");
+      const findRes = (await exec("db_find", { collection: "migrate-errors-cap" })).records as Array<Record<string, unknown>>;
+      const idsToDelete = findRes.slice(0, 5).map((r) => r._id as string);
+
+      // Patch col.find: after snapshot phase completes, delete 5 records
+      const origFind = col.find.bind(col);
+      let snapshotDone = false;
+      (col as unknown as { find: unknown }).find = async (...args: Parameters<typeof col.find>) => {
+        const result = await origFind(...args);
+        if (!snapshotDone) {
+          snapshotDone = true;
+          for (const id of idsToDelete) {
+            await col.deleteById(id);
+          }
+        }
+        return result;
+      };
+
+      const result = await exec("db_migrate", {
+        collection: "migrate-errors-cap",
+        ops: [{ op: "set", field: "score", value: 200 }],
+      });
+
+      (col as unknown as { find: unknown }).find = origFind;
+
+      expect(result.scanned).toBe(13);
+      expect(result.failed).toBe(13);
+      expect(result.updated).toBe(0);
+      expect(result.errors).toHaveLength(10);
+      expect(result.errors.some((e: { error: string }) => e.error === "record deleted before migration")).toBe(true);
+      expect(result.errors.some((e: { error: string }) => /200|max|score/i.test(e.error))).toBe(true);
+    });
   });
 
   describe("db_infer_schema", () => {

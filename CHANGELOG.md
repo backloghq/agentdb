@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ### Tests
 
 - **filter**: add `$strLen { $eq: 0 }` empty-string coverage (matches `""`, rejects `null`, missing, and non-empty strings)
+- **tools**: add `db_migrate` errors[] cap test with mixed deletion and validation failures (13 total failures, errors capped at 10)
 
 ## [1.3.0] - 2026-04-18
 
