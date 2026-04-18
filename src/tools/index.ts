@@ -840,37 +840,32 @@ export function getTools(db: AgentDB): AgentTool[] {
           notes.push(`Collection already has a persisted schema${versionPart}. Use db_diff_schema to compare or db_set_schema to replace.`);
         }
 
-        // Sampling: scan-all when totalRecords ≤ sampleSize; otherwise Algorithm R reservoir sampling
+        // Sampling: single findAll() pass (O(N)) + Algorithm R reservoir sampling.
+        // col.find() with offset is O(N) per call regardless of offset because the in-memory
+        // store.filter() always scans all records and slices at the end. Using offset-based
+        // chunking makes the total cost O(N * N/CHUNK) = O(N²). findAll() does one scan.
         let records: Record<string, unknown>[];
         if (totalRecords === 0) {
           records = [];
-        } else if (totalRecords <= sampleSize) {
-          records = (await col.find({ limit: sampleSize })).records;
         } else {
-          // Algorithm R (Vitter 1985): uniform reservoir sampling without replacement.
-          // Iterates the full collection in chunks; each position i has exactly k/i probability
-          // of being in the final reservoir, guaranteeing uniform distribution.
-          const reservoir: Record<string, unknown>[] = [];
-          let seenCount = 0;
-          const CHUNK_SIZE = Math.min(5000, Math.max(sampleSize, 100));
-          let chunkOffset = 0;
-          while (true) {
-            const chunk = await col.find({ limit: CHUNK_SIZE, offset: chunkOffset });
-            if (chunk.records.length === 0) break;
-            for (const record of chunk.records) {
-              seenCount++;
-              if (seenCount <= sampleSize) {
-                reservoir.push(record);
+          const allRecords = await col.findAll();
+          if (allRecords.length <= sampleSize) {
+            records = allRecords;
+          } else {
+            // Algorithm R (Vitter 1985): uniform reservoir sampling without replacement.
+            // Each position i has exactly k/i probability of being in the final reservoir.
+            const reservoir: Record<string, unknown>[] = [];
+            for (let i = 0; i < allRecords.length; i++) {
+              if (i < sampleSize) {
+                reservoir.push(allRecords[i]);
               } else {
-                const j = Math.floor(Math.random() * seenCount);
-                if (j < sampleSize) reservoir[j] = record;
+                const j = Math.floor(Math.random() * (i + 1));
+                if (j < sampleSize) reservoir[j] = allRecords[i];
               }
             }
-            if (chunk.records.length < CHUNK_SIZE) break;
-            chunkOffset += CHUNK_SIZE;
+            records = reservoir;
+            notes.push(`Sampled ${reservoir.length} of ${totalRecords} total records (Algorithm R reservoir sampling).`);
           }
-          records = reservoir;
-          notes.push(`Sampled ${reservoir.length} of ${totalRecords} total records (Algorithm R reservoir sampling).`);
         }
 
         const actualSample = records.length;

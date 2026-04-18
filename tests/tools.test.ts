@@ -1289,6 +1289,23 @@ describe("Tool Definitions", () => {
       expect(note).toContain("db_diff_schema");
       expect(note).toContain("db_set_schema");
     });
+
+    it("completes in bounded time for 50K records (O(N) regression guard)", async () => {
+      // Insert 50K records directly via collection API (bypasses tool overhead)
+      const col = await db.collection("infer-50k");
+      const BATCH = 1000;
+      for (let b = 0; b < 50; b++) {
+        const batch = Array.from({ length: BATCH }, (_, i) => ({ n: b * BATCH + i, label: `item-${b * BATCH + i}` }));
+        for (const r of batch) await col.insert(r);
+      }
+      const start = performance.now();
+      const result = await exec("db_infer_schema", { collection: "infer-50k", sampleSize: 100 });
+      const elapsed = performance.now() - start;
+      expect(result.totalRecords).toBe(50000);
+      expect(result.sampleSize).toBe(100);
+      // O(N) single-pass should complete well under 5s even in slow CI
+      expect(elapsed).toBeLessThan(5000);
+    }, 30000);
   });
 
   describe("db_distinct", () => {

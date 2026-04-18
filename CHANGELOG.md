@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`mergeSchemas` / `mergePersistedSchemas` JSDoc** — added full JSDoc covering when to call each function, precedence rules, and when NOT to use each (pointing to the other).
 - **`db_migrate` throughput docs** — description now includes: ~22K rec/sec (async mode), ~1-5K rec/sec (immediate/default), expected 20–100 sec for 100K-record migrations.
 
+### Performance
+
+- **`db_infer_schema` O(N) fix** — replaced offset-based pagination (O(N²)) with single `col.findAll()` call (O(N)). Root cause: `find()` with offset scans all matching records into an array first, then slices — so each offset-based chunk was O(N) regardless of offset. `findAll()` does one pass; Algorithm R sampling is applied over the returned array.
+
 ## [1.3.0] - 2026-04-18
 
 ### Added
