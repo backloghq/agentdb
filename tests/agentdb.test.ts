@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
+import { defineSchema } from "../src/schema.js";
 
 describe("AgentDB", () => {
   let tmpDir: string;
@@ -192,6 +193,36 @@ describe("AgentDB", () => {
       // Purge by original collection name
       await db.purgeCollection("orders");
       expect(await db.loadPersistedSchema("orders")).toBeUndefined();
+    });
+
+    it("dropCollection removes auto-persisted schema from defineSchema()", async () => {
+      const schema = defineSchema({ name: "widgets", version: 1, fields: { sku: { type: "string" } } });
+      await db.collection(schema);
+      expect(await db.loadPersistedSchema("widgets")).toBeDefined();
+
+      await db.dropCollection("widgets");
+      expect(await db.loadPersistedSchema("widgets")).toBeUndefined();
+    });
+
+    it("re-creating a dropped collection starts with no leftover schema", async () => {
+      const schema = defineSchema({ name: "widgets", version: 1, fields: { sku: { type: "string" } } });
+      await db.collection(schema);
+      await db.dropCollection("widgets");
+      expect(await db.loadPersistedSchema("widgets")).toBeUndefined();
+
+      // Re-create without defineSchema — schema should remain absent
+      await db.collection("widgets");
+      expect(await db.loadPersistedSchema("widgets")).toBeUndefined();
+    });
+
+    it("purgeCollection correctly extracts original name for collection ending in _digits", async () => {
+      await db.collection("orders_1");
+      await db.persistSchema("orders_1", { name: "orders_1", version: 1 });
+      await db.dropCollection("orders_1");
+
+      const droppedName = db.listDropped()[0];
+      await db.purgeCollection(droppedName);
+      expect(await db.loadPersistedSchema("orders_1")).toBeUndefined();
     });
 
     it("drop persists across reopen", async () => {

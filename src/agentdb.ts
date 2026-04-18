@@ -450,6 +450,7 @@ export class AgentDB {
     this.meta.dropped.push(droppedName);
     await this.writeMeta();
     await this.deletePersistedSchema(name);
+    this.schemas.delete(name);
   }
 
   /** Permanently delete a soft-dropped collection. */
