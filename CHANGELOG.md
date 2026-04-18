@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Orphaned `meta/*.tmp` cleanup on init** — `AgentDB.init()` now scans `meta/` for `*.tmp` files after creating the directory and removes them with `rm({force:true})`. Prevents accumulation of tmp files left by hard crashes between `writeFile` and `rename` in `persistSchema` or `writeMeta`.
+
 ## [1.3.0] - 2026-04-18
 
 ### Added

@@ -164,6 +164,15 @@ export class AgentDB {
   async init(): Promise<void> {
     await mkdir(join(this.dir, META_DIR), { recursive: true });
     await mkdir(join(this.dir, COLLECTIONS_DIR), { recursive: true });
+
+    // Remove orphaned .tmp files left by crashed persistSchema or writeMeta calls
+    const metaEntries = await readdir(join(this.dir, META_DIR));
+    await Promise.all(
+      metaEntries
+        .filter(f => f.endsWith(".tmp"))
+        .map(f => rm(join(this.dir, META_DIR, f), { force: true }))
+    );
+
     this.meta = await this.readMeta();
     this._opened = true;
 
