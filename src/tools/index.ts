@@ -1077,7 +1077,13 @@ export function getTools(db: AgentDB): AgentTool[] {
 
           for (const { id, version: snapVersion } of batch) {
             const record = recordMap.get(id);
-            if (!record) continue;
+            if (!record) {
+              failed++;
+              if (errors.length < 10) {
+                errors.push({ id, error: "record deleted before migration" });
+              }
+              continue;
+            }
 
             // Apply ops to user fields only (exclude _id for comparison)
             const original: Record<string, unknown> = {};

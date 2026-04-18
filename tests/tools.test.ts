@@ -943,6 +943,41 @@ describe("Tool Definitions", () => {
       expect(result.unchanged).toBe(1);
       expect(result.updated).toBe(0);
     });
+
+    it("record deleted between snapshot and processing lands in failed[] with descriptive error", async () => {
+      // Phase 1 (snapshot) sees 2 records. We delete one after inserting but before migrate runs.
+      // Phase 2's $in lookup won't find the deleted record → it lands in failed[].
+      await exec("db_insert", { collection: "migrate-deleted", records: [{ x: 1 }, { x: 2 }] });
+      const col = await db.collection("migrate-deleted");
+      const findRes = (await exec("db_find", { collection: "migrate-deleted" })).records as Array<Record<string, unknown>>;
+      const idToDelete = findRes[0]._id as string;
+
+      // Patch col.find: snapshot phase returns both records, but delete the record after snapshot
+      const origFind = col.find.bind(col);
+      let snapshotDone = false;
+      (col as unknown as { find: unknown }).find = async (...args: Parameters<typeof col.find>) => {
+        const result = await origFind(...args);
+        if (!snapshotDone) {
+          snapshotDone = true;
+          // After snapshot is built, delete one record to simulate mid-migration deletion
+          await col.deleteById(idToDelete);
+        }
+        return result;
+      };
+
+      const result = await exec("db_migrate", {
+        collection: "migrate-deleted",
+        ops: [{ op: "set", field: "x", value: 99 }],
+      });
+
+      (col as unknown as { find: unknown }).find = origFind;
+
+      expect(result.scanned).toBe(2);
+      expect(result.failed).toBe(1);
+      expect(result.updated).toBe(1);
+      expect(result.errors[0].id).toBe(idToDelete);
+      expect(result.errors[0].error).toBe("record deleted before migration");
+    });
   });
 
   describe("db_infer_schema", () => {
