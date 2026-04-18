@@ -979,6 +979,21 @@ describe("Tool Definitions", () => {
       expect(result.proposed.fields?._version).toBeUndefined();
       expect(result.proposed.fields?.x).toBeDefined();
     });
+
+    it("emits note when collection already has a persisted schema", async () => {
+      await exec("db_insert", { collection: "infer-existing", records: [{ x: 1 }] });
+      await exec("db_set_schema", {
+        collection: "infer-existing",
+        schema: { version: 2, fields: { x: { type: "number" } } },
+        agent: "admin",
+      });
+      const result = await exec("db_infer_schema", { collection: "infer-existing" });
+      const note = result.notes.find((n: string) => n.includes("already has a persisted schema"));
+      expect(note).toBeDefined();
+      expect(note).toContain("version 2");
+      expect(note).toContain("db_diff_schema");
+      expect(note).toContain("db_set_schema");
+    });
   });
 
   describe("db_distinct", () => {

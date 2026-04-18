@@ -848,6 +848,13 @@ export function getTools(db: AgentDB): AgentTool[] {
         const totalRecords = await col.count();
         const notes: string[] = [];
 
+        // Warn when a persisted schema already exists
+        const existingSchema = await db.loadPersistedSchema(colName);
+        if (existingSchema !== undefined) {
+          const versionPart = existingSchema.version !== undefined ? ` (version ${existingSchema.version})` : "";
+          notes.push(`Collection already has a persisted schema${versionPart}. Use db_diff_schema to compare or db_set_schema to replace.`);
+        }
+
         // Sampling: scan-all when totalRecords ≤ sampleSize, otherwise random offset
         let records: Record<string, unknown>[];
         if (totalRecords === 0) {
