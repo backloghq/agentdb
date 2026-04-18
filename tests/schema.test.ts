@@ -1301,4 +1301,35 @@ describe("mergePersistedSchemas", () => {
     const result = mergePersistedSchemas({ name: "t" }, { name: "t" });
     expect(Object.keys(result)).toEqual(["name"]);
   });
+
+  it("overlay required:false explicitly clears base required:true", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", fields: { title: { type: "string", required: true } } },
+      { name: "t", fields: { title: { type: "string", required: false } } },
+    );
+    expect(result.fields?.title.required).toBeFalsy();
+  });
+
+  it("empty fields:{} in overlay preserves base fields (same as no fields key)", () => {
+    const withEmpty = mergePersistedSchemas(
+      { name: "t", fields: { title: { type: "string", description: "keep" } } },
+      { name: "t", fields: {} },
+    );
+    const withAbsent = mergePersistedSchemas(
+      { name: "t", fields: { title: { type: "string", description: "keep" } } },
+      { name: "t" },
+    );
+    expect(withEmpty.fields?.title).toEqual({ type: "string", description: "keep" });
+    expect(withAbsent.fields?.title).toEqual({ type: "string", description: "keep" });
+  });
+
+  it("overlay type wins for same field without emitting warnings (no MergeResult)", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", fields: { count: { type: "string" } } },
+      { name: "t", fields: { count: { type: "number" } } },
+    );
+    expect(result.fields?.count.type).toBe("number");
+    // mergePersistedSchemas returns PersistedSchema, not MergeResult — no warnings property
+    expect((result as Record<string, unknown>).warnings).toBeUndefined();
+  });
 });
