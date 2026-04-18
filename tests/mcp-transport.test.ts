@@ -1,8 +1,9 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startHttp } from "../src/mcp/index.js";
+import { startHttp, createMcpServer } from "../src/mcp/index.js";
+import { AgentDB } from "../src/agentdb.js";
 
 let tmpDir: string;
 let close: (() => Promise<void>) | undefined;
@@ -187,5 +188,41 @@ describe("MCP HTTP Transport", () => {
       const body = await res.json();
       expect(body.error).toContain("Invalid session");
     });
+  });
+});
+
+describe("createMcpServer — instructions", () => {
+  let db: AgentDB;
+  let dbDir: string;
+
+  beforeEach(async () => {
+    dbDir = await mkdtemp(join(tmpdir(), "agentdb-mcp-instr-"));
+    db = new AgentDB(dbDir);
+    await db.init();
+  });
+
+  afterEach(async () => {
+    await db.close();
+    await rm(dbDir, { recursive: true, force: true });
+  });
+
+  it("server instructions mention all 5 v1.3 schema lifecycle tools", () => {
+    const server = createMcpServer(db);
+    const instructions: string = (server.server as unknown as { _instructions: string })._instructions;
+
+    expect(instructions).toContain("db_get_schema");
+    expect(instructions).toContain("db_set_schema");
+    expect(instructions).toContain("db_diff_schema");
+    expect(instructions).toContain("db_infer_schema");
+    expect(instructions).toContain("db_delete_schema");
+  });
+
+  it("server instructions include discovery and query guidance", () => {
+    const server = createMcpServer(db);
+    const instructions: string = (server.server as unknown as { _instructions: string })._instructions;
+
+    expect(instructions).toContain("db_collections");
+    expect(instructions).toContain("db_find");
+    expect(instructions).toContain("db_insert");
   });
 });

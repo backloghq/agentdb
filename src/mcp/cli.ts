@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { readdir } from "node:fs/promises";
+import { dirname, basename, resolve, join } from "node:path";
 import { startStdio, startHttp } from "./index.js";
 import type { AgentDBOptions } from "../agentdb.js";
 
@@ -26,6 +28,43 @@ let writeMode = process.env.AGENTDB_WRITE_MODE ?? "immediate";
 // Embeddings
 let embeddings = process.env.AGENTDB_EMBEDDINGS ?? "";
 
+// Schema bootstrap
+const schemaGlobs: string[] = [];
+
+if (args.includes("--help") || args.includes("-h")) {
+  process.stdout.write(`
+AgentDB MCP server
+
+Usage:
+  npx agentdb [options]
+
+Options:
+  --path <dir>              Data directory (default: ./agentdb-data or AGENTDB_PATH)
+  --http                    Use HTTP transport instead of stdio
+  --port <n>                HTTP port (default: 3000)
+  --host <addr>             HTTP host (default: 127.0.0.1)
+  --backend <type>          Storage backend: fs or s3 (default: fs or AGENTDB_BACKEND)
+  --bucket <name>           S3 bucket name (required for --backend s3)
+  --prefix <path>           S3 key prefix
+  --region <region>         AWS region for S3
+  --agent-id <id>           Agent ID for multi-writer mode
+  --auth-token <token>      Bearer token for HTTP authentication
+  --rate-limit <n>          Max requests/minute per IP (HTTP only)
+  --cors <origins>          Comma-separated allowed CORS origins
+  --write-mode <mode>       Write mode: immediate (default), group, or async
+  --group-commit            Alias for --write-mode group
+  --embeddings <p[:model]>  Embedding provider: ollama, openai, voyage, cohere, gemini, http
+  --schemas <glob>          Schema JSON files to load on startup (repeatable, supports * and ?)
+  --help, -h                Show this help message
+
+Environment variables: AGENTDB_PATH, AGENTDB_BACKEND, AGENTDB_S3_BUCKET,
+  AGENTDB_S3_PREFIX, AGENTDB_S3_REGION, AGENTDB_AGENT_ID, AGENTDB_AUTH_TOKEN,
+  AGENTDB_RATE_LIMIT, AGENTDB_CORS_ORIGINS, AGENTDB_WRITE_MODE, AGENTDB_EMBEDDINGS,
+  AGENTDB_EMBEDDINGS_API_KEY, AGENTDB_OLLAMA_URL, AWS_REGION
+`.trimStart());
+  process.exit(0);
+}
+
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   const next = args[i + 1];
@@ -44,6 +83,29 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === "--write-mode" && next) { writeMode = next; i++; }
   else if (arg === "--group-commit") { writeMode = "group"; }
   else if (arg === "--embeddings" && next) { embeddings = next; i++; }
+  else if (arg === "--schemas" && next) { schemaGlobs.push(next); i++; }
+}
+
+/** Resolve a glob pattern (supports `*` and `?` in the filename) to absolute file paths. */
+async function resolveGlob(pattern: string): Promise<string[]> {
+  const abs = resolve(pattern);
+  const dir = dirname(abs);
+  const file = basename(abs);
+
+  if (!file.includes("*") && !file.includes("?")) return [abs];
+
+  const regexStr = file
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  const re = new RegExp(`^${regexStr}$`);
+
+  try {
+    const entries = await readdir(dir);
+    return entries.filter(e => re.test(e)).map(e => join(dir, e));
+  } catch {
+    return [];
+  }
 }
 
 async function resolveBackend(): Promise<AgentDBOptions> {
@@ -98,6 +160,8 @@ async function resolveBackend(): Promise<AgentDBOptions> {
 async function main(): Promise<void> {
   const dbOpts = await resolveBackend();
 
+  const resolvedPaths = (await Promise.all(schemaGlobs.map(resolveGlob))).flat();
+
   if (mode === "http") {
     await startHttp(dataDir, {
       port,
@@ -106,12 +170,13 @@ async function main(): Promise<void> {
       authToken: authToken || undefined,
       rateLimit: rateLimit || undefined,
       corsOrigins: corsOrigins ? corsOrigins.split(",").map((s) => s.trim()) : undefined,
+      schemaPaths: resolvedPaths.length > 0 ? resolvedPaths : undefined,
     });
     console.error(`AgentDB MCP server running on http://${host}:${port}/mcp`);
     if (authToken) console.error("Authentication: bearer token required");
     if (rateLimit) console.error(`Rate limit: ${rateLimit} requests/minute`);
   } else {
-    await startStdio(dataDir, dbOpts);
+    await startStdio(dataDir, dbOpts, resolvedPaths.length > 0 ? { schemaPaths: resolvedPaths } : undefined);
   }
 }
 

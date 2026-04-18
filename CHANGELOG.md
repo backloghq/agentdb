@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+## [1.3.0] - 2026-04-18
+
+### Added
+
+#### Persisted schemas
+- **Persisted schemas** — schemas stored as `{dbPath}/meta/{collection}.schema.json`. Auto-persisted on first `defineSchema()` open, survives restart.
+- **Agent context on schemas** — `description`, `instructions` on collections, `description` on fields. Any agent can discover how to use a collection via `db_get_schema`.
+- **Schema version tracking** — `version` field on schemas, warnings on mismatch between code-level and persisted schemas.
+- **`PersistedSchema` / `PersistedFieldDef` interfaces** — JSON-serializable schema subset (no functions, RegExp, or non-static defaults).
+- **`extractPersistedSchema()`** — extract serializable parts from a `SchemaDefinition`.
+- **`validatePersistedSchema()`** — validate schema structure loaded from JSON.
+- **`mergeSchemas()`** — merge code-level and persisted schemas with clear precedence rules. Persisted wins for agent context, code wins for runtime config, indexes unioned.
+- **`mergePersistedSchemas(base, overlay)`** — merge two `PersistedSchema` objects with overlay semantics. Overlay wins per-property (not per-field), so updating one field property (e.g. `type`) preserves untouched properties (e.g. `description`, `required`). Indexes are unioned. Exported from main package.
+- **`loadSchemaFromJSON()` / `exportSchemaToJSON()`** — portable JSON import/export for schema definitions.
+- **Admin-guarded schema modifications** — `persistSchema` and `deletePersistedSchema` require admin permission when called with agent identity.
+- **`AgentDB.persistSchema()` / `loadPersistedSchema()` / `deletePersistedSchema()`** — programmatic schema persistence API.
+- **`AgentDB.getSchema()`** — access in-memory compiled schema for a collection.
+- **`AgentDB.getCollectionNames()`** — lightweight getter returning active collection names without opening any collections. Used by `db_diff_schema` to detect non-existent collections without creating them as a side effect.
+- **`CollectionSchema.definition`** — retains original `SchemaDefinition` for persistence extraction.
+
+#### Schema bootstrap (drop-in JSON files)
+- **Schema bootstrap auto-discover** — `db.init()` now scans `<dataDir>/schemas/*.json` on startup. Valid files are loaded as persisted schemas (file acts as overlay via `mergePersistedSchemas`). Missing directory is silently ignored; bad files are logged and skipped without aborting init.
+- **`AgentDB.loadSchemasFromFiles(paths)`** — load a list of JSON schema files into persisted storage. Per-file isolation, filename-derived name fallback, file-as-overlay precedence. Returns `{ loaded, skipped, failed }`. Exported as `SchemaLoadResult` type.
+- **`SchemaLoadResult` type** exported from main package.
+- **`--schemas <glob>` CLI flag** — load schema JSON files at startup. Multiple `--schemas` flags allowed (results unioned). Supports `*`/`?` glob wildcards. Per-file failures do not abort startup. Overlays on top of auto-discovered `schemas/` files. Works with both `stdio` and `--http` transports.
+- **`schemaPaths` option on `startHttp`/`startStdio`** — programmatic equivalent of `--schemas`. `startHttp` now returns `db` in its result object.
+- **`--help` / `-h` CLI flag** — prints usage and all flags to stdout, exits 0.
+- **`loadSchemasFromFiles` name-mismatch warning** — emits `console.warn` when a file's explicit `name` field differs from the filename-derived name. The file's `name` still wins (overlay semantics); the warning is informational.
+- **`loadSchemasFromFiles` `skipped` semantics** — files are now counted as `skipped` (not `loaded`) when the merged schema is structurally identical to the existing persisted schema. Uses key-sorted JSON for the comparison to avoid false mismatches from key-ordering differences.
+- **E2E subprocess test for `--schemas` argv** — spawns `dist/mcp/cli.js` with `--schemas <path>` and verifies schema is persisted and queryable via `db_get_schema` MCP tool call. Also covers multiple `--schemas` flags.
+
+#### Schema tools (agent UX)
+- **`db_get_schema` tool** — read-only tool returns full persisted schema with context, instructions, fields, and indexes.
+- **`db_set_schema` tool** — admin-only tool to create or update persisted schema with partial merge support.
+- **`db_delete_schema` tool** — admin-only tool to delete the persisted schema for a collection. Idempotent (no-op if none exists). Returns `{ deleted: boolean }`.
+- **`db_diff_schema` tool** — read-only tool that previews what `db_set_schema` would change before committing. Uses `mergePersistedSchemas` internally (same semantics as `db_set_schema`), so partial candidates correctly show no-change for omitted fields. Returns `{ added, removed, changed, warnings, impact? }` with declared `outputSchema`. `warnings` covers type changes (high), removed enum values (high), new required fields (medium), tightened constraints (medium), removed fields (medium), and removed description/instructions (low). `includeImpact: true` (default) queries the collection for affected record counts embedded in warnings and an `impact` summary; `maxLength`/`min`/`max` impact scans use `col.count()` with `$strLen`/`$gt`/`$lt` pushdown filters.
+- **`db_migrate` tool** — declarative bulk record update via 5 ordered ops: `set`, `unset`, `rename`, `default`, `copy`. Per-record atomicity; validation fires normally; schema-violating records land in `errors[]`. `dryRun: true` returns counts without writing. `batchSize` (default 100) bounds memory. Agent/reason stamped on each written record; `_version` optimistic locking honored. Protected meta-fields (`_id`, `_version`, `_agent`, `_reason`, `_expires`, `_embedding`) silently skipped. Matching records are snapshotted by ID at migration start — all matches processed even if ops cause records to leave the filter mid-run; snapshot versions used for optimistic locking so concurrent writes to the same record fail into `errors[]`. Records deleted between snapshot and processing also land in `errors[]` with `"record deleted before migration"` so the invariant `scanned == updated + unchanged + failed` always holds.
+- **`db_infer_schema` tool** — samples existing records and proposes a `PersistedSchema` (cold-start schema bootstrap). Detects `boolean`, `number`, `string` (with `maxLength`), `date` (ISO prefix heuristic `/^\d{4}-\d{2}-\d{2}(T|Z|$)/` to avoid space-separator false positives), `enum` (distinct count ≤ `enumThreshold`), `string[]`, `number[]`, `object`. Marks fields `required` when presence fraction ≥ `requiredThreshold` (default 0.95). Mixed-type fields are skipped with a note. Uses Vitter's Algorithm R reservoir sampling for uniform random selection when `totalRecords > sampleSize`. Emits a note when the collection already has a persisted schema, pointing to `db_diff_schema` and `db_set_schema`. Output `proposed` schema passes `validatePersistedSchema` and can be forwarded directly to `db_set_schema`. READ permission, no mutation.
+- **Enhanced `db_collections` tool** — now includes schema summary (description, field count, has instructions, version) per collection.
+
+#### Filter operators
+- **`$strLen` operator** — compares the character length of a string field. Accepts a number (exact match) or operator object (`{ $gt: N }`, `{ $gte: N, $lte: M }`, etc.). Non-string values return false. Used internally by `db_diff_schema` for `maxLength` impact scans. Also available in compact-filter syntax: `field.strLen:N` (exact) and `field.strLen.op:N` (e.g. `title.strLen.gt:10`). Performance characteristic: latency is comparable to manual `find()` + JS-side filtering in both in-memory and disk-backed mode (benchmarked: ~0.8ms for 10K records in-memory, ~58ms for 100K records from Parquet); the primary benefit is ergonomics (inline pushdown syntax) rather than a throughput advantage.
+
+### Fixed
+- **`db_set_schema` field-property preservation** — partial schema updates no longer drop untouched field properties. Previously `{ title: { type: "string" } }` overwrote the entire field, losing `required`, `description`, etc. Now uses `mergePersistedSchemas()` with per-property overlay semantics.
+- **Schema cleanup on drop/purge** — `dropCollection()` now deletes the persisted schema file; `purgeCollection()` defensively removes it too.
+- **`db_migrate` pagination correctness** — original offset-based pagination silently dropped records when migrations changed a filter-matched field. Replaced with two-phase snapshot approach (collect IDs first, then process by `$in` with snapshot versions for optimistic locking) so all matching records at migration start are processed.
+- **`db_infer_schema` O(N²) → O(N)** — original offset-based pagination scaled quadratically (446ms at 50K records, ~40s extrapolated at 1M). Root cause: `find()` with offset scans all matching records before slicing. Replaced with single-pass `col.iterate()` async generator + Algorithm R reservoir sampling. Disk-mode memory stays O(`sampleSize`) by streaming from `DiskStore.entries()` rather than loading the full collection.
+- **`db_migrate` ops cap** — `ops` array now limited to 100 elements (Zod schema + runtime guard); exceeding the limit returns a validation error. Prevents CPU exhaustion from oversized op lists.
+- **`db_migrate` prototype-pollution guard** — `__proto__`, `constructor`, and `prototype` added to PROTECTED set; ops targeting these fields are silently skipped, preventing in-memory prototype-chain corruption during `applyOps`.
+- **`loadSchemasFromFiles` 10MB size cap** — files larger than 10MB are skipped before `readFile` (logged warning + `failed[]` entry with `"file size exceeds 10MB limit"`). Prevents accidental OOM from oversized schema files.
+- **Unified `_agent` audit stamp** — `makeSafe()` now stamps the authenticated identity (from auth context) on records, instead of self-reported `args.agent`. Previously HTTP-authenticated agents could record any string in `_agent` even though the permission gate used the real auth identity. Behavior: auth identity always wins; library/no-auth callers retain `args.agent` unchanged.
+- **`persistSchema` concurrent-write race** — tmp file name now includes pid + timestamp + random suffix to guarantee uniqueness per write. Rename is wrapped in try/catch: on failure, tmp is cleaned up with `rm({ force: true })`. Previously, concurrent writes on the same collection could share a `.tmp` filename when `Date.now()` collided within the same millisecond, causing silent content corruption and ENOENT on the loser's rename. Negative-path test verifies the cleanup fires on rename failure.
+- **Path sanitization regex in error messages** — changed `/\/[^\s'":]+\//g` to `/\/[^\s'":]+/g` (drop trailing-slash requirement). The old regex only stripped path prefixes with a trailing slash, leaving terminal filenames (e.g. `tickets.schema.json`) visible in tool error messages — exposing collection names. The new regex strips the full path including the filename.
+- **Orphaned `meta/*.tmp` cleanup on init** — `AgentDB.init()` scans `meta/` for `*.tmp` files after creating the directory and removes them with `rm({force:true})`. Prevents accumulation of tmp files left by hard crashes between `writeFile` and `rename` in `persistSchema` or `writeMeta`.
+- **`writeMeta()` unique tmp filename** — changed static `manifest.json.tmp` to `pid+timestamp+random.tmp` (same pattern as `persistSchema` from the second-pass fix). Prevents concurrent writers in multi-process deployments (shared data directory) from clobbering each other's in-flight writes. Rename failure cleans up tmp and re-throws.
+
+### Internal
+- **`src/tools/index.ts` split into per-domain modules** — `shared.ts` (types, `makeSafe`, `getAgent`, shared schemas/annotations), `admin.ts`, `crud.ts`, `schema.ts`, `migrate.ts`, `archive.ts`, `vector.ts`, `blob.ts`, `backup.ts`. `index.ts` is now a pure aggregator. Public API (`getTools`, `AgentTool`, `ToolResult`) unchanged. Canonical tool order locked via snapshot test: admin → crud → schema → migrate → archive → vector → blob → backup.
+- **`tests/tools.test.ts` and `tests/schema.test.ts` split** — test files mirror the source split: `tests/tools/{admin,crud,schema,migrate,archive,vector,blob,backup}.test.ts` and `tests/schema-lib/{define,persist,merge,validate,bootstrap,json-io}.test.ts`. Pure structural move; same test count (997).
+- **`Collection.iterate()`** — new async-iterable method streams records sequentially from in-memory or disk-backed storage without buffering more than one row-group's worth in memory. Used internally by `db_infer_schema`; available for future tools needing memory-bounded full scans.
+- **`getAgent(args)` helper** — exported from `src/tools/shared.ts` to DRY the repeated `args.agent as string | undefined` cast across mutation tool handlers.
+- **`PersistedSchema` forward-compat policy** — `validatePersistedSchema` is documented as lenient on unknown top-level and field-level properties; `persistSchema` round-trip preserves unknowns. Future agentdb versions can add optional schema fields without breaking older installations reading those files. Verified by unit tests + a round-trip integration test.
+- **README: Schema lifecycle for agents** — new section walks through the 6-step workflow (define → persist → discover → diff → migrate → infer) with code examples and library API references for `loadSchemasFromFiles`, `mergePersistedSchemas`, and `mergeSchemas`.
+- **README: Authentication — agent identity** — new sub-section documents that over an authenticated HTTP transport, the `agent` parameter is silently overridden with the authenticated identity (3-row behavior matrix).
+- **`code-review` example refreshed for v1.3** — `defineSchema` with `description`/`instructions`/per-field descriptions; example README walks through the 3-step lifecycle (define, auto-persist, agent discovery via `db_get_schema`).
+- **JSDoc on merge functions** — `mergeSchemas` and `mergePersistedSchemas` now document precedence rules and when to use each.
+- **MCP server instructions rewrite** — `createMcpServer` emits a 5-step "Start here" block: `db_collections` → `db_get_schema` → `db_find`/`db_find_one` → mutations → schema lifecycle (`db_set_schema`, `db_diff_schema`, `db_infer_schema`, `db_delete_schema`). Regression tests verify all schema lifecycle tool names appear.
+- **Schema terminology disambiguation** — README and CLAUDE.md now clearly distinguish `defineSchema()` (code-level, never serialized), `PersistedSchema` (JSON subset in `meta/`), and `db_schema` (samples records dynamically).
+- **README reorder** — "Schema Lifecycle for Agents" section moved to appear immediately before "Tool Definitions" so the lifecycle walkthrough directly precedes the tool reference.
+- **`db_distinct` indexing guidance** — tool description now advises adding an index on the target field to avoid a full scan on large collections.
+- **`validateCollectionName` dead-code removal** — removed redundant `name.includes("..")` check; `VALID_NAME_RE` already rejects all dots.
+- **Bench drift detection fix** — stress bench uses p99 (not p50) for find-latency drift comparison, with a 0.5ms floor. Eliminates false `>2×` alarms on sub-millisecond baselines.
+
 ## [1.2.1] - 2026-04-11
 
 ### Fixed
@@ -84,7 +160,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Configurable tagField** — `tagField: "labels"` in schema changes which field `+tag`/`-tag` queries target. Default: "tags".
 - **`upsertMany()`** — atomic bulk create-or-update. Each doc must have `_id`.
 - **Blob storage** — `writeBlob(id, name, content)`, `readBlob()`, `listBlobs()`, `deleteBlob()`. Stores files outside the WAL via StorageBackend — works on both filesystem and S3 transparently. Cascade delete: blobs auto-cleaned when records are deleted. For attaching code, images, PDFs to records.
-- **MCP blob tools** — `db_blob_write` (base64 content), `db_blob_read`, `db_blob_list`, `db_blob_delete`. 32 tools total (30 core + 2 HTTP-only).
+- **MCP blob tools** — `db_blob_write` (base64 content), `db_blob_read`, `db_blob_list`, `db_blob_delete`.
 
 ### Fixed
 - **Compact filter `tagField` propagation** — `+tag`/`-tag` syntax now correctly uses the schema's `tagField` setting. Previously always queried "tags" regardless of configuration.
@@ -262,7 +338,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 **Memory monitoring:**
 - `MemoryMonitor` with per-collection budgets wired into AgentDB
 
-**Tools (24 total):**
+**Tools:**
 - CRUD: db_insert, db_find, db_find_one, db_update, db_upsert, db_delete, db_count, db_batch
 - Collections: db_collections, db_create, db_drop, db_purge
 - History: db_undo, db_history
@@ -290,7 +366,5 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - Async mutation serializer, ftruncate undo, advisory directory lock, readOnly mode
 
 **Testing:**
-- 468 tests across 15 test files
-- 25 e2e tests (MCP server over JSON-RPC, 21 of 24 tools tested)
 - 15 performance benchmarks
 - 94.5% line coverage

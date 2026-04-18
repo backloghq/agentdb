@@ -68,9 +68,52 @@ All coordination happens through AgentDB — each agent subscribes to its input 
 | `ollama.ts` | Ollama wrapper |
 | `mcp-client.ts` | MCP client using @modelcontextprotocol/sdk |
 
+## Schema Lifecycle
+
+This example shows three v1.3 schema lifecycle steps using the `reviews` collection:
+
+**Step 1 — Define with context**: `server.ts` defines the schema with `description`, `instructions`, and per-field `description` so agents understand the collection's purpose without reading source code:
+
+```typescript
+defineSchema({
+  name: "reviews",
+  version: 1,
+  description: "Security and quality reviews produced by the Reviewer agent.",
+  instructions: "Each record corresponds to one code_submissions record. Query by submission_id to find the review for a given submission.",
+  fields: {
+    submission_id: { type: "string", required: true, description: "ID of the code_submissions record being reviewed" },
+    severity: { type: "enum", values: ["low","medium","high","critical"], required: true, description: "Worst-case issue severity" },
+    approved: { type: "boolean", required: true, description: "True if no blocking issues found" },
+  },
+});
+```
+
+**Step 2 — Persistence**: On first `db.collection(reviewsSchema)`, the schema is automatically written to `review-data/meta/reviews.schema.json`. It can be committed to source control and loaded at startup — agents read it without touching the codebase.
+
+**Step 3 — Discovery via `db_get_schema`**: Any agent can discover the collection at runtime:
+
+```json
+// Tool call: db_get_schema { "collection": "reviews" }
+// Response:
+{
+  "schema": {
+    "name": "reviews",
+    "description": "Security and quality reviews produced by the Reviewer agent.",
+    "instructions": "Each record corresponds to one code_submissions record...",
+    "fields": {
+      "submission_id": { "type": "string", "required": true, "description": "ID of the code_submissions record being reviewed" },
+      "severity": { "type": "enum", "values": ["low","medium","high","critical"], "required": true },
+      "approved": { "type": "boolean", "required": true }
+    }
+  },
+  "hasCodeSchema": true
+}
+```
+
 ## AgentDB Features Used
 
 - `db_subscribe` + SSE notifications for pipeline triggering
 - Optimistic locking (`expectedVersion`) for stage claiming
 - Per-agent auth tokens (coder, reviewer, tester)
 - Status tracking (`pending` → `processing` → `coded` → `reviewed` → `tested`)
+- Schema with agent context (`description`, `instructions`, per-field `description`)

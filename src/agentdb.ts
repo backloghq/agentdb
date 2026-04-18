@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Store } from "@backloghq/opslog";
 import type { StorageBackend } from "@backloghq/opslog";
@@ -8,18 +8,27 @@ import type { EmbeddingConfig, EmbeddingProvider } from "./embeddings/index.js";
 import { resolveProvider } from "./embeddings/index.js";
 import { PermissionManager } from "./permissions.js";
 import type { AgentPermissions } from "./permissions.js";
-import type { CollectionSchema } from "./schema.js";
+import type { CollectionSchema, PersistedSchema } from "./schema.js";
+import { extractPersistedSchema, validatePersistedSchema, mergeSchemas, mergePersistedSchemas } from "./schema.js";
 import { MemoryMonitor } from "./memory.js";
 import type { MemoryStats } from "./memory.js";
 import { DiskStore } from "./disk-store.js";
 
 const META_DIR = "meta";
+
+/** Key-sorted JSON serialization for structural equality checks independent of key order. */
+function canonicalJSON(val: unknown): string {
+  if (val === null || typeof val !== "object") return JSON.stringify(val);
+  if (Array.isArray(val)) return "[" + (val as unknown[]).map(canonicalJSON).join(",") + "]";
+  const keys = Object.keys(val as object).sort();
+  return "{" + keys.map(k => `${JSON.stringify(k)}:${canonicalJSON((val as Record<string, unknown>)[k])}`).join(",") + "}";
+}
 const COLLECTIONS_DIR = "collections";
 const DROPPED_PREFIX = "_dropped_";
 const VALID_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 
 function validateCollectionName(name: string): void {
-  if (!name || !VALID_NAME_RE.test(name) || name.includes("..")) {
+  if (!name || !VALID_NAME_RE.test(name)) {
     throw new Error(`Invalid collection name '${name}'. Must be alphanumeric with hyphens/underscores, no path traversal.`);
   }
 }
@@ -60,6 +69,19 @@ export interface AgentDBOptions {
 export interface CollectionInfo {
   name: string;
   recordCount: number;
+}
+
+export interface SchemaLoadResult {
+  /** Number of schema files that resulted in a persisted schema change. */
+  loaded: number;
+  /**
+   * Number of files that were valid but produced no change — either because no
+   * valid collection name could be derived, or because the merged result was
+   * byte-identical to the already-persisted schema (true no-op).
+   */
+  skipped: number;
+  /** Files that could not be loaded due to parse or validation errors. */
+  failed: Array<{ path: string; error: string }>;
 }
 
 export interface ExportData {
@@ -142,8 +164,40 @@ export class AgentDB {
   async init(): Promise<void> {
     await mkdir(join(this.dir, META_DIR), { recursive: true });
     await mkdir(join(this.dir, COLLECTIONS_DIR), { recursive: true });
+
+    // Remove orphaned .tmp files left by crashed persistSchema or writeMeta calls
+    const metaEntries = await readdir(join(this.dir, META_DIR));
+    await Promise.all(
+      metaEntries
+        .filter(f => f.endsWith(".tmp"))
+        .map(f => rm(join(this.dir, META_DIR, f), { force: true }))
+    );
+
     this.meta = await this.readMeta();
     this._opened = true;
+
+    // Auto-discover schemas from <dataDir>/schemas/*.json
+    const schemasDir = join(this.dir, "schemas");
+    try {
+      const entries = await readdir(schemasDir);
+      const jsonPaths = entries
+        .filter(f => f.endsWith(".json"))
+        .map(f => join(schemasDir, f));
+      if (jsonPaths.length > 0) {
+        const result = await this.loadSchemasFromFiles(jsonPaths);
+        const parts: string[] = [`loaded ${result.loaded}`];
+        if (result.skipped > 0) parts.push(`skipped ${result.skipped}`);
+        if (result.failed.length > 0) {
+          parts.push(`failed ${result.failed.length}`);
+          for (const f of result.failed) {
+            console.warn(`[agentdb] schema load failed (${f.path}): ${f.error}`);
+          }
+        }
+        console.log(`[agentdb] schemas/*.json: ${parts.join(", ")}`);
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
   }
 
   /**
@@ -390,6 +444,20 @@ export class AgentDB {
       await this.writeMeta();
     }
 
+    // Auto-persist schema when collection is opened with defineSchema()
+    if (schema?.definition) {
+      const existing = await this.loadPersistedSchema(name);
+      if (!existing) {
+        // First time: extract and persist
+        await this.persistSchema(name, extractPersistedSchema(schema.definition));
+      } else {
+        // Merge code + persisted, warn on mismatches
+        const { persisted: merged, warnings } = mergeSchemas(schema.definition, existing);
+        for (const w of warnings) console.warn(`[AgentDB] ${w}`);
+        await this.persistSchema(name, merged);
+      }
+    }
+
     return col;
   }
 
@@ -434,6 +502,8 @@ export class AgentDB {
     this.meta.collections = this.meta.collections.filter((c) => c !== name);
     this.meta.dropped.push(droppedName);
     await this.writeMeta();
+    await this.deletePersistedSchema(name);
+    this.schemas.delete(name);
   }
 
   /** Permanently delete a soft-dropped collection. */
@@ -448,6 +518,9 @@ export class AgentDB {
     await rm(droppedDir, { recursive: true, force: true });
     this.meta.dropped = this.meta.dropped.filter((d) => d !== match);
     await this.writeMeta();
+    // Defensively remove the schema file using the original collection name
+    const originalName = match.slice(DROPPED_PREFIX.length).replace(/_\d+$/, "");
+    await this.deletePersistedSchema(originalName);
   }
 
   /** List all active collections with record counts. */
@@ -461,10 +534,153 @@ export class AgentDB {
     return infos;
   }
 
+  /** Return active collection names without opening them. */
+  getCollectionNames(): string[] {
+    this.ensureOpen();
+    return [...this.meta.collections];
+  }
+
   /** List soft-deleted collection names. */
   listDropped(): string[] {
     this.ensureOpen();
     return [...this.meta.dropped];
+  }
+
+  // --- Schema persistence ---
+
+  /**
+   * Persist a schema for a collection. Writes to meta/{name}.schema.json.
+   * Requires admin permission when called via tools (agent parameter).
+   * Internal calls (auto-persist on collection open) skip the permission check.
+   */
+  async persistSchema(collectionName: string, schema: PersistedSchema, opts?: { agent?: string }): Promise<void> {
+    this.ensureOpen();
+    if (opts?.agent) this.permissions.require(opts.agent, "admin", "persistSchema");
+    validateCollectionName(collectionName);
+    validatePersistedSchema(schema);
+    const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
+    const tmpPath = `${schemaPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+    await writeFile(tmpPath, JSON.stringify(schema, null, 2), "utf-8");
+    try {
+      await rename(tmpPath, schemaPath);
+    } catch (err) {
+      await rm(tmpPath, { force: true });
+      throw err;
+    }
+  }
+
+  /** Load the persisted schema for a collection. Returns undefined if none stored. */
+  async loadPersistedSchema(collectionName: string): Promise<PersistedSchema | undefined> {
+    this.ensureOpen();
+    validateCollectionName(collectionName);
+    const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
+    try {
+      const content = await readFile(schemaPath, "utf-8");
+      const parsed = JSON.parse(content);
+      validatePersistedSchema(parsed);
+      return parsed;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw err;
+    }
+  }
+
+  /** Delete the persisted schema for a collection. No-op if none exists. */
+  async deletePersistedSchema(collectionName: string, opts?: { agent?: string }): Promise<void> {
+    this.ensureOpen();
+    if (opts?.agent) this.permissions.require(opts.agent, "admin", "deletePersistedSchema");
+    validateCollectionName(collectionName);
+    const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
+    try {
+      await rm(schemaPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+
+  /**
+   * Load schemas from a list of JSON file paths into persisted storage.
+   * File content acts as an overlay: file properties win per-property via mergePersistedSchemas.
+   * If a file has no `name` field, the collection name is derived from the filename (without .json).
+   * Per-file isolation: one bad file never blocks the rest.
+   */
+  async loadSchemasFromFiles(paths: string[]): Promise<SchemaLoadResult> {
+    this.ensureOpen();
+    let loaded = 0;
+    let skipped = 0;
+    const failed: Array<{ path: string; error: string }> = [];
+
+    for (const filePath of paths) {
+      const basename = filePath.replace(/\\/g, "/").split("/").pop() ?? "";
+      const derivedName = basename.endsWith(".json") ? basename.slice(0, -5) : basename;
+
+      try {
+        const fileStats = await stat(filePath);
+        if (fileStats.size > 10 * 1024 * 1024) {
+          console.warn(`[agentdb] schema file ${filePath}: file size exceeds 10MB limit (${fileStats.size} bytes), skipping`);
+          failed.push({ path: filePath, error: "file size exceeds 10MB limit" });
+          continue;
+        }
+        const content = await readFile(filePath, "utf-8");
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(content);
+        } catch (err) {
+          failed.push({ path: filePath, error: `JSON parse error: ${err instanceof Error ? err.message : String(err)}` });
+          continue;
+        }
+
+        // Inject filename-derived name if absent; warn if explicit name disagrees with derived
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+          const rec = parsed as Record<string, unknown>;
+          if (!("name" in rec)) {
+            if (!VALID_NAME_RE.test(derivedName)) {
+              skipped++;
+              continue;
+            }
+            rec.name = derivedName;
+          } else if (typeof rec.name === "string" && rec.name !== derivedName) {
+            console.warn(`[agentdb] schema file ${filePath}: name field "${rec.name}" disagrees with filename-derived "${derivedName}"`);
+          }
+        }
+
+        try {
+          validatePersistedSchema(parsed);
+        } catch (err) {
+          failed.push({ path: filePath, error: `Validation error: ${err instanceof Error ? err.message : String(err)}` });
+          continue;
+        }
+
+        const fileSchema = parsed as PersistedSchema;
+
+        try {
+          validateCollectionName(fileSchema.name);
+        } catch (err) {
+          failed.push({ path: filePath, error: err instanceof Error ? err.message : String(err) });
+          continue;
+        }
+
+        const existing = await this.loadPersistedSchema(fileSchema.name);
+        const merged = existing ? mergePersistedSchemas(existing, fileSchema) : fileSchema;
+        // Skip write when merged result is structurally identical to existing (true no-op).
+        // Uses key-sorted serialization to avoid false mismatches from key-order differences.
+        if (existing && canonicalJSON(merged) === canonicalJSON(existing)) {
+          skipped++;
+          continue;
+        }
+        await this.persistSchema(fileSchema.name, merged);
+        loaded++;
+      } catch (err) {
+        failed.push({ path: filePath, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    return { loaded, skipped, failed };
+  }
+
+  /** Get the in-memory schema for a collection (from defineSchema). */
+  getSchema(collectionName: string): CollectionSchema | undefined {
+    return this.schemas.get(collectionName);
   }
 
   /** Database-level stats. */
@@ -639,9 +855,14 @@ export class AgentDB {
 
   private async writeMeta(): Promise<void> {
     const metaPath = join(this.dir, META_DIR, "manifest.json");
-    const tmpPath = metaPath + ".tmp";
+    const tmpPath = `${metaPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     await writeFile(tmpPath, JSON.stringify(this.meta, null, 2), "utf-8");
-    await rename(tmpPath, metaPath);
+    try {
+      await rename(tmpPath, metaPath);
+    } catch (err) {
+      await rm(tmpPath, { force: true });
+      throw err;
+    }
   }
 
   private ensureOpen(): void {

@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentDB } from "../src/agentdb.js";
-import { defineSchema } from "../src/schema.js";
+import { AgentDB } from "../../src/agentdb.js";
+import { defineSchema } from "../../src/schema.js";
 
 describe("defineSchema", () => {
   let tmpDir: string;
@@ -573,6 +573,33 @@ describe("defineSchema", () => {
       const excluded = await col.find({ filter: "-bug" });
       expect(excluded.records).toHaveLength(1);
       expect(excluded.records[0].title).toBe("Feature");
+    });
+  });
+
+  describe("description, instructions, and field descriptions", () => {
+    it("accepts description and instructions on schema", async () => {
+      const col = await db.collection(defineSchema({
+        name: "described",
+        description: "A test collection",
+        instructions: "Use this for testing",
+        fields: {
+          title: { type: "string", required: true, description: "The item title" },
+        },
+      }));
+
+      const id = await col.insert({ title: "Hello" });
+      expect(id).toBeTruthy();
+    });
+
+    it("accepts version on schema", async () => {
+      const col = await db.collection(defineSchema({
+        name: "versioned",
+        version: 2,
+        fields: { title: { type: "string" } },
+      }));
+
+      const id = await col.insert({ title: "Hello" });
+      expect(id).toBeTruthy();
     });
   });
 

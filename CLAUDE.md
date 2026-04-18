@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** v1.2 ready. 756 tests. Disk mode: JSONL for point lookups, Parquet for column scans, short-circuit at limit, sorted reads, lazy index loading Disk mode works on filesystem + S3. Benchmarked at 1M records: 30ms cold open, 1M ops/s findOne cache hit, 187MB heap, hybrid cardinality indexing BREAKING: Collection read methods (findOne, find, findAll, count, search) are now async. Disk mode uses skipLoad — records served from Parquet with LRU cache, not loaded into memory. Review-hardened: prototype pollution fixed, WAL replay O(1), dirty compaction, stale delete prevention, index size validation, path traversal sanitization, 32 tools (30 core + db_subscribe/db_unsubscribe on HTTP). 5 runnable demos. Auth + security hardened. Group commit ~12x faster writes. Sorted-array indexed queries with range support ($gt/$lt/$gte/$lte). Count-from-index fast path. Predicate cache. HNSW MaxHeap optimized. Incremental index rebuild on tail/watch/undo. Sort on find. MCP tools have titles, outputSchemas, structuredContent, all 4 annotation hints. Blob storage via StorageBackend (filesystem + S3). Declarative schemas with defineSchema(). RecordCache LRU, ArrayIndex for O(1) $contains, persistent index serialization. Disk-backed storage via hyparquet (Parquet).
+**Status:** v1.3 shipped. 1006 tests. Persisted schemas with agent context (description, instructions, field descriptions), schema merge logic (mergeSchemas + mergePersistedSchemas), version tracking, admin-guarded modifications. Schema lifecycle tools: db_get_schema/db_set_schema/db_delete_schema/db_diff_schema/db_infer_schema/db_migrate. db_migrate uses two-phase snapshot for pagination correctness; ops capped at 100; PROTECTED set blocks prototype-pollution keys. db_infer_schema uses Algorithm R reservoir sampling streamed via Collection.iterate() (O(N) time, O(sampleSize) memory). Portable JSON import/export. db_set_schema uses per-property overlay merge preserving untouched field properties. Schema bootstrap: schemas/*.json auto-loaded on init via loadSchemasFromFiles (overlay semantics, per-file isolation, filename-derived name fallback, 10MB size cap, name-mismatch warning). CLI --schemas <glob> flag loads additional schema files after auto-discover (supports *, ?, multiple flags). startHttp/startStdio accept schemaPaths option. startHttp return includes db instance. $strLen filter operator added. _agent audit stamp uses authenticated identity (auth wins over self-reported). Disk mode: JSONL for point lookups, Parquet for column scans, short-circuit at limit, sorted reads, lazy index loading. Disk mode works on filesystem + S3. 38 tools (36 core + db_subscribe/db_unsubscribe on HTTP). Auth + security hardened.
 
 ## Commands
 
@@ -30,7 +30,7 @@ npm run test:coverage  # vitest coverage
 
 ```
 agentdb          — core library (AgentDB, Collection, filters, indexes, embeddings, S3Backend)
-agentdb/tools    — framework-agnostic tool definitions (getTools → 26 tools)
+agentdb/tools    — framework-agnostic tool definitions (getTools → 36 tools)
 agentdb/mcp      — MCP server adapter (stdio + HTTP/Streamable transport)
 ```
 
@@ -40,16 +40,16 @@ agentdb/mcp      — MCP server adapter (stdio + HTTP/Streamable transport)
 src/
   index.ts              # Core exports
   auth-context.ts       # Shared auth identity (AsyncLocalStorage) — used by tools + mcp
-  schema.ts             # defineSchema() — declarative collection definitions with field validation
-  agentdb.ts            # AgentDB class: collection manager, lazy loading, LRU, memory monitor
-  collection.ts         # Collection: CRUD, middleware, search, views, TTL, tailing (~1130 lines)
+  schema.ts             # defineSchema(), PersistedSchema, extractPersistedSchema, mergeSchemas, mergePersistedSchemas, validatePersistedSchema, import/export
+  agentdb.ts            # AgentDB class: collection manager, schema persistence (persistSchema/loadPersistedSchema/deletePersistedSchema/loadSchemasFromFiles), lazy loading, LRU, memory monitor
+  collection.ts         # Collection: CRUD, middleware, search, views, TTL, tailing, iterate() async generator (~1470 lines)
   collection-helpers.ts # Pure utilities: stripMeta, isExpired, applyUpdate, compositeKey, filter cache
   collection-indexes.ts # IndexManager: B-tree, composite, array, bloom filter indexes + query planning
   record-cache.ts       # LRU cache for disk-backed mode (Map insertion-order eviction)
   array-index.ts        # Inverted element index for O(1) $contains on arrays
-  disk-store.ts         # Disk-backed storage: Parquet + LRU cache + persistent indexes
+  disk-store.ts         # Disk-backed storage: Parquet + LRU cache + persistent indexes; entries() async iterator
   disk-io.ts            # Parquet compaction + JSONL record store + readers via hyparquet
-  filter.ts             # JSON filter compiler (14 operators, dot-notation)
+  filter.ts             # JSON filter compiler (15 operators incl. $strLen, dot-notation)
   compact-filter.ts     # Compact string parser (role:admin age.gt:18)
   hnsw.ts               # HNSW index for approximate nearest neighbor search
   btree.ts              # Sorted-array index + query frequency tracker
@@ -68,8 +68,18 @@ src/
     http.ts             # Custom HTTP embedding provider
     quantize.ts         # Int8 quantization for vector storage
     index.ts            # Provider factory
-  tools/index.ts        # 30 tool definitions with zod schemas + safe() wrapper (32 total with db_subscribe/db_unsubscribe on HTTP)
-  mcp/index.ts          # MCP server (stdio + HTTP/Streamable transport)
+  tools/                # Tool definitions split into per-domain modules (getTools aggregator → 36 core, 38 with HTTP)
+    index.ts            # Aggregator: getTools(db, opts?) composes all domains in canonical order
+    shared.ts           # AgentTool type, makeSafe() wrapper (auth identity unification), READ/WRITE/DESTRUCTIVE annotations, shared zod params
+    admin.ts            # db_collections, db_create, db_drop, db_purge, db_stats (5 tools)
+    crud.ts             # db_insert, db_find, db_find_one, db_update, db_upsert, db_delete, db_batch, db_count, db_undo, db_history, db_distinct (11 tools)
+    schema.ts           # db_schema, db_get_schema, db_set_schema, db_delete_schema, db_diff_schema, db_infer_schema (6 tools)
+    migrate.ts          # db_migrate — two-phase snapshot, deletion-as-failed, ops cap, prototype-pollution guards (1 tool)
+    archive.ts          # db_archive, db_archive_list, db_archive_load (3 tools)
+    vector.ts           # db_semantic_search, db_embed, db_vector_upsert, db_vector_search (4 tools)
+    blob.ts             # db_blob_write, db_blob_read, db_blob_list, db_blob_delete (4 tools)
+    backup.ts           # db_export, db_import (2 tools)
+  mcp/index.ts          # MCP server (stdio + HTTP/Streamable transport); startHttp/startStdio accept schemaPaths option
   mcp/auth.ts           # Auth middleware (bearer token, rate limiter, audit logger)
   mcp/jwt.ts            # JWT validation with jose
   mcp/subscriptions.ts  # NOTIFY/LISTEN: SubscriptionManager for real-time change notifications
@@ -78,6 +88,7 @@ src/
 
 ## Key Design Decisions
 
+- **Schema terminology** — three distinct concepts: `defineSchema()` = code-level (hooks, validators, computed fields, never serialized); `PersistedSchema` = JSON subset in `meta/{name}.schema.json` (description, instructions, field types — agent-facing); `db_schema` tool = samples records to infer shape dynamically, does not read `PersistedSchema`.
 - Library-first, MCP is just an adapter — see NOTES.md
 - opslog Store per collection, lazy-loaded with LRU eviction
 - JSON filter syntax primary, compact string syntax secondary

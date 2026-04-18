@@ -29,7 +29,14 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
   const server = new McpServer(
     { name: "agentdb", version: VERSION },
     {
-      instructions: "AgentDB — AI-first embedded database. Use db_collections to discover data, db_find with filters to query, db_schema to inspect record shapes.",
+      instructions: [
+        "AgentDB — AI-first embedded database for LLM agents. Start here:",
+        "1. db_collections — list all collections with record counts and schema summaries.",
+        "2. db_get_schema — read a collection's field types, agent instructions, and per-field descriptions.",
+        "3. db_find / db_find_one — query records; use JSON filters or compact syntax (status:active age.gt:18).",
+        "4. db_insert / db_update / db_delete / db_batch — mutate data; always pass agent and reason for audit.",
+        "5. Schema lifecycle: db_set_schema sets or updates a schema, db_diff_schema previews the impact of a change, db_infer_schema infers a schema from existing data, db_delete_schema removes it.",
+      ].join("\n"),
       capabilities: { logging: {} },
     },
   );
@@ -61,7 +68,7 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
         title: "Subscribe to Changes",
         description: "Subscribe to real-time change notifications on a collection. When records are inserted, updated, or deleted, you'll receive a logging notification with the change details.",
         inputSchema: z.object({
-          collection: z.string().describe("Collection to subscribe to"),
+          collection: z.string().meta({ description: "Collection to subscribe to" }),
         }) as z.ZodObject,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
@@ -77,7 +84,7 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
         title: "Unsubscribe from Changes",
         description: "Stop receiving change notifications for a collection.",
         inputSchema: z.object({
-          collection: z.string().describe("Collection to unsubscribe from"),
+          collection: z.string().meta({ description: "Collection to unsubscribe from" }),
         }) as z.ZodObject,
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       },
@@ -94,9 +101,11 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
 /**
  * Start AgentDB as an MCP server on stdio (single client).
  */
-export async function startStdio(dataDir: string, dbOpts?: AgentDBOptions): Promise<void> {
+export async function startStdio(dataDir: string, dbOpts?: AgentDBOptions, extraOpts?: { schemaPaths?: string[] }): Promise<void> {
   const db = new AgentDB(dataDir, dbOpts);
   await db.init();
+
+  await loadExtraSchemas(db, extraOpts?.schemaPaths);
 
   const server = createMcpServer(db);
   const transport = new StdioServerTransport();
@@ -128,17 +137,33 @@ export interface HttpOptions {
   maxBodySize?: string;
   /** CORS allowed origins (default: none — reject cross-origin). */
   corsOrigins?: string[];
+  /** Extra schema JSON files to load after init (file-as-overlay, per-file isolation). */
+  schemaPaths?: string[];
+}
+
+async function loadExtraSchemas(db: AgentDB, schemaPaths?: string[]): Promise<void> {
+  if (!schemaPaths?.length) return;
+  const result = await db.loadSchemasFromFiles(schemaPaths);
+  const parts: string[] = [`loaded ${result.loaded}`];
+  if (result.skipped > 0) parts.push(`skipped ${result.skipped}`);
+  if (result.failed.length > 0) {
+    parts.push(`failed ${result.failed.length}`);
+    for (const f of result.failed) console.error(`[agentdb] --schemas failed (${f.path}): ${f.error}`);
+  }
+  console.error(`[agentdb] --schemas: ${parts.join(", ")}`);
 }
 
 export async function startHttp(
   dataDir: string,
   opts?: HttpOptions,
-): Promise<{ app: express.Express; close: () => Promise<void>; auditLog: AuditLogger; port: number }> {
+): Promise<{ app: express.Express; close: () => Promise<void>; auditLog: AuditLogger; port: number; db: AgentDB }> {
   const port = opts?.port ?? 3000;
   const host = opts?.host ?? "127.0.0.1";
 
   const db = new AgentDB(dataDir, opts?.dbOpts);
   await db.init();
+
+  await loadExtraSchemas(db, opts?.schemaPaths);
 
   const app = express();
   app.use(express.json({ limit: opts?.maxBodySize ?? "10mb" }));
@@ -326,5 +351,5 @@ export async function startHttp(
     await originalClose();
   };
 
-  return { app, close: cleanClose, auditLog, port: actualPort };
+  return { app, close: cleanClose, auditLog, port: actualPort, db };
 }

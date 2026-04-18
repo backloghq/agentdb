@@ -179,6 +179,49 @@ describe("parseCompactFilter", () => {
     });
   });
 
+  describe("$strLen operator", () => {
+    it("field.strLen:N → exact length match", () => {
+      expect(parseCompactFilter("title.strLen:20")).toEqual({ title: { $strLen: 20 } });
+    });
+
+    it("field.strLen.gt:N → length comparison", () => {
+      expect(parseCompactFilter("body.strLen.gt:10")).toEqual({ body: { $strLen: { $gt: 10 } } });
+    });
+
+    it("compound strLen range (implicit AND)", () => {
+      expect(parseCompactFilter("title.strLen.gte:5 title.strLen.lte:20")).toEqual({
+        $and: [{ title: { $strLen: { $gte: 5 } } }, { title: { $strLen: { $lte: 20 } } }],
+      });
+    });
+
+    it("integration: filters records by string field length", () => {
+      const records = [
+        { title: "Hi" },
+        { title: "Hello" },
+        { title: "Hello World" },
+      ];
+      const filter = parseCompactFilter("title.strLen.gt:5");
+      const predicate = compileFilter(filter);
+      const result = records.filter(predicate);
+      expect(result).toHaveLength(1);
+      expect(result[0].title).toBe("Hello World");
+    });
+
+    it("strLen.eq:0 matches empty strings, rejects non-empty and non-string values", () => {
+      const records = [
+        { title: "" },
+        { title: "x" },
+        { title: null },
+        { other: "no title" },
+      ];
+      const filter = parseCompactFilter("title.strLen.eq:0");
+      const predicate = compileFilter(filter);
+      const result = records.filter(predicate);
+      expect(result).toHaveLength(1);
+      expect(result[0].title).toBe("");
+    });
+  });
+
   describe("nested field paths with modifiers", () => {
     it("handles nested field + modifier", () => {
       expect(parseCompactFilter("metadata.score.gt:10")).toEqual({

@@ -422,6 +422,27 @@ export class Collection {
     return result;
   }
 
+  /** Streaming record iterator — O(1) memory regardless of collection size.
+   * In disk mode, yields records from Parquet one-at-a-time without accumulation.
+   * In memory mode, yields from the in-memory store (already in memory).
+   * Safe to use for reservoir sampling on large disk-backed collections.
+   */
+  async *iterate(): AsyncGenerator<Record<string, unknown>> {
+    if (this._diskStore?.hasParquetData) {
+      const seen = new Set<string>();
+      for (const [id, record] of this.store.entries()) {
+        if (!isExpired(record)) { yield stripMeta(record); seen.add(id); }
+      }
+      for await (const [id, record] of this._diskStore.entries()) {
+        if (!seen.has(id) && !isExpired(record as StoredRecord)) yield stripMeta(record as StoredRecord);
+      }
+    } else {
+      for (const [, record] of this.store.entries()) {
+        if (!isExpired(record)) yield stripMeta(record);
+      }
+    }
+  }
+
   async find(opts?: FindOpts): Promise<FindResult> {
     const MAX_LIMIT = 10000;
     const limit = Math.min(opts?.limit ?? 50, MAX_LIMIT);
