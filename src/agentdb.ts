@@ -550,9 +550,14 @@ export class AgentDB {
     validateCollectionName(collectionName);
     validatePersistedSchema(schema);
     const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
-    const tmpPath = schemaPath + ".tmp";
+    const tmpPath = `${schemaPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     await writeFile(tmpPath, JSON.stringify(schema, null, 2), "utf-8");
-    await rename(tmpPath, schemaPath);
+    try {
+      await rename(tmpPath, schemaPath);
+    } catch (err) {
+      await rm(tmpPath, { force: true });
+      throw err;
+    }
   }
 
   /** Load the persisted schema for a collection. Returns undefined if none stored. */

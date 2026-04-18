@@ -1060,6 +1060,23 @@ describe("schema persistence", () => {
     expect(db.getSchema("in-memory")).toBeDefined();
     expect(db.getSchema("in-memory")!.name).toBe("in-memory");
   });
+
+  it("concurrent persistSchema calls succeed without corruption (one wins, one overwrites cleanly)", async () => {
+    const schemaA: PersistedSchema = { name: "concurrent", version: 1, description: "from A" };
+    const schemaB: PersistedSchema = { name: "concurrent", version: 2, description: "from B" };
+
+    // Fire both writes simultaneously — unique tmp filename prevents them clobbering each other mid-write
+    await Promise.all([
+      db.persistSchema("concurrent", schemaA),
+      db.persistSchema("concurrent", schemaB),
+    ]);
+
+    // One must have won; the result must be a valid complete schema (not a partial/corrupted file)
+    const loaded = await db.loadPersistedSchema("concurrent");
+    expect(loaded).toBeDefined();
+    expect(["from A", "from B"]).toContain(loaded!.description);
+    expect(loaded!.name).toBe("concurrent");
+  });
 });
 
 describe("mergeSchemas", () => {

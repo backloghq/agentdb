@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`persistSchema` concurrent-write race** — tmp file now includes `pid + timestamp + random suffix` to guarantee uniqueness per write. The rename is wrapped in try/catch: on failure, the tmp file is cleaned up with `rm({ force: true })` before re-throwing. Previously, concurrent writes could share a `.tmp` filename when `Date.now()` collides, causing one rename to succeed and the other to fail with ENOENT when its tmp file was already gone.
+
 ### Refactor
 
 - **`getAgent(args)` helper** — extracted `export function getAgent(args)` to `src/tools/shared.ts`. Replaces 9 repeated `args.agent as string | undefined` casts across `crud.ts`, `schema.ts`, and `migrate.ts`. Pure DRY — no behavior change.
