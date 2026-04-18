@@ -1420,14 +1420,18 @@ describe("AgentDB.loadSchemasFromFiles", () => {
     expect(loaded!.fields?.title.description).toBe("Original desc");
   });
 
-  it("idempotent: loading the same file twice produces same result", async () => {
+  it("idempotent: loading the same file twice produces same result and skips on second load", async () => {
     const schemaPath = join(tmpDir, "idempotent.json");
     await writeFile(schemaPath, JSON.stringify({ name: "idempotent", description: "Stable", version: 1 }), "utf-8");
 
-    await db.loadSchemasFromFiles([schemaPath]);
+    const r1 = await db.loadSchemasFromFiles([schemaPath]);
+    expect(r1.loaded).toBe(1);
+    expect(r1.skipped).toBe(0);
     const first = await db.loadPersistedSchema("idempotent");
 
-    await db.loadSchemasFromFiles([schemaPath]);
+    const r2 = await db.loadSchemasFromFiles([schemaPath]);
+    expect(r2.loaded).toBe(0);
+    expect(r2.skipped).toBe(1);
     const second = await db.loadPersistedSchema("idempotent");
 
     expect(second).toEqual(first);

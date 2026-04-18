@@ -15,6 +15,14 @@ import type { MemoryStats } from "./memory.js";
 import { DiskStore } from "./disk-store.js";
 
 const META_DIR = "meta";
+
+/** Key-sorted JSON serialization for structural equality checks independent of key order. */
+function canonicalJSON(val: unknown): string {
+  if (val === null || typeof val !== "object") return JSON.stringify(val);
+  if (Array.isArray(val)) return "[" + (val as unknown[]).map(canonicalJSON).join(",") + "]";
+  const keys = Object.keys(val as object).sort();
+  return "{" + keys.map(k => `${JSON.stringify(k)}:${canonicalJSON((val as Record<string, unknown>)[k])}`).join(",") + "}";
+}
 const COLLECTIONS_DIR = "collections";
 const DROPPED_PREFIX = "_dropped_";
 const VALID_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
@@ -64,9 +72,13 @@ export interface CollectionInfo {
 }
 
 export interface SchemaLoadResult {
-  /** Number of schema files successfully loaded and persisted. */
+  /** Number of schema files that resulted in a persisted schema change. */
   loaded: number;
-  /** Number of files skipped because no valid collection name could be derived. */
+  /**
+   * Number of files that were valid but produced no change — either because no
+   * valid collection name could be derived, or because the merged result was
+   * byte-identical to the already-persisted schema (true no-op).
+   */
   skipped: number;
   /** Files that could not be loaded due to parse or validation errors. */
   failed: Array<{ path: string; error: string }>;
@@ -619,6 +631,12 @@ export class AgentDB {
 
         const existing = await this.loadPersistedSchema(fileSchema.name);
         const merged = existing ? mergePersistedSchemas(existing, fileSchema) : fileSchema;
+        // Skip write when merged result is structurally identical to existing (true no-op).
+        // Uses key-sorted serialization to avoid false mismatches from key-order differences.
+        if (existing && canonicalJSON(merged) === canonicalJSON(existing)) {
+          skipped++;
+          continue;
+        }
         await this.persistSchema(fileSchema.name, merged);
         loaded++;
       } catch (err) {
