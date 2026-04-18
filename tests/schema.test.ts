@@ -1447,6 +1447,23 @@ describe("AgentDB.loadSchemasFromFiles", () => {
     expect(result.failed).toHaveLength(0);
   });
 
+  it("warns when explicit name field disagrees with filename-derived name", async () => {
+    const schemaPath = join(tmpDir, "accounts.json");
+    await writeFile(schemaPath, JSON.stringify({ name: "users", description: "Disagrees" }), "utf-8");
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await db.loadSchemasFromFiles([schemaPath]);
+      expect(result.loaded).toBe(1);
+      expect(warnSpy).toHaveBeenCalledOnce();
+      const msg = warnSpy.mock.calls[0][0] as string;
+      expect(msg).toContain("users");
+      expect(msg).toContain("accounts");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it("valid JSON but wrong content types (array, null, number) land in failed[]", async () => {
     const arrayPath = join(tmpDir, "arr.json");
     const nullPath = join(tmpDir, "nullval.json");

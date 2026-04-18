@@ -604,13 +604,18 @@ export class AgentDB {
           continue;
         }
 
-        // Inject filename-derived name if absent
-        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && !("name" in parsed)) {
-          if (!VALID_NAME_RE.test(derivedName)) {
-            skipped++;
-            continue;
+        // Inject filename-derived name if absent; warn if explicit name disagrees with derived
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+          const rec = parsed as Record<string, unknown>;
+          if (!("name" in rec)) {
+            if (!VALID_NAME_RE.test(derivedName)) {
+              skipped++;
+              continue;
+            }
+            rec.name = derivedName;
+          } else if (typeof rec.name === "string" && rec.name !== derivedName) {
+            console.warn(`[agentdb] schema file ${filePath}: name field "${rec.name}" disagrees with filename-derived "${derivedName}"`);
           }
-          (parsed as Record<string, unknown>).name = derivedName;
         }
 
         try {

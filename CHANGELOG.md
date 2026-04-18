@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- **`loadSchemasFromFiles` name-mismatch warning** — emits `console.warn` when a file's explicit `name` field differs from the filename-derived name. The file's `name` still wins (overlay semantics); the warning is informational.
 - **`loadSchemasFromFiles` `skipped` semantics** — files are now counted as `skipped` (not `loaded`) when the merged schema is structurally identical to the existing persisted schema. Uses key-sorted JSON for the comparison to avoid false mismatches from key-ordering differences.
 - **`--help` / `-h` CLI flag** — prints usage and all flags to stdout, exits 0.
 - **`--schemas <glob>` CLI flag** — load schema JSON files at startup. Multiple `--schemas` flags allowed (results unioned). Supports `*`/`?` glob wildcards. Per-file failures do not abort startup. Overlays on top of auto-discovered `schemas/` files. Works with both `stdio` and `--http` transports.
