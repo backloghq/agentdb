@@ -345,7 +345,7 @@ tasks.find({
 });
 ```
 
-**Operators:** `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$contains`, `$startsWith`, `$endsWith`, `$exists`, `$regex`, `$not`
+**Operators:** `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$contains`, `$startsWith`, `$endsWith`, `$exists`, `$regex`, `$not`, `$strLen`
 
 Top-level keys are implicitly ANDed.
 
@@ -359,13 +359,15 @@ status:active priority.gt:3           → { $and: [{ status: "active" }, { prior
 name.contains:alice                    → { name: { $contains: "alice" } }
 (role:admin or role:mod)               → { $or: [{ role: "admin" }, { role: "mod" }] }
 tags.in:bug,feature                    → { tags: { $in: ["bug", "feature"] } }
+title.strLen:20                        → { title: { $strLen: 20 } }
+title.strLen.gt:10                     → { title: { $strLen: { $gt: 10 } } }
 +bug                                   → { tags: { $contains: "bug" } }
 -old                                   → { tags: { $not: { $contains: "old" } } }
 auth error                             → { $text: "auth error" }
 status:active auth                     → { $and: [{ status: "active" }, { $text: "auth" }] }
 ```
 
-Modifier aliases: `gt`, `gte`, `lt`, `lte`, `ne`, `contains`, `has`, `startsWith`, `starts`, `endsWith`, `ends`, `in`, `nin`, `exists`, `regex`, `match`, `eq`, `is`, `not`, `after`, `before`, `above`, `below`, `over`, `under`
+Modifier aliases: `gt`, `gte`, `lt`, `lte`, `ne`, `contains`, `has`, `startsWith`, `starts`, `endsWith`, `ends`, `in`, `nin`, `exists`, `regex`, `match`, `eq`, `is`, `not`, `after`, `before`, `above`, `below`, `over`, `under`, `strLen`
 
 ## Collection API
 

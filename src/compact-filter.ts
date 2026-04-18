@@ -9,6 +9,8 @@
  *   role:admin active:true           → { role: "admin", active: true }
  *   name.contains:alice              → { name: { $contains: "alice" } }
  *   age.gt:18                        → { age: { $gt: 18 } }
+ *   title.strLen:20                  → { title: { $strLen: 20 } }
+ *   title.strLen.gt:10               → { title: { $strLen: { $gt: 10 } } }
  *   (role:admin or role:moderator)   → { $or: [{ role: "admin" }, { role: "moderator" }] }
  *   role:admin and active:true       → { $and: [{ role: "admin" }, { active: true }] }
  */
@@ -45,6 +47,7 @@ const MODIFIER_MAP: Record<string, string> = {
   exists: "$exists",
   regex: "$regex",
   match: "$regex",
+  strLen: "$strLen",
 };
 
 // --- Tokenizer ---
@@ -269,6 +272,12 @@ function attrToFilter(field: string, modifier: string | null, rawValue: string):
   const op = MODIFIER_MAP[modifier];
   if (!op) {
     throw new Error(`Unknown modifier: ${modifier}`);
+  }
+
+  // $strLen compound: field.strLen.modifier:value → { field: { $strLen: { [op]: value } } }
+  if (field.endsWith(".strLen")) {
+    const baseField = field.slice(0, -".strLen".length);
+    return { [baseField]: { $strLen: { [op]: coerceValue(rawValue) } } };
   }
 
   // Special handling for $in/$nin — comma-separated values

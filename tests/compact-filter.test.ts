@@ -179,6 +179,35 @@ describe("parseCompactFilter", () => {
     });
   });
 
+  describe("$strLen operator", () => {
+    it("field.strLen:N → exact length match", () => {
+      expect(parseCompactFilter("title.strLen:20")).toEqual({ title: { $strLen: 20 } });
+    });
+
+    it("field.strLen.gt:N → length comparison", () => {
+      expect(parseCompactFilter("body.strLen.gt:10")).toEqual({ body: { $strLen: { $gt: 10 } } });
+    });
+
+    it("compound strLen range (implicit AND)", () => {
+      expect(parseCompactFilter("title.strLen.gte:5 title.strLen.lte:20")).toEqual({
+        $and: [{ title: { $strLen: { $gte: 5 } } }, { title: { $strLen: { $lte: 20 } } }],
+      });
+    });
+
+    it("integration: filters records by string field length", () => {
+      const records = [
+        { title: "Hi" },
+        { title: "Hello" },
+        { title: "Hello World" },
+      ];
+      const filter = parseCompactFilter("title.strLen.gt:5");
+      const predicate = compileFilter(filter);
+      const result = records.filter(predicate);
+      expect(result).toHaveLength(1);
+      expect(result[0].title).toBe("Hello World");
+    });
+  });
+
   describe("nested field paths with modifiers", () => {
     it("handles nested field + modifier", () => {
       expect(parseCompactFilter("metadata.score.gt:10")).toEqual({

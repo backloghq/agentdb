@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ### Added
 
 - **`persistSchema` rename failure test** — negative-path test asserting that when the atomic rename step throws (e.g. `EXDEV: cross-device link`), the tmp file is cleaned up via `rm({force:true})` and the original error is re-thrown.
+- **`$strLen` in compact filter syntax** — `field.strLen:N` (exact character count) and `field.strLen.modifier:N` (e.g. `title.strLen.gt:10`) map to `{ field: { $strLen: N } }` and `{ field: { $strLen: { $op: N } } }` respectively. `strLen` added to modifier alias list in README.
 
 ### Refactor
 
