@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-04-19
+
+### Added
+
+#### Per-process tenant binding (MCP)
+- **`AGENTDB_TENANT_ID` env / `--tenant-id` CLI flag** — binds the process to a single tenant. Validated at startup (non-empty, no edge whitespace, ≤256 chars); misconfiguration crashes so orchestrators surface it as a provisioning failure.
+- **`JwtAuthOptions.tenantIdClaim` (default `"tid"`) + `expectedTenantId`** — JWTs whose tenant claim does not match are rejected. Verified *before* permissions extraction; case-exact byte comparison; non-string claim values rejected (no coercion).
+- **`TokenMap` entries may declare `tenantId`** — missing `tenantId` fails closed when `expectedTenantId` is set. The singular `--auth-token` is implicitly bound to the process tenant.
+- **`TenantMismatchError`** — JWT path signals binding failures distinctly from generic auth failures (bad signature, aud, iss, expired).
+- **`tenant_mismatch` audit security event** — emitted on binding failures so operators can alert on cross-tenant credential exposure separately from log-spam auth failures. Audit entries record `tenantId` on every authenticated request.
+- HTTP error responses never echo the expected tenant ID (generic 401) to avoid fingerprinting the pod's tenant from the outside.
+- `/health` stays unauthenticated and unaffected.
+- Fully backwards-compatible: all options are opt-in.
+
+#### Audit streaming endpoint (MCP)
+- **`GET /audit?cursor={id}&limit={n}`** — paginated, cursor-based JSON endpoint so a control-plane shipper can drain audit entries off the pod without shelling into the container or mounting the data volume.
+- **Opaque monotonic cursor** — lex-sortable zero-padded sequence. Pagination is `entry.id > cursor`; cursor-ascending order across and within pages.
+- **Default limit 1000, hard cap 10000** — oversize requests are silently capped and return a `nextCursor` for re-polling. Empty stream returns `{entries: [], nextCursor: null}` (not 204).
+- **Same auth surface as `/mcp`** — bearer token, `authFn`, or `tokens` map.
+- **Bound-tenant filter** — when `AGENTDB_TENANT_ID` is set, only entries whose `tenantId` matches are returned (defence-in-depth on top of per-process binding).
+- **Additive `event` field on audit entries** — `tenant_mismatch` security events are surfaced so operators can alert on cross-tenant exposure separately from request-level entries.
+- **`AUDIT_DEFAULT_LIMIT` / `AUDIT_MAX_LIMIT`** — exported named constants so the shipper can size requests against the documented contract.
+- **`AuditLogger.query({cursor, limit, tenantFilter})`** — returns `{entries, nextCursor}` page. `log()` now returns the assigned entry so callers can correlate. `metadata` is captured for `tools/call` invocations (tool params). Existing `recent()` API unchanged.
+
 ### Fixed
 
 - **Docs** — replace `npx agentdb` with `npx @backloghq/agentdb` across README, DEPLOYMENT, CLI `--help`, and CLAUDE.md. The bare `agentdb` name resolves to an unrelated package on npm; the scoped name is required.
