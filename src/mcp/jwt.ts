@@ -7,6 +7,7 @@ import { jwtVerify, createRemoteJWKSet } from "jose";
 import type { JWTPayload } from "jose";
 import type { Request } from "express";
 import type { AuthFn, AuthIdentity } from "./auth.js";
+import { TenantMismatchError } from "../auth-context.js";
 
 export interface JwtAuthOptions {
   /** JWKS endpoint URL for key rotation (e.g. https://auth0.com/.well-known/jwks.json). */
@@ -21,6 +22,20 @@ export interface JwtAuthOptions {
   agentIdClaim?: string;
   /** JWT claim for permissions (default: "permissions"). */
   permissionsClaim?: string;
+  /**
+   * Claim whose string value must equal `expectedTenantId`. Default: `"tid"`
+   * (Azure AD convention; short wire format). Override for callers using
+   * `tenant_id`, `org_id`, etc. Only consulted when `expectedTenantId` is set.
+   */
+  tenantIdClaim?: string;
+  /**
+   * Tenant ID this process is bound to (typically `process.env.AGENTDB_TENANT_ID`).
+   * When set, JWTs without a string-typed `tenantIdClaim` matching this value
+   * are rejected with `TenantMismatchError` AFTER signature/aud/iss pass —
+   * letting the middleware emit a distinct `tenant_mismatch` audit event
+   * separate from generic auth failures.
+   */
+  expectedTenantId?: string;
 }
 
 /**
@@ -50,6 +65,8 @@ export function createJwtAuth(opts: JwtAuthOptions): AuthFn {
 
   const agentIdClaim = opts.agentIdClaim ?? "sub";
   const permissionsClaim = opts.permissionsClaim ?? "permissions";
+  const tenantIdClaim = opts.tenantIdClaim ?? "tid";
+  const expectedTenantId = opts.expectedTenantId;
 
   return async (req: Request): Promise<AuthIdentity | null> => {
     const header = req.headers.authorization;
@@ -57,21 +74,34 @@ export function createJwtAuth(opts: JwtAuthOptions): AuthFn {
 
     const token = header.slice(7);
 
+    let payload: JWTPayload;
     try {
-      const { payload } = await jwtVerify(token, keySource as Uint8Array, {
+      ({ payload } = await jwtVerify(token, keySource as Uint8Array, {
         audience: opts.audience,
         issuer: opts.issuer,
-      });
-
-      const agentId = extractClaim(payload, agentIdClaim);
-      if (!agentId) return null;
-
-      const permissions = extractPermissions(payload, permissionsClaim);
-
-      return { agentId, permissions };
+      }));
     } catch {
-      return null; // Invalid token
+      return null; // Bad signature / aud / iss / expired — generic failure
     }
+
+    const agentId = extractClaim(payload, agentIdClaim);
+    if (!agentId) return null;
+
+    // Tenant binding is verified BEFORE permissions extraction so a wrong-tenant
+    // token cannot leak which permissions it held via timing or differential
+    // responses. Throws (not returns null) so the middleware can distinguish
+    // tenant_mismatch from generic auth failures in the audit log.
+    let tenantId: string | undefined;
+    if (expectedTenantId !== undefined) {
+      tenantId = extractClaim(payload, tenantIdClaim);
+      if (tenantId === undefined || tenantId !== expectedTenantId) {
+        throw new TenantMismatchError();
+      }
+    }
+
+    const permissions = extractPermissions(payload, permissionsClaim);
+
+    return { agentId, tenantId, permissions };
   };
 }
 

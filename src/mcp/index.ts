@@ -139,6 +139,13 @@ export interface HttpOptions {
   corsOrigins?: string[];
   /** Extra schema JSON files to load after init (file-as-overlay, per-file isolation). */
   schemaPaths?: string[];
+  /**
+   * Tenant the process is bound to. When set, every authenticated request
+   * must carry a matching tenant binding (singular token implicitly bound;
+   * tokens-map entries must declare `tenantId`; JWTs must carry the tenant
+   * claim configured on `authFn`). Process invariant: read once at startup.
+   */
+  expectedTenantId?: string;
 }
 
 async function loadExtraSchemas(db: AgentDB, schemaPaths?: string[]): Promise<void> {
@@ -193,11 +200,17 @@ export async function startHttp(
     });
   }
 
+  // Audit logging — created before auth middleware so it can record
+  // tenant_mismatch security events from the auth middleware itself.
+  const auditLog = new AuditLogger();
+
   // Auth middleware
   const authMiddleware = createAuthMiddleware({
     token: opts?.authToken,
     tokens: opts?.authTokens,
     authFn: opts?.authFn,
+    expectedTenantId: opts?.expectedTenantId,
+    auditLog,
   });
   app.use("/mcp", authMiddleware);
 
@@ -207,8 +220,6 @@ export async function startHttp(
     app.use("/mcp", limiter.middleware());
   }
 
-  // Audit logging
-  const auditLog = new AuditLogger();
   app.use("/mcp", auditLog.middleware());
 
   // Health check (no auth required)
