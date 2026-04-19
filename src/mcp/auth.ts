@@ -187,6 +187,11 @@ export class RateLimiter {
 
 /** Audit logger — logs authenticated requests. */
 export interface AuditEntry {
+  /**
+   * Monotonic cursor handle (zero-padded sequence). Lex-sortable so that
+   * cursor pagination is a simple `entry.id > cursor` comparison.
+   */
+  id: string;
   timestamp: string;
   /** Authenticated agent. `undefined` for security events where no identity was admitted. */
   agentId?: string;
@@ -196,6 +201,11 @@ export interface AuditEntry {
   /** Tenant the request was authenticated under (when binding is configured). */
   tenantId?: string;
   /**
+   * MCP tool params for `tools/call` invocations. Opaque to the audit shipper.
+   * Captured so downstream forensic queries can answer "what record was touched".
+   */
+  metadata?: Record<string, unknown>;
+  /**
    * Distinguishes security events from ordinary request entries.
    * `tenant_mismatch` = a credential passed signature/aud/iss but carried the
    * wrong tenant binding (warrants alerting; signals routing bug, replay, or
@@ -204,29 +214,48 @@ export interface AuditEntry {
   event?: "tenant_mismatch";
 }
 
+export interface AuditQueryResult {
+  entries: AuditEntry[];
+  nextCursor: string | null;
+}
+
+/** Hard cap on a single `query()` page — matches the spec's documented max. */
+export const AUDIT_MAX_LIMIT = 10000;
+/** Default `query()` page size when caller omits `limit`. */
+export const AUDIT_DEFAULT_LIMIT = 1000;
+
 export class AuditLogger {
   private entries: AuditEntry[];
   private maxEntries: number;
   private head = 0;
   private count = 0;
+  private nextSeq = 0;
 
   constructor(maxEntries = 10000) {
     this.maxEntries = maxEntries;
     this.entries = new Array(maxEntries);
   }
 
-  log(entry: AuditEntry): void {
-    this.entries[this.head] = entry;
+  /**
+   * Log an entry. Caller supplies everything except `id`; the logger assigns
+   * a monotonic, lex-sortable id. Returns the assigned id so callers (e.g.
+   * test harnesses) can correlate.
+   */
+  log(entry: Omit<AuditEntry, "id">): AuditEntry {
+    const id = String(++this.nextSeq).padStart(16, "0");
+    const full: AuditEntry = { ...entry, id };
+    this.entries[this.head] = full;
     this.head = (this.head + 1) % this.maxEntries;
     if (this.count < this.maxEntries) this.count++;
+    return full;
   }
 
   /**
    * Record a tenant-binding failure as a distinct security event. Operators
    * alert on this — it is never expected in steady-state.
    */
-  logTenantMismatch(opts: { agentId?: string; method?: string; ip?: string }): void {
-    this.log({
+  logTenantMismatch(opts: { agentId?: string; method?: string; ip?: string }): AuditEntry {
+    return this.log({
       timestamp: new Date().toISOString(),
       agentId: opts.agentId,
       method: opts.method ?? "unknown",
@@ -246,6 +275,46 @@ export class AuditLogger {
     return result;
   }
 
+  /**
+   * Cursor-based pagination over the in-memory ring. Returns entries whose
+   * id is strictly greater than `cursor` (or all entries when omitted), in
+   * cursor-ascending order.
+   *
+   * - `limit` is capped at AUDIT_MAX_LIMIT and defaults to AUDIT_DEFAULT_LIMIT.
+   * - `tenantFilter`, when set, drops entries whose `tenantId` is not equal —
+   *   defence-in-depth for the bound-tenant case (the buffer should already
+   *   be single-tenant when AGENTDB_TENANT_ID is set, but we filter anyway).
+   * - `nextCursor` is the id of the last returned entry, or `null` when the
+   *   caller has caught up to the buffer's tail.
+   *
+   * Callers that need entries older than the in-memory window will see them
+   * silently dropped — retention beyond `maxEntries` is the control plane's
+   * job (poll often enough; see docs/specs/upstream-agentdb-audit-streaming.md).
+   */
+  query(opts: { cursor?: string; limit?: number; tenantFilter?: string } = {}): AuditQueryResult {
+    const requested = opts.limit ?? AUDIT_DEFAULT_LIMIT;
+    const limit = Math.max(1, Math.min(AUDIT_MAX_LIMIT, requested));
+    const cursor = opts.cursor;
+    const tenantFilter = opts.tenantFilter;
+
+    // Collect up to `limit + 1` matching entries; the extra one (if found) tells
+    // us another page exists without requiring a second pass over the buffer.
+    const collected: AuditEntry[] = [];
+    for (let i = 0; i < this.count; i++) {
+      const idx = (this.head - this.count + i + this.maxEntries) % this.maxEntries;
+      const entry = this.entries[idx];
+      if (cursor !== undefined && entry.id <= cursor) continue;
+      if (tenantFilter !== undefined && entry.tenantId !== tenantFilter) continue;
+      collected.push(entry);
+      if (collected.length > limit) break;
+    }
+
+    const hasMore = collected.length > limit;
+    const entries = hasMore ? collected.slice(0, limit) : collected;
+    const nextCursor = hasMore ? entries[entries.length - 1].id : null;
+    return { entries, nextCursor };
+  }
+
   /** Create Express middleware that logs requests. */
   middleware(): (req: Request, res: Response, next: NextFunction) => void {
     return (req: Request, _res: Response, next: NextFunction) => {
@@ -253,8 +322,13 @@ export class AuditLogger {
       if (auth) {
         // Extract tool name from MCP request body
         let tool: string | undefined;
+        let metadata: Record<string, unknown> | undefined;
         if (req.body?.method === "tools/call") {
           tool = req.body?.params?.name;
+          const args = req.body?.params?.arguments;
+          if (args && typeof args === "object") {
+            metadata = args as Record<string, unknown>;
+          }
         }
 
         this.log({
@@ -264,6 +338,7 @@ export class AuditLogger {
           tool,
           ip: req.ip,
           tenantId: auth.tenantId,
+          metadata,
         });
       }
       next();
