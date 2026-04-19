@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Docs** — replace `npx agentdb` with `npx @backloghq/agentdb` across README, DEPLOYMENT, CLI `--help`, and CLAUDE.md. The bare `agentdb` name resolves to an unrelated package on npm; the scoped name is required.
+
 ## [1.3.0] - 2026-04-18
 
 ### Added
@@ -350,7 +354,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 **MCP adapter:**
 - stdio transport (single client)
 - HTTP/Streamable transport (multiple concurrent clients, session management)
-- CLI: `npx agentdb --path ./data [--http] [--port 3000]`
+- CLI: `npx @backloghq/agentdb --path ./data [--http] [--port 3000]`
 
 **S3 backend:**
 - CLI flags: `--backend s3 --bucket <name> --region <region> [--prefix <path>]`

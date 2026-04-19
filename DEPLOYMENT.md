@@ -5,7 +5,7 @@
 The simplest setup. One agent, one process, data on disk.
 
 ```bash
-npx agentdb --path ./data
+npx @backloghq/agentdb --path ./data
 ```
 
 Or import directly:
@@ -25,7 +25,7 @@ const db = new AgentDB("./data");
 One agent connects via stdio MCP transport. No network overhead — communication is via stdin/stdout pipes. This is how Claude Code and most MCP clients connect.
 
 ```bash
-npx agentdb --path ./data
+npx @backloghq/agentdb --path ./data
 ```
 
 Add to your MCP client config (e.g., Claude Code `settings.json`):
@@ -64,10 +64,10 @@ Start the server:
 
 ```bash
 # Filesystem
-npx agentdb --path ./data --http --port 3000
+npx @backloghq/agentdb --path ./data --http --port 3000
 
 # S3
-npx agentdb --backend s3 --bucket my-bucket --region us-east-1 --http --port 3000
+npx @backloghq/agentdb --backend s3 --bucket my-bucket --region us-east-1 --http --port 3000
 ```
 
 Agents connect via MCP Streamable HTTP or direct HTTP calls.
@@ -103,7 +103,7 @@ Agent 3 ──────┘
 Each agent:
 
 ```bash
-npx agentdb --backend s3 --bucket my-bucket --agent-id agent-1
+npx @backloghq/agentdb --backend s3 --bucket my-bucket --agent-id agent-1
 ```
 
 Or in code:

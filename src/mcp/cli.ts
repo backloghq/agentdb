@@ -40,7 +40,7 @@ if (args.includes("--help") || args.includes("-h")) {
 AgentDB MCP server
 
 Usage:
-  npx agentdb [options]
+  npx @backloghq/agentdb [options]
 
 Options:
   --path <dir>              Data directory (default: ./agentdb-data or AGENTDB_PATH)

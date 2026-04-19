@@ -83,7 +83,7 @@ src/
   mcp/auth.ts           # Auth middleware (bearer token, rate limiter, audit logger)
   mcp/jwt.ts            # JWT validation with jose
   mcp/subscriptions.ts  # NOTIFY/LISTEN: SubscriptionManager for real-time change notifications
-  mcp/cli.ts            # CLI: npx agentdb --path ./data [--backend s3 --bucket ...]
+  mcp/cli.ts            # CLI: npx @backloghq/agentdb --path ./data [--backend s3 --bucket ...]
 ```
 
 ## Key Design Decisions
