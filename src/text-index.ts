@@ -137,7 +137,7 @@ export class TextIndex {
     const N = this.docTerms.size;
     if (N === 0) return [];
 
-    const avgdl = N > 0 ? this.totalLen / N : 1;
+    const avgdl = this.totalLen > 0 ? this.totalLen / N : 1;
     const { k1, b } = this;
 
     const scores = new Map<string, number>();
