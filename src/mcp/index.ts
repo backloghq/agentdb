@@ -9,13 +9,13 @@ import { AgentDB } from "../agentdb.js";
 import { VERSION } from "../index.js";
 import { getTools } from "../tools/index.js";
 import type { AgentDBOptions } from "../agentdb.js";
-import { createAuthMiddleware, RateLimiter, AuditLogger, authContext, getCurrentAuth } from "./auth.js";
+import { createAuthMiddleware, RateLimiter, AuditLogger, authContext, getCurrentAuth, AUDIT_MAX_LIMIT, AUDIT_DEFAULT_LIMIT } from "./auth.js";
 import type { TokenMap, AuthFn } from "./auth.js";
 import { SubscriptionManager } from "./subscriptions.js";
 
-export { createAuthMiddleware, RateLimiter, AuditLogger, authContext, getCurrentAuth };
+export { createAuthMiddleware, RateLimiter, AuditLogger, authContext, getCurrentAuth, AUDIT_MAX_LIMIT, AUDIT_DEFAULT_LIMIT };
 export { SubscriptionManager } from "./subscriptions.js";
-export type { TokenMap, AuthFn, AuthIdentity, AuthenticatedRequest, AuditEntry } from "./auth.js";
+export type { TokenMap, AuthFn, AuthIdentity, AuthenticatedRequest, AuditEntry, AuditQueryResult } from "./auth.js";
 export { createJwtAuth } from "./jwt.js";
 export type { JwtAuthOptions } from "./jwt.js";
 
@@ -139,6 +139,50 @@ export interface HttpOptions {
   corsOrigins?: string[];
   /** Extra schema JSON files to load after init (file-as-overlay, per-file isolation). */
   schemaPaths?: string[];
+  /**
+   * Tenant the process is bound to. When set, every authenticated request
+   * must carry a matching tenant binding (singular token implicitly bound;
+   * tokens-map entries must declare `tenantId`; JWTs must carry the tenant
+   * claim configured on `authFn`). Process invariant: read once at startup.
+   */
+  expectedTenantId?: string;
+}
+
+/**
+ * Translate an in-process AuditEntry to the wire shape consumed by the control
+ * plane shipper. See docs/specs/upstream-agentdb-audit-streaming.md.
+ *
+ * `action` collapses to the tool name when the entry was a `tools/call`
+ * (`db_insert`, `db_find`, etc.) and otherwise to the JSON-RPC method
+ * (`initialize`, `tools/list`, …) so the central store can answer "what was
+ * called" uniformly. `event` surfaces only on security entries — operators
+ * alert on `tenant_mismatch` separately from generic auth failures.
+ */
+function toAuditWire(e: import("./auth.js").AuditEntry): {
+  id: string;
+  ts: string;
+  agent_id: string | null;
+  tenant_id: string | null;
+  action: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  metadata: Record<string, unknown>;
+  ip: string | null;
+  event?: "tenant_mismatch";
+} {
+  const wire = {
+    id: e.id,
+    ts: e.timestamp,
+    agent_id: e.agentId ?? null,
+    tenant_id: e.tenantId ?? null,
+    action: e.tool ?? e.method,
+    resource_type: e.event ? "auth" : (e.tool ? "tool" : "mcp"),
+    resource_id: null as string | null,
+    metadata: e.metadata ?? {},
+    ip: e.ip ?? null,
+  };
+  if (e.event) return { ...wire, event: e.event };
+  return wire;
 }
 
 async function loadExtraSchemas(db: AgentDB, schemaPaths?: string[]): Promise<void> {
@@ -193,11 +237,17 @@ export async function startHttp(
     });
   }
 
+  // Audit logging — created before auth middleware so it can record
+  // tenant_mismatch security events from the auth middleware itself.
+  const auditLog = new AuditLogger();
+
   // Auth middleware
   const authMiddleware = createAuthMiddleware({
     token: opts?.authToken,
     tokens: opts?.authTokens,
     authFn: opts?.authFn,
+    expectedTenantId: opts?.expectedTenantId,
+    auditLog,
   });
   app.use("/mcp", authMiddleware);
 
@@ -207,15 +257,36 @@ export async function startHttp(
     app.use("/mcp", limiter.middleware());
   }
 
-  // Audit logging
-  const auditLog = new AuditLogger();
   app.use("/mcp", auditLog.middleware());
+
+  // Audit shipping endpoint — auth-gated; bound-tenant filter applies
+  // automatically when the process is tenant-bound. See
+  // docs/specs/upstream-agentdb-audit-streaming.md for the wire contract.
+  app.use("/audit", authMiddleware);
+  app.get("/audit", (req, res) => {
+    const cursorParam = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+    const limitParam = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : undefined;
+    const limit = Number.isFinite(limitParam) ? (limitParam as number) : undefined;
+
+    const { entries, nextCursor } = auditLog.query({
+      cursor: cursorParam,
+      limit,
+      // Bound-tenant filter: only the tenant the process is bound to may
+      // observe its own entries. Defence-in-depth — the buffer should already
+      // be single-tenant when expectedTenantId is set.
+      tenantFilter: opts?.expectedTenantId,
+    });
+
+    res.json({
+      entries: entries.map(toAuditWire),
+      nextCursor,
+    });
+  });
 
   // Health check (no auth required)
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", version: VERSION });
   });
-
 
   // Subscription manager for NOTIFY/LISTEN
   const subscriptions = new SubscriptionManager(db);

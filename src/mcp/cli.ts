@@ -2,6 +2,7 @@
 import { readdir } from "node:fs/promises";
 import { dirname, basename, resolve, join } from "node:path";
 import { startStdio, startHttp } from "./index.js";
+import { validateTenantId } from "./tenant-binding.js";
 import type { AgentDBOptions } from "../agentdb.js";
 
 const args = process.argv.slice(2);
@@ -21,6 +22,9 @@ let agentId = process.env.AGENTDB_AGENT_ID ?? "";
 let authToken = process.env.AGENTDB_AUTH_TOKEN ?? "";
 let rateLimit = parseInt(process.env.AGENTDB_RATE_LIMIT ?? "0", 10) || 0;
 let corsOrigins = process.env.AGENTDB_CORS_ORIGINS ?? "";
+// Tenant binding — when set, every authenticated request must carry a
+// matching tenant claim/binding. Process invariant: read once at startup.
+let tenantId = process.env.AGENTDB_TENANT_ID ?? "";
 
 // Write mode
 let writeMode = process.env.AGENTDB_WRITE_MODE ?? "immediate";
@@ -36,7 +40,7 @@ if (args.includes("--help") || args.includes("-h")) {
 AgentDB MCP server
 
 Usage:
-  npx agentdb [options]
+  npx @backloghq/agentdb [options]
 
 Options:
   --path <dir>              Data directory (default: ./agentdb-data or AGENTDB_PATH)
@@ -49,6 +53,11 @@ Options:
   --region <region>         AWS region for S3
   --agent-id <id>           Agent ID for multi-writer mode
   --auth-token <token>      Bearer token for HTTP authentication
+  --tenant-id <id>          Bind this process to a tenant. When set, every
+                            authenticated request must carry a matching tenant
+                            (singular --auth-token implicitly bound; JWTs must
+                            carry the tid claim). Cross-tenant credentials are
+                            rejected with a tenant_mismatch security event.
   --rate-limit <n>          Max requests/minute per IP (HTTP only)
   --cors <origins>          Comma-separated allowed CORS origins
   --write-mode <mode>       Write mode: immediate (default), group, or async
@@ -59,8 +68,8 @@ Options:
 
 Environment variables: AGENTDB_PATH, AGENTDB_BACKEND, AGENTDB_S3_BUCKET,
   AGENTDB_S3_PREFIX, AGENTDB_S3_REGION, AGENTDB_AGENT_ID, AGENTDB_AUTH_TOKEN,
-  AGENTDB_RATE_LIMIT, AGENTDB_CORS_ORIGINS, AGENTDB_WRITE_MODE, AGENTDB_EMBEDDINGS,
-  AGENTDB_EMBEDDINGS_API_KEY, AGENTDB_OLLAMA_URL, AWS_REGION
+  AGENTDB_TENANT_ID, AGENTDB_RATE_LIMIT, AGENTDB_CORS_ORIGINS, AGENTDB_WRITE_MODE,
+  AGENTDB_EMBEDDINGS, AGENTDB_EMBEDDINGS_API_KEY, AGENTDB_OLLAMA_URL, AWS_REGION
 `.trimStart());
   process.exit(0);
 }
@@ -78,6 +87,7 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === "--region" && next) { s3Region = next; i++; }
   else if (arg === "--agent-id" && next) { agentId = next; i++; }
   else if (arg === "--auth-token" && next) { authToken = next; i++; }
+  else if (arg === "--tenant-id" && next) { tenantId = next; i++; }
   else if (arg === "--rate-limit" && next) { rateLimit = parseInt(next, 10); i++; }
   else if (arg === "--cors" && next) { corsOrigins = next; i++; }
   else if (arg === "--write-mode" && next) { writeMode = next; i++; }
@@ -158,6 +168,8 @@ async function resolveBackend(): Promise<AgentDBOptions> {
 }
 
 async function main(): Promise<void> {
+  if (tenantId) validateTenantId(tenantId);
+
   const dbOpts = await resolveBackend();
 
   const resolvedPaths = (await Promise.all(schemaGlobs.map(resolveGlob))).flat();
@@ -171,9 +183,11 @@ async function main(): Promise<void> {
       rateLimit: rateLimit || undefined,
       corsOrigins: corsOrigins ? corsOrigins.split(",").map((s) => s.trim()) : undefined,
       schemaPaths: resolvedPaths.length > 0 ? resolvedPaths : undefined,
+      expectedTenantId: tenantId || undefined,
     });
     console.error(`AgentDB MCP server running on http://${host}:${port}/mcp`);
     if (authToken) console.error("Authentication: bearer token required");
+    if (tenantId) console.error(`Tenant binding: bound to tenant ${tenantId}`);
     if (rateLimit) console.error(`Rate limit: ${rateLimit} requests/minute`);
   } else {
     await startStdio(dataDir, dbOpts, resolvedPaths.length > 0 ? { schemaPaths: resolvedPaths } : undefined);
