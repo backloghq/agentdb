@@ -42,7 +42,7 @@ src/
   auth-context.ts       # Shared auth identity (AsyncLocalStorage) — used by tools + mcp
   schema.ts             # defineSchema(), PersistedSchema, extractPersistedSchema, mergeSchemas, mergePersistedSchemas, validatePersistedSchema, import/export
   agentdb.ts            # AgentDB class: collection manager, schema persistence (persistSchema/loadPersistedSchema/deletePersistedSchema/loadSchemasFromFiles), lazy loading, LRU, memory monitor
-  collection.ts         # Collection: CRUD, middleware, search, views, TTL, tailing, iterate() async generator (~1470 lines)
+  collection.ts         # Collection: CRUD, middleware, search, views, TTL, tailing, iterate() async generator; bm25Search() BM25-ranked lexical search with filter + summary
   collection-helpers.ts # Pure utilities: stripMeta, isExpired, applyUpdate, compositeKey, filter cache
   collection-indexes.ts # IndexManager: B-tree, composite, array, bloom filter indexes + query planning
   record-cache.ts       # LRU cache for disk-backed mode (Map insertion-order eviction)

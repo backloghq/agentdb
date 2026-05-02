@@ -1147,6 +1147,65 @@ export class Collection {
     };
   }
 
+  /**
+   * BM25-ranked full-text search. Returns records sorted by BM25 score descending.
+   *
+   * Indexing is restricted to schema-declared `searchable` fields when the collection
+   * was opened with a schema; falls back to all string fields otherwise.
+   *
+   * `candidateLimit` controls how many BM25 candidates are fetched before filter pruning.
+   * When a `filter` is selective, the final result set may be smaller than `limit` — the
+   * method does not retry beyond `candidateLimit`. Hybrid search callers should compensate.
+   *
+   * Requires textSearch: true in collection options.
+   */
+  async bm25Search(
+    query: string,
+    opts?: {
+      limit?: number;
+      filter?: Record<string, unknown> | string;
+      summary?: boolean;
+      candidateLimit?: number;
+    },
+  ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
+    if (!this.textIdx) {
+      throw new Error("BM25 search not enabled. Set textSearch: true in collection options.");
+    }
+    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
+
+    if (!query || !query.trim()) return { records: [], scores: [] };
+
+    const limit = opts?.limit ?? 10;
+    const candidateLimit = opts?.candidateLimit ?? Math.max(limit * 4, 50);
+
+    const candidates = this.textIdx.searchScored(query, { limit: candidateLimit });
+    if (candidates.length === 0) return { records: [], scores: [] };
+
+    const predicate = opts?.filter ? this.resolve(opts.filter) : null;
+    const allAccessor = this.allCleanRecords();
+
+    const records: Record<string, unknown>[] = [];
+    const scores: number[] = [];
+
+    for (const { id, score } of candidates) {
+      if (records.length >= limit) break;
+      let record: StoredRecord | undefined;
+      if (this._diskStore) {
+        record = await this._diskStore.get(id) as StoredRecord | undefined;
+      } else {
+        record = this.store.get(id);
+      }
+      if (!record || isExpired(record)) continue;
+      const clean = stripMeta(record);
+      if (predicate && !predicate(clean)) continue;
+      const withComputed = this.applyComputed(clean, allAccessor);
+      records.push(opts?.summary ? summarize(withComputed) : withComputed);
+      scores.push(score);
+    }
+
+    return { records, scores };
+  }
+
   // --- Named views ---
 
   /** Define a named query view. Results are cached until the collection is mutated. */
