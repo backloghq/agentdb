@@ -5,6 +5,7 @@ import type { DiskStore } from "./disk-store.js";
 import { getNestedValue } from "./filter.js";
 // parseCompactFilter used by IndexManager (imported there directly)
 import { TextIndex } from "./text-index.js";
+import { rrf } from "./rrf.js";
 import { ViewManager } from "./view.js";
 import type { ViewDefinition } from "./view.js";
 import { EventEmitter } from "node:events";
@@ -1200,6 +1201,81 @@ export class Collection {
       if (predicate && !predicate(clean)) continue;
       const withComputed = this.applyComputed(clean, allAccessor);
       records.push(opts?.summary ? summarize(withComputed) : withComputed);
+      scores.push(score);
+    }
+
+    return { records, scores };
+  }
+
+  /**
+   * Hybrid search: fuses BM25 lexical and semantic vector results via RRF.
+   *
+   * Runs both arms in parallel and merges with Reciprocal Rank Fusion. Degrades
+   * gracefully: if the embedding provider is not configured only BM25 is used;
+   * if text search is not enabled only semantic is used. Throws when both are
+   * unavailable.
+   *
+   * Returned scores are RRF scores (not raw BM25 or cosine values).
+   */
+  async hybridSearch(
+    query: string,
+    opts?: {
+      limit?: number;
+      filter?: Record<string, unknown> | string;
+      k?: number;
+      summary?: boolean;
+      candidateLimit?: number;
+    },
+  ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
+    const hasBm25 = !!this.textIdx;
+    const hasSemantic = !!(this.embeddingProvider && this.hnswIdx);
+
+    if (!hasBm25 && !hasSemantic) {
+      throw new Error("hybridSearch requires either an embedding provider or a text index");
+    }
+
+    const limit = opts?.limit ?? 10;
+    const candidateLimit = opts?.candidateLimit ?? Math.max(limit * 4, 50);
+    const k = opts?.k ?? 60;
+    const armOpts = { limit: candidateLimit, filter: opts?.filter, summary: opts?.summary };
+
+    // Run available arms in parallel
+    const [bm25Result, semResult] = await Promise.all([
+      hasBm25 ? this.bm25Search(query, armOpts) : Promise.resolve({ records: [] as Record<string, unknown>[], scores: [] as number[] }),
+      hasSemantic ? this.semanticSearch(query, armOpts) : Promise.resolve({ records: [] as Record<string, unknown>[], scores: [] as number[] }),
+    ]);
+
+    // Build id lists preserving arm order; build record map from both arms
+    const recordMap = new Map<string, Record<string, unknown>>();
+    const lexList: Array<{ id: string }> = [];
+    const semList: Array<{ id: string }> = [];
+
+    for (const rec of bm25Result.records) {
+      const id = rec._id as string;
+      lexList.push({ id });
+      recordMap.set(id, rec);
+    }
+    for (const rec of semResult.records) {
+      const id = rec._id as string;
+      semList.push({ id });
+      if (!recordMap.has(id)) recordMap.set(id, rec);
+    }
+
+    // Build the lists to fuse — skip empty arms so RRF isn't padded with zero-length lists
+    const listsToFuse: Array<Array<{ id: string }>> = [];
+    if (lexList.length > 0) listsToFuse.push(lexList);
+    if (semList.length > 0) listsToFuse.push(semList);
+
+    if (listsToFuse.length === 0) return { records: [], scores: [] };
+
+    const fused = rrf(listsToFuse, { k, limit });
+
+    const records: Record<string, unknown>[] = [];
+    const scores: number[] = [];
+    for (const { id, score } of fused) {
+      const rec = recordMap.get(id);
+      if (!rec) continue;
+      records.push(rec);
       scores.push(score);
     }
 
