@@ -54,7 +54,7 @@ src/
   hnsw.ts               # HNSW index for approximate nearest neighbor search
   btree.ts              # Sorted-array index + query frequency tracker
   bloom.ts              # Bloom filter for probabilistic existence checks
-  text-index.ts         # Inverted index for full-text search
+  text-index.ts         # Inverted index for full-text search; BM25 scoring via searchScored() (k1/b configurable, v2 JSON persistence)
   view.ts               # Named views with cache invalidation
   permissions.ts        # Per-agent permission manager
   memory.ts             # Memory monitor with per-collection budgets

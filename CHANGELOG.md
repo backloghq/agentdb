@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+- **BM25 scoring on `TextIndex`** — `searchScored(query, opts?)` returns OR-semantics BM25-ranked results; `k1`/`b` configurable via constructor; `toJSON` bumped to v2 (per-doc TF map + length); `fromJSON` accepts v1 (lazy upgrade) and v2.
+
 ## [1.3.1] - 2026-04-19
 
 ### Added
