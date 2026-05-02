@@ -55,6 +55,7 @@ src/
   btree.ts              # Sorted-array index + query frequency tracker
   bloom.ts              # Bloom filter for probabilistic existence checks
   text-index.ts         # Inverted index for full-text search; BM25 scoring via searchScored() (k1/b configurable, v2 JSON persistence)
+  rrf.ts                # Reciprocal Rank Fusion utility — rrf(lists, opts?) fuses N ranked lists; k configurable (default 60)
   view.ts               # Named views with cache invalidation
   permissions.ts        # Per-agent permission manager
   memory.ts             # Memory monitor with per-collection budgets
