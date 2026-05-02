@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status:** v1.3 shipped. 1084 tests (in progress: v1.4 hybrid search). searchable:true per-field schema opt-in for BM25 indexing; Collection.searchableFields() getter; zero-flag fallback for backwards compat. Persisted schemas with agent context (description, instructions, field descriptions), schema merge logic (mergeSchemas + mergePersistedSchemas), version tracking, admin-guarded modifications. Schema lifecycle tools: db_get_schema/db_set_schema/db_delete_schema/db_diff_schema/db_infer_schema/db_migrate. db_migrate uses two-phase snapshot for pagination correctness; ops capped at 100; PROTECTED set blocks prototype-pollution keys. db_infer_schema uses Algorithm R reservoir sampling streamed via Collection.iterate() (O(N) time, O(sampleSize) memory). Portable JSON import/export. db_set_schema uses per-property overlay merge preserving untouched field properties. Schema bootstrap: schemas/*.json auto-loaded on init via loadSchemasFromFiles (overlay semantics, per-file isolation, filename-derived name fallback, 10MB size cap, name-mismatch warning). CLI --schemas <glob> flag loads additional schema files after auto-discover (supports *, ?, multiple flags). startHttp/startStdio accept schemaPaths option. startHttp return includes db instance. $strLen filter operator added. _agent audit stamp uses authenticated identity (auth wins over self-reported). Disk mode: JSONL for point lookups, Parquet for column scans, short-circuit at limit, sorted reads, lazy index loading. Disk mode works on filesystem + S3. 38 tools (36 core + db_subscribe/db_unsubscribe on HTTP). Auth + security hardened.
+**Status:** v1.3 shipped. 1084 tests (in progress: v1.4 hybrid search). searchable:true per-field schema opt-in for BM25 indexing; Collection.searchableFields() getter; zero-flag fallback for backwards compat. Persisted schemas with agent context (description, instructions, field descriptions), schema merge logic (mergeSchemas + mergePersistedSchemas), version tracking, admin-guarded modifications. Schema lifecycle tools: db_get_schema/db_set_schema/db_delete_schema/db_diff_schema/db_infer_schema/db_migrate. db_migrate uses two-phase snapshot for pagination correctness; ops capped at 100; PROTECTED set blocks prototype-pollution keys. db_infer_schema uses Algorithm R reservoir sampling streamed via Collection.iterate() (O(N) time, O(sampleSize) memory). Portable JSON import/export. db_set_schema uses per-property overlay merge preserving untouched field properties. Schema bootstrap: schemas/*.json auto-loaded on init via loadSchemasFromFiles (overlay semantics, per-file isolation, filename-derived name fallback, 10MB size cap, name-mismatch warning). CLI --schemas <glob> flag loads additional schema files after auto-discover (supports *, ?, multiple flags). startHttp/startStdio accept schemaPaths option. startHttp return includes db instance. $strLen filter operator added. _agent audit stamp uses authenticated identity (auth wins over self-reported). Disk mode: JSONL for point lookups, Parquet for column scans, short-circuit at limit, sorted reads, lazy index loading. Disk mode works on filesystem + S3. 39 tools (37 core + db_subscribe/db_unsubscribe on HTTP). db_hybrid_search added (BM25+semantic RRF fusion). Auth + security hardened.
 
 ## Commands
 
@@ -30,7 +30,7 @@ npm run test:coverage  # vitest coverage
 
 ```
 agentdb          — core library (AgentDB, Collection, filters, indexes, embeddings, S3Backend)
-agentdb/tools    — framework-agnostic tool definitions (getTools → 36 tools)
+agentdb/tools    — framework-agnostic tool definitions (getTools → 37 tools)
 agentdb/mcp      — MCP server adapter (stdio + HTTP/Streamable transport)
 ```
 
@@ -69,7 +69,7 @@ src/
     http.ts             # Custom HTTP embedding provider
     quantize.ts         # Int8 quantization for vector storage
     index.ts            # Provider factory
-  tools/                # Tool definitions split into per-domain modules (getTools aggregator → 36 core, 38 with HTTP)
+  tools/                # Tool definitions split into per-domain modules (getTools aggregator → 37 core, 39 with HTTP)
     index.ts            # Aggregator: getTools(db, opts?) composes all domains in canonical order
     shared.ts           # AgentTool type, makeSafe() wrapper (auth identity unification), READ/WRITE/DESTRUCTIVE annotations, shared zod params
     admin.ts            # db_collections, db_create, db_drop, db_purge, db_stats (5 tools)
@@ -77,7 +77,7 @@ src/
     schema.ts           # db_schema, db_get_schema, db_set_schema, db_delete_schema, db_diff_schema, db_infer_schema (6 tools)
     migrate.ts          # db_migrate — two-phase snapshot, deletion-as-failed, ops cap, prototype-pollution guards (1 tool)
     archive.ts          # db_archive, db_archive_list, db_archive_load (3 tools)
-    vector.ts           # db_semantic_search, db_embed, db_vector_upsert, db_vector_search (4 tools)
+    vector.ts           # db_semantic_search, db_embed, db_vector_upsert, db_vector_search, db_hybrid_search (5 tools)
     blob.ts             # db_blob_write, db_blob_read, db_blob_list, db_blob_delete (4 tools)
     backup.ts           # db_export, db_import (2 tools)
   mcp/index.ts          # MCP server (stdio + HTTP/Streamable transport); startHttp/startStdio accept schemaPaths option

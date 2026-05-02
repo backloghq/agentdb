@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Schema-declared BM25 fields** — `searchable?: boolean` on `FieldDef` and `PersistedFieldDef`; Collection projects records to marked fields before text indexing; zero-flag fallback preserves full-record indexing for backwards compat; `Collection.searchableFields()` getter for introspection; non-string/string[] fields with `searchable:true` warn and are ignored.
 - **`Collection.bm25Search()`** — BM25-ranked full-text search at the Collection layer; supports optional attribute filter, summary projection, and `candidateLimit` overscan; returns `{ records, scores }` aligned by index.
 - **`Collection.hybridSearch()`** — fuses BM25 + semantic arms via RRF; both arms run in parallel; degrades to single-arm when embedding provider or text index is absent; throws only when both are unavailable; `k`, `candidateLimit`, `filter`, `summary` all forwarded to arms.
+- **`db_hybrid_search` MCP tool** — exposes `hybridSearch` via the tool layer; 37 core tools (39 with HTTP subscriptions).
 
 ## [1.3.1] - 2026-04-19
 

@@ -91,5 +91,38 @@ export function getVectorTools(db: AgentDB): AgentTool[] {
         });
       }),
     },
+
+    {
+      name: "db_hybrid_search",
+      title: "Hybrid Search",
+      description:
+        "Search records by combining BM25 lexical scoring with vector " +
+        "similarity, fused via Reciprocal Rank Fusion. Best for queries " +
+        "where exact-term matches and semantic similarity both matter. " +
+        "Falls back to BM25 if no embedding provider is configured, or " +
+        "vector-only if the collection has no indexed text." + API_NOTE,
+      schema: z.object({
+        collection: collectionParam,
+        query: z.string().meta({ description: "Natural language query" }),
+        filter: filterParam,
+        limit: z.number().optional().default(10).meta({ description: "Max results (default 10)" }),
+        k: z.number().optional().default(60).meta({ description: "RRF k parameter (default 60)" }),
+        summary: z.boolean().optional().default(false).meta({ description: "Return summary fields only" }),
+      }),
+      outputSchema: z.object({
+        records: z.array(z.record(z.string(), z.unknown())),
+        scores: z.array(z.number()),
+      }),
+      annotations: READ,
+      execute: safe("db_hybrid_search", READ)(async (args) => {
+        const col = await db.collection(args.collection as string);
+        return col.hybridSearch(args.query as string, {
+          filter: args.filter as Record<string, unknown> | string | undefined,
+          limit: args.limit as number,
+          k: args.k as number,
+          summary: args.summary as boolean,
+        });
+      }),
+    },
   ];
 }
