@@ -31,6 +31,8 @@ export interface FieldDef {
   resolve?: (value: unknown) => unknown;
   /** Human-readable description of this field — used for agent discovery. */
   description?: string;
+  /** Include this field's text content in the BM25/full-text index. Only effective on string and string[] fields. */
+  searchable?: boolean;
 }
 
 // --- Hooks ---
@@ -137,6 +139,19 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     if (fieldValidator) fieldValidator(record);
   };
 
+  // Compute searchable fields — warn and skip non-string/string[] types
+  const searchableFields: string[] = [];
+  if (def.fields) {
+    for (const [name, field] of Object.entries(def.fields)) {
+      if (!field.searchable) continue;
+      if (field.type !== "string" && field.type !== "string[]") {
+        console.warn(`[agentdb] schema '${def.name}': field '${name}' has searchable:true but type '${field.type}' is not string or string[] — ignored`);
+        continue;
+      }
+      searchableFields.push(name);
+    }
+  }
+
   const collectionOptions: CollectionOptions = {
     validate,
     computed: def.computed,
@@ -144,6 +159,7 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     textSearch: def.textSearch,
     tagField: def.tagField,
     storageMode: def.storageMode,
+    ...(searchableFields.length > 0 ? { searchableFields } : {}),
   };
 
   return {
@@ -283,6 +299,8 @@ export interface PersistedFieldDef {
   max?: number;
   /** Human-readable description of this field — used for agent discovery. */
   description?: string;
+  /** Include this field's text content in the BM25/full-text index. Only effective on string and string[] fields. */
+  searchable?: boolean;
 }
 
 /**
@@ -334,6 +352,7 @@ export function extractPersistedSchema(def: SchemaDefinition): PersistedSchema {
       if (field.min !== undefined) pf.min = field.min;
       if (field.max !== undefined) pf.max = field.max;
       if (field.description !== undefined) pf.description = field.description;
+      if (field.searchable !== undefined) pf.searchable = field.searchable;
       persisted.fields[name] = pf;
     }
   }
@@ -436,6 +455,8 @@ export function mergeSchemas(code: SchemaDefinition, persisted: PersistedSchema)
           ...(cf.max !== undefined ? { max: cf.max } : pf.max !== undefined ? { max: pf.max } : {}),
           // Persisted description wins (agent context)
           ...(pf.description !== undefined ? { description: pf.description } : cf.description !== undefined ? { description: cf.description } : {}),
+          // Code searchable wins (developer intent)
+          ...(cf.searchable !== undefined ? { searchable: cf.searchable } : pf.searchable !== undefined ? { searchable: pf.searchable } : {}),
         };
       } else if (pf) {
         // Only in persisted
@@ -450,6 +471,7 @@ export function mergeSchemas(code: SchemaDefinition, persisted: PersistedSchema)
         if (cf.min !== undefined) pf2.min = cf.min;
         if (cf.max !== undefined) pf2.max = cf.max;
         if (cf.description !== undefined) pf2.description = cf.description;
+        if (cf.searchable !== undefined) pf2.searchable = cf.searchable;
         merged.fields[name] = pf2;
       }
     }
@@ -539,6 +561,8 @@ export function mergePersistedSchemas(base: PersistedSchema, overlay: PersistedS
         if (max !== undefined) result.max = max;
         const description = of_.description !== undefined ? of_.description : bf.description;
         if (description !== undefined) result.description = description;
+        const searchable = of_.searchable !== undefined ? of_.searchable : bf.searchable;
+        if (searchable !== undefined) result.searchable = searchable;
         merged.fields[fieldName] = result;
       } else if (of_) {
         merged.fields[fieldName] = { ...of_ };
@@ -645,6 +669,9 @@ export function validatePersistedSchema(schema: unknown): asserts schema is Pers
       }
       if (fd.description !== undefined && typeof fd.description !== "string") {
         throw new Error(`Field '${fieldName}.description' must be a string`);
+      }
+      if (fd.searchable !== undefined && typeof fd.searchable !== "boolean") {
+        throw new Error(`Field '${fieldName}.searchable' must be a boolean`);
       }
     }
   }

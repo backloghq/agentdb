@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ### Added
 - **BM25 scoring on `TextIndex`** — `searchScored(query, opts?)` returns OR-semantics BM25-ranked results; `k1`/`b` configurable via constructor; `toJSON` bumped to v2 (per-doc TF map + length); `fromJSON` accepts v1 (lazy upgrade) and v2.
 - **RRF fusion utility** — `rrf(lists, opts?)` in `src/rrf.ts`, exported from the core library; fuses N ranked lists via Reciprocal Rank Fusion (Cormack et al. 2009); `k` configurable (default 60); deduplicates within a list using first-occurrence rank.
+- **Schema-declared BM25 fields** — `searchable?: boolean` on `FieldDef` and `PersistedFieldDef`; Collection projects records to marked fields before text indexing; zero-flag fallback preserves full-record indexing for backwards compat; `Collection.searchableFields()` getter for introspection; non-string/string[] fields with `searchable:true` warn and are ignored.
 
 ## [1.3.1] - 2026-04-19
 

@@ -77,6 +77,8 @@ export interface CollectionOptions {
   tagField?: string;
   /** Storage mode override for this collection. */
   storageMode?: "memory" | "disk" | "auto";
+  /** Field names to restrict BM25/text indexing to. When empty, all string fields are indexed (fallback). */
+  searchableFields?: string[];
 }
 
 /** Change event emitted after mutations. */
@@ -119,6 +121,9 @@ export class Collection {
 
   /** Get the text index (for persistence). */
   getTextIndex(): TextIndex | null { return this.textIdx; }
+
+  /** Field names restricted to BM25/text indexing. Empty means all-strings fallback. */
+  searchableFields(): string[] { return this.opts.searchableFields ?? []; }
 
   /** Get the storage backend (for DiskStore I/O). */
   getBackend(): import("@backloghq/opslog").StorageBackend { return this.backend; }
@@ -182,12 +187,23 @@ export class Collection {
     this.indexes.updateIndexes(id, oldRecord, newRecord);
   }
 
+  /** Project a clean record to only searchable fields, or return as-is when fallback is active. */
+  private textRecord(record: Record<string, unknown>): Record<string, unknown> {
+    const fields = this.opts.searchableFields;
+    if (!fields || fields.length === 0) return record;
+    const projected: Record<string, unknown> = {};
+    for (const f of fields) {
+      if (f in record) projected[f] = record[f];
+    }
+    return projected;
+  }
+
   /** Rebuild the full text index from current store contents. */
   private rebuildTextIndex(): void {
     if (!this.textIdx) return;
     this.textIdx.clear();
     for (const [id, record] of this.store.entries()) {
-      this.textIdx.add(id, stripMeta(record));
+      this.textIdx.add(id, this.textRecord(stripMeta(record)));
     }
   }
 
@@ -205,7 +221,7 @@ export class Collection {
     const cleanRecords = this.indexes.incrementalUpdate(affectedIds, (id) => this.store.get(id));
     if (this.textIdx) {
       for (const [id, clean] of cleanRecords) {
-        if (clean) this.textIdx.add(id, clean);
+        if (clean) this.textIdx.add(id, this.textRecord(clean));
         else this.textIdx.remove(id);
       }
     }
@@ -304,7 +320,7 @@ export class Collection {
     // Single pass: detect TTL, build text index, load HNSW embeddings
     for (const [id, record] of this.store.entries()) {
       if (record[META_EXPIRES]) this._hasTTL = true;
-      if (this.textIdx) this.textIdx.add(id, stripMeta(record));
+      if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(record)));
       if (!isExpired(record)) {
         const stored = record[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
         if (stored) {
@@ -339,7 +355,7 @@ export class Collection {
     this.stampVersion(stored, id);
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
-    if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("insert", [id], opts?.agent);
     return id;
@@ -370,7 +386,7 @@ export class Collection {
     });
     if (this.textIdx) {
       for (const { id, stored } of prepared) {
-        this.textIdx.add(id, stripMeta(stored));
+        this.textIdx.add(id, this.textRecord(stripMeta(stored)));
       }
     }
     for (const { id, stored } of prepared) {
@@ -772,7 +788,7 @@ export class Collection {
     // Incremental re-index for text and B-tree (only affected records)
     if (this.textIdx) {
       for (const { id, updated } of updates) {
-        this.textIdx.add(id, stripMeta(updated));
+        this.textIdx.add(id, this.textRecord(stripMeta(updated)));
       }
     }
     for (const { id, old, updated } of updates) {
@@ -819,7 +835,7 @@ export class Collection {
     this.validateRecord(stored);
     this.stampVersion(stored, id);
     await this.store.set(id, stored);
-    if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("upsert", [id], opts?.agent);
     return { id, action: existing ? "updated" : "inserted" };
@@ -857,7 +873,7 @@ export class Collection {
     });
 
     for (const { id, stored, oldRecord, existing } of prepared) {
-      if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+      if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
       this.updateBTreeIndexes(id, oldRecord, stored);
       results.push({ id, action: existing ? "updated" : "inserted" });
     }
@@ -1291,7 +1307,7 @@ export class Collection {
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
     this.updateBTreeIndexes(id, oldRecord, stored);
-    if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
     // Update HNSW (remove old if exists, add new)
     if (this.hnswIdx.size > 0) {
       try { this.hnswIdx.remove(id); } catch { /* not in index yet */ }
