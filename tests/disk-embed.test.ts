@@ -586,3 +586,55 @@ describe("extractTextFromRecord — meta field exclusion (#173)", () => {
     expect(result).toBe("Alice foo bar");
   });
 });
+
+describe("_id exclusion regression catcher (#174)", () => {
+  it("embedUnembedded and semanticSearch pass identical text for the same record content", async () => {
+    const dir = await makeTmpDir();
+    const allCalls: string[][] = [];
+
+    const recordingProvider: EmbeddingProvider = {
+      dimensions: 4,
+      async embed(texts: string[]): Promise<number[][]> {
+        allCalls.push([...texts]);
+        return texts.map(() => [1, 0, 0, 0]);
+      },
+    };
+
+    const db = new AgentDB(dir, { embeddings: { provider: recordingProvider } });
+    await db.init();
+
+    const schema = defineSchema({
+      name: "reg174",
+      fields: { title: { type: "string" }, body: { type: "string" } },
+    });
+    const col = await db.collection(schema);
+
+    // Insert with agent/reason so _agent/_reason are stored on the record
+    await col.insert(
+      { _id: "r1", title: "unique phrase", body: "some content" },
+      { agent: "test-agent", reason: "seeding" },
+    );
+
+    // Call 0: embedUnembedded embeds the record
+    await col.embedUnembedded();
+    expect(allCalls.length).toBe(1);
+    const [embeddedText] = allCalls[0];
+
+    // No meta fields must leak into the embedded text
+    expect(embeddedText).not.toContain("r1");
+    expect(embeddedText).not.toContain("test-agent");
+    expect(embeddedText).not.toContain("seeding");
+
+    // Call 1: semanticSearch embeds the raw query string
+    const queryText = "unique phrase some content";
+    await col.semanticSearch(queryText);
+    expect(allCalls.length).toBe(2);
+    const [searchText] = allCalls[1];
+
+    // The text used during embedUnembedded must match what you'd query with
+    expect(embeddedText).toBe(searchText);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
