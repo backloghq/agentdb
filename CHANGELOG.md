@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Disk-mode hybrid search test** — `tests/hybrid-search.test.ts` extended with a close/reopen disk-mode test asserting both semantic-arm-only and BM25-arm-only docs appear in `hybridSearch` results after reopen.
 - **BM25 tuning via schema** — `bm25?: { k1?: number; b?: number }` added to `SchemaDefinition`, `PersistedSchema`, and `CollectionOptions` (`bm25K1`/`bm25B`); `Collection` constructor passes these to `new TextIndex({ k1, b })`; `extractPersistedSchema`, `mergeSchemas` (code wins), `mergePersistedSchemas` (overlay wins), and `validatePersistedSchema` all handle the new field.
 
+### Changed
+- **`Filter` type unified across all search methods** — `bm25Search` and `hybridSearch` `filter` opts now typed as `Filter` (`Record<string, unknown> | string | null | undefined`) matching `semanticSearch` and `searchByVector`; eliminates the narrower `Record<string, unknown> | string` overload.
+- **Over-fetch heuristic unified to `Math.max(limit*4, 50)`** — `semanticSearch` and `searchByVector` used `limit*3`; now matches the `bm25Search`/`materializeCandidates` heuristic.
+
 ### Fixed
 - **`_id`/`_version` leaked into BM25 index in fallback mode** — `Collection.textRecord` fallback (no `searchableFields`) returned the full `stripMeta` record, which still contains `_id` and `_version`; now explicitly excludes those keys so UUID tokens and version numbers are never indexed.
 - **Semantic search broken in disk mode** — `semanticSearch` and `searchByVector` used `this.store.get(id)` (memory-only opslog store), missing records in Parquet/JSONL; fixed via `materializeCandidates` which checks `_diskStore` first.

@@ -1226,7 +1226,7 @@ export class Collection {
     query: string,
     opts?: {
       limit?: number;
-      filter?: Record<string, unknown> | string;
+      filter?: Filter;
       summary?: boolean;
       candidateLimit?: number;
     },
@@ -1261,7 +1261,7 @@ export class Collection {
     query: string,
     opts?: {
       limit?: number;
-      filter?: Record<string, unknown> | string;
+      filter?: Filter;
       k?: number;
       summary?: boolean;
       candidateLimit?: number;
@@ -1395,7 +1395,7 @@ export class Collection {
 
     // Search HNSW
     const limit = opts?.limit ?? 10;
-    const candidates = this.hnswIdx.search(queryVec, limit * 3); // over-fetch for post-filter
+    const candidates = this.hnswIdx.search(queryVec, Math.max(limit * 4, 50));
 
     return this.materializeCandidates(candidates, { limit, filter: opts?.filter, summary: opts?.summary });
   }
@@ -1490,7 +1490,7 @@ export class Collection {
       throw new Error(`Vector dimension mismatch: index has ${this.hnswIdx.dims} dimensions, query has ${vector.length}`);
     }
     const limit = opts?.limit ?? 10;
-    const candidates = this.hnswIdx.search(vector, limit * 3);
+    const candidates = this.hnswIdx.search(vector, Math.max(limit * 4, 50));
 
     return this.materializeCandidates(candidates, { limit, filter: opts?.filter, summary: opts?.summary });
   }
