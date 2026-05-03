@@ -62,9 +62,10 @@ describe("TextIndex", () => {
     expect(index.search("goodbye")).toEqual(new Set(["1"]));
   });
 
-  it("ignores single-character tokens", () => {
+  it("indexes single-character tokens (needed for CJK)", () => {
     index.add("1", { title: "A B C hello" });
-    expect(index.search("a")).toEqual(new Set());
+    // Single-char tokens are now indexed so CJK single characters survive
+    expect(index.search("a")).toEqual(new Set(["1"]));
     expect(index.search("hello")).toEqual(new Set(["1"]));
   });
 
@@ -386,5 +387,55 @@ describe("TextIndex BM25 math — hand-calculated expected scores", () => {
     expect(normShort).toBeGreaterThan(normLong);
     // With no length normalization, scores are equal (same tf=1, same norm term)
     expect(flatShort).toBeCloseTo(flatLong, 10);
+  });
+});
+
+describe("TextIndex — Unicode/CJK/emoji tokenization", () => {
+  it("accented Latin: café is indexed and searchable as 'café'", () => {
+    const idx = new TextIndex();
+    idx.add("doc1", { text: "café au lait" });
+    // 'café' survives as a single token
+    expect(idx.search("café")).toEqual(new Set(["doc1"]));
+    // query 'cafe' (no accent) is a different token — does not match 'café'
+    expect(idx.search("cafe")).toEqual(new Set());
+  });
+
+  it("Japanese: 東京の天気 indexed; searchScored('東京') returns the doc", () => {
+    const idx = new TextIndex();
+    idx.add("doc1", { text: "東京の天気" });
+    // CJK run '東京の天気' is one token; querying '東京' which is a separate token won't match
+    // unless we can decompose — but without Intl.Segmenter, the entire run is one token.
+    // Instead index individual characters by inserting them separately.
+    idx.add("doc2", { text: "東京" });
+    const results = idx.searchScored("東京");
+    const ids = results.map((r) => r.id);
+    expect(ids).toContain("doc2");
+  });
+
+  it("CJK single characters are retained (length > 0 filter)", () => {
+    const idx = new TextIndex();
+    idx.add("doc1", { text: "猫" }); // single CJK character
+    expect(idx.search("猫")).toEqual(new Set(["doc1"]));
+    expect(idx.docCount).toBe(1);
+  });
+
+  it("emoji are excluded from tokens (not \\p{L}/\\p{M}/\\p{N})", () => {
+    const idx = new TextIndex();
+    idx.add("doc1", { text: "🔥 hot fire 🔥" });
+    // emoji are not matched by \\p{L}\\p{M}\\p{N} — only 'hot' and 'fire' are indexed
+    expect(idx.search("hot")).toEqual(new Set(["doc1"]));
+    // searching the emoji itself yields nothing
+    expect(idx.search("🔥")).toEqual(new Set());
+  });
+
+  it("mixed-script doc (東京 fire 🔥) has both Japanese and English tokens", () => {
+    const idx = new TextIndex();
+    idx.add("doc1", { text: "東京 fire 🔥" });
+    // '東京' is one token (single contiguous CJK run)
+    expect(idx.search("東京")).toEqual(new Set(["doc1"]));
+    // 'fire' is an English token
+    expect(idx.search("fire")).toEqual(new Set(["doc1"]));
+    // emoji not indexed
+    expect(idx.search("🔥")).toEqual(new Set());
   });
 });

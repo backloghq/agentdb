@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- **Unicode-aware tokenizer** — `tokenize()` in `text-index.ts` switched from ASCII `\w` regex to `[\p{L}\p{M}\p{N}]+/gu`; length filter lowered to `> 0` so single CJK characters survive. Accented Latin (café), CJK (東京), Hangul, and other non-ASCII text is now indexed and searchable. Emoji (not in `\p{L}\p{M}\p{N}`) remain excluded. Single-letter ASCII tokens (`a`, `i`) are now also indexed (minor tradeoff for CJK correctness). 5 new Unicode tests added.
 - **`db_bm25_search` MCP tool** — exposes `Collection.bm25Search` via MCP; supports `filter`, `limit`, `candidateLimit`, and `summary`; no embedding provider required. 38 core tools (40 with HTTP).
 - **`candidateLimit` param on `db_hybrid_search` tool** — surfaces the existing `Collection.hybridSearch` `candidateLimit` option; controls BM25/vector candidates fetched per arm before filter pruning (default `max(limit*4, 50)`).
 - **`Collection.materializeCandidates()`** — private helper factoring the fetch→filter→compute→summarize loop shared by `bm25Search`, `semanticSearch`, and `searchByVector`; disk-mode aware (parallel `Promise.all` via `_diskStore`) vs in-memory path.

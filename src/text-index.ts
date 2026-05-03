@@ -12,13 +12,14 @@
  * collection at once, iterate all records and call add() on each.
  */
 
-/** Tokenize a string into lowercase terms (with repeated occurrences). */
+/** Tokenize a string into lowercase terms (with repeated occurrences).
+ *  Uses Unicode property classes so CJK, diacritics, and accented text
+ *  are retained. Single-character tokens are kept so CJK chars survive. */
 function tokenize(text: string): string[] {
   return text
     .toLowerCase()
-    .replace(/[^\w\s]/g, " ")
-    .split(/\s+/)
-    .filter((t) => t.length > 1);
+    .match(/[\p{L}\p{M}\p{N}]+/gu)
+    ?.filter((t) => t.length > 0) ?? [];
 }
 
 /** Extract all string values from a record (recursively). */
