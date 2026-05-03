@@ -1,9 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
 import { defineSchema } from "../src/schema.js";
+import { DiskStore, IndexFileTooLargeError } from "../src/disk-store.js";
 
 async function makeTmpDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "agentdb-text-persist-"));
@@ -247,5 +248,72 @@ describe("BM25 disk persistence — v1 upgrade path", () => {
     expect(results[0].score).toBeGreaterThan(0);
     // No NaN
     expect(Number.isNaN(results[0].score)).toBe(false);
+  });
+});
+
+describe("IndexFileTooLargeError — oversized text-index throws on reopen", () => {
+  const REAL_LIMIT = DiskStore.MAX_INDEX_FILE_SIZE;
+  const FAKE_LIMIT = 10; // 10 bytes — any real index file exceeds this
+
+  beforeEach(() => {
+    DiskStore.MAX_INDEX_FILE_SIZE = FAKE_LIMIT;
+  });
+
+  afterEach(() => {
+    DiskStore.MAX_INDEX_FILE_SIZE = REAL_LIMIT;
+  });
+
+  it("throws IndexFileTooLargeError when text-index.json exceeds the limit on reopen", async () => {
+    const dir = await makeTmpDir();
+    try {
+      // Session 1: create a disk-mode collection with text search and insert a doc
+      let db = new AgentDB(dir);
+      await db.init();
+      const s = defineSchema({ name: "articles", textSearch: true, storageMode: "disk",
+        fields: { title: { type: "string", searchable: true } } });
+      const col = await db.collection(s);
+      await col.insert({ title: "hello world typescript" });
+      await db.close(); // saves text-index.json
+
+      // Session 2: reopen with the lowered cap — throw on first BM25 query (lazy load)
+      db = new AgentDB(dir);
+      await db.init();
+      const col2 = await db.collection(s);
+      await expect(col2.bm25Search("hello")).rejects.toThrow(IndexFileTooLargeError);
+      await db.close().catch(() => {});
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("IndexFileTooLargeError message includes filename, actual size, and limit", async () => {
+    const dir = await makeTmpDir();
+    try {
+      let db = new AgentDB(dir);
+      await db.init();
+      const s = defineSchema({ name: "articles2", textSearch: true, storageMode: "disk",
+        fields: { body: { type: "string", searchable: true } } });
+      const col = await db.collection(s);
+      await col.insert({ body: "some content here" });
+      await db.close();
+
+      db = new AgentDB(dir);
+      await db.init();
+      let thrown: Error | null = null;
+      try {
+        const col2 = await db.collection(s);
+        await col2.bm25Search("some");
+      } catch (e) {
+        thrown = e as Error;
+      } finally {
+        await db.close().catch(() => {});
+      }
+      expect(thrown).toBeInstanceOf(IndexFileTooLargeError);
+      expect(thrown!.message).toMatch(/text-index\.json/);
+      expect(thrown!.message).toMatch(/MAX_INDEX_FILE_SIZE/);
+      expect(thrown!.message).toMatch(`${FAKE_LIMIT}`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

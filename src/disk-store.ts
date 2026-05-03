@@ -31,6 +31,17 @@ import type { IndexManager } from "./collection-indexes.js";
 import type { TextIndex } from "./text-index.js";
 import type { StorageBackend } from "@backloghq/opslog";
 
+export class IndexFileTooLargeError extends Error {
+  constructor(filename: string, actual: number, limit: number) {
+    super(
+      `Text index file ${filename} exceeds MAX_INDEX_FILE_SIZE (${actual} > ${limit} bytes). ` +
+      `Disable text search on the collection or re-index with a smaller corpus. ` +
+      `See https://github.com/backloghq/agentdb#bm25-index-size-limits for recovery options.`,
+    );
+    this.name = "IndexFileTooLargeError";
+  }
+}
+
 export interface DiskStoreOptions {
   /** Max records in LRU cache (default: 1000). */
   cacheSize?: number;
@@ -386,8 +397,8 @@ export class DiskStore {
 
   // --- Index persistence ---
 
-  /** Max index file size to load (256MB). */
-  private static readonly MAX_INDEX_FILE_SIZE = 256 * 1024 * 1024;
+  /** Max index file size to load (256MB). Exposed for test overrides. */
+  static MAX_INDEX_FILE_SIZE = 256 * 1024 * 1024;
 
   /** Save index data to disk. Also updates cardinality for all indexed fields. */
   async saveIndexes(indexManager: IndexManager, textIndex?: TextIndex | null): Promise<void> {
@@ -467,6 +478,9 @@ export class DiskStore {
         continue;
       }
       if (content.length > DiskStore.MAX_INDEX_FILE_SIZE) {
+        if (key === "text") {
+          throw new IndexFileTooLargeError(filename, content.length, DiskStore.MAX_INDEX_FILE_SIZE);
+        }
         console.warn(`agentdb: skipping oversized index file ${filename} (${content.length} bytes)`);
         continue;
       }

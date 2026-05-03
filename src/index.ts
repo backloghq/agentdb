@@ -20,6 +20,7 @@ export type {
 } from "./collection.js";
 
 export { RecordCache } from "./record-cache.js";
+export { IndexFileTooLargeError } from "./disk-store.js";
 export type { CacheStats } from "./record-cache.js";
 export { ArrayIndex } from "./array-index.js";
 export { TextIndex } from "./text-index.js";

@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`searchByVector` now async** — was synchronous, preventing disk hydration; return type changed to `Promise<{ records, scores }>`.
 - **v1→v2 BM25 mixed-corpus ghost results** — `searchScored` was returning v1 docs with score=0, tie-broken by id (silently wrong rank order); v1 placeholder docs (empty tfMap, no TF data) are now skipped. A v1-only corpus returns `[]` from `searchScored`; mixed corpora return only v2-indexed docs. AND-search (`search()`) is unaffected. Each `add()` call upgrades that doc in place.
 - **`hybridSearch` per-arm error isolation** — a runtime failure in one arm (e.g. embedding provider throws) no longer rejects the entire call; the failing arm is treated as empty and the other arm's results are returned via RRF as usual.
+- **Oversized text-index now throws instead of silently degrading** — `DiskStore._doLoadIndexes` previously warned and skipped the text-index file when it exceeded `MAX_INDEX_FILE_SIZE` (256 MB, ~25–30K docs), causing `bm25Search` to silently return empty results and `hybridSearch` to silently degrade to vector-only. Now throws `IndexFileTooLargeError` (exported from core) so callers see an actionable error. B-tree/array indexes retain the warn+skip behaviour. README "Limits" subsection added under Hybrid Search.
 
 ## [1.4.0] - 2026-05-02
 

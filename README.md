@@ -723,6 +723,17 @@ const { records, scores } = await notes.hybridSearch("typescript generics", {
 
 **Upgrading from v1.3:** collections indexed before v1.4 use a v1 text-index format with no TF data. These docs are excluded from BM25 results until re-indexed. To upgrade a collection in-place, iterate its records and reinsert them (or call `bm25Search` after any mutation — each write upgrades that doc automatically).
 
+#### Limits
+
+The BM25 text index is stored as a single JSON blob on disk. At ~10 KB per document the `256 MB` safety cap (`DiskStore.MAX_INDEX_FILE_SIZE`) is reached at roughly **25–30K documents**. When this limit is exceeded on reopen, AgentDB throws `IndexFileTooLargeError` instead of silently returning empty BM25 results.
+
+Recovery options:
+- Disable text search on the collection (`textSearch: false`) and use semantic search only.
+- Reduce corpus size (archive or delete old records before reopening).
+- Use a separate collection per corpus shard and merge results in application code.
+
+A sharded/streamed v3 text-index format that removes this ceiling is planned for a future release.
+
 ### Rate limiting and CORS
 
 ```bash
