@@ -761,7 +761,7 @@ export class AgentDB {
       if (ds) {
         if (ds.isDirty) {
           // Use raw records (preserves _embedding) for compaction so embeddings survive close/reopen
-          const rawRecords = await col.findAllRaw();
+          const rawRecords = await col.findAllForCompaction();
           const mapIds = new Set(col.getStore().entries().map(([id]) => id));
           const newRecords = rawRecords.filter(([id]) => mapIds.has(id));
           await ds.compact(

@@ -470,8 +470,8 @@ export class Collection {
     return result;
   }
 
-  /** Return all non-expired records preserving internal meta fields (e.g. _embedding). For disk compaction only. */
-  async findAllRaw(): Promise<[string, StoredRecord][]> {
+  /** @internal Return all non-expired records preserving internal meta fields (e.g. _embedding). Intended for compaction only — do not call from user-facing code. */
+  async findAllForCompaction(): Promise<[string, StoredRecord][]> {
     if (this._diskStore?.hasParquetData) {
       const seen = new Set<string>();
       const result: [string, StoredRecord][] = [];
