@@ -376,3 +376,91 @@ describe("JSONL file proliferation — compaction threshold (#169)", () => {
     await rm(dir, { recursive: true, force: true });
   });
 });
+
+describe("reembedAll (#166)", () => {
+  it("throws when no embedding provider is configured", async () => {
+    const dir = await makeTmpDir();
+    const db = new AgentDB(dir);
+    await db.init();
+    const col = await db.collection(defineSchema({ name: "noprov", fields: { title: { type: "string" } } }));
+    await expect(col.reembedAll()).rejects.toThrow("embedding provider");
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("re-embeds all WAL records including already-embedded ones", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const db = new AgentDB(dir, { embeddings: { provider } });
+    await db.init();
+    const schema = defineSchema({ name: "wal", fields: { title: { type: "string" } } });
+    const col = await db.collection(schema);
+
+    for (let i = 0; i < 5; i++) {
+      await col.insert({ _id: `d${i}`, title: `document ${i}` });
+    }
+    await col.embedUnembedded();
+    const callsBefore = provider.calls.length;
+
+    const count = await col.reembedAll();
+    expect(count).toBe(5);
+    expect(provider.calls.length).toBeGreaterThan(callsBefore);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("semantic search works after reembedAll (HNSW rebuilt)", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const db = new AgentDB(dir, { embeddings: { provider } });
+    await db.init();
+    const schema = defineSchema({ name: "sem", fields: { title: { type: "string" } } });
+    const col = await db.collection(schema);
+
+    await col.insert({ _id: "alpha", title: "apples oranges" });
+    await col.insert({ _id: "beta", title: "clouds sky rain" });
+
+    await col.reembedAll();
+
+    const result = await col.semanticSearch("apples oranges");
+    expect(result.records.map((r) => r._id)).toContain("alpha");
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("re-embeds disk records (compacted Parquet) on reembedAll", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const schemaPlain = defineSchema({ name: "diskre", fields: { title: { type: "string" } } });
+    const schema = defineSchema({ name: "diskre", fields: { title: { type: "string" } } });
+
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 10; i++) {
+        await col.insert({ _id: `d${i}`, title: `document ${i}` });
+      }
+      await col.embedUnembedded();
+      await db.close();
+    }
+
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      provider.calls.length = 0;
+      const count = await col.reembedAll();
+      expect(count).toBe(10);
+      expect(provider.calls.length).toBeGreaterThan(0);
+
+      const result = await col.semanticSearch("document");
+      expect(result.records.length).toBeGreaterThan(0);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { AgentDB } from "../agentdb.js";
-import { makeSafe, API_NOTE, collectionParam, filterParam, READ, WRITE } from "./shared.js";
+import { makeSafe, API_NOTE, collectionParam, filterParam, READ, WRITE, DESTRUCTIVE } from "./shared.js";
 import type { AgentTool } from "./shared.js";
 import type { Filter } from "../collection.js";
 
@@ -122,6 +122,20 @@ export function getVectorTools(db: AgentDB): AgentTool[] {
           candidateLimit: args.candidateLimit as number | undefined,
           summary: args.summary as boolean,
         });
+      }),
+    },
+
+    {
+      name: "db_reembed_all",
+      title: "Reembed All Records",
+      description: "Force-reembed ALL records in a collection using the current embedding logic. Use this to migrate embeddings from v1.3 (which incorrectly included `_id` in the embedding text) to v1.4+ (which excludes `_id`). Resets the HNSW index and rewrites every record's embedding. Requires an embedding provider. Admin-only: this is a destructive operation that rewrites all stored vectors." + API_NOTE,
+      schema: z.object({ collection: collectionParam }),
+      outputSchema: z.object({ reembedded: z.number() }),
+      annotations: DESTRUCTIVE,
+      execute: safe("db_reembed_all", DESTRUCTIVE)(async (args) => {
+        const col = await db.collection(args.collection as string);
+        const count = await col.reembedAll();
+        return { reembedded: count };
       }),
     },
 

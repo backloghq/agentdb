@@ -1553,6 +1553,101 @@ export class Collection {
     return embedded;
   }
 
+  /**
+   * Force-reembed ALL records using the current embedding logic (which excludes `_id`).
+   * Use this to migrate embeddings computed by v1.3 (which included `_id` in the text).
+   * Resets the HNSW index and rewrites every record's embedding.
+   * Requires an embedding provider; throws if none is configured.
+   * Does NOT auto-run on open — call explicitly after upgrading from v1.3.
+   */
+  async reembedAll(): Promise<number> {
+    if (!this.embeddingProvider || !this.hnswIdx) {
+      throw new Error("reembedAll requires an embedding provider to be configured");
+    }
+
+    const batchSize = this.opts.embeddingBatchSize ?? 256;
+    // Reset HNSW so stale vectors don't persist
+    this.hnswIdx = new HnswIndex({ dimensions: this.embeddingProvider.dimensions });
+    let embedded = 0;
+
+    // --- WAL (in-memory) records ---
+    const walSeen = new Set<string>();
+    const walToEmbed: { id: string; text: string; record: StoredRecord }[] = [];
+    for (const [id, record] of this.store.entries()) {
+      if (isExpired(record)) continue;
+      walSeen.add(id);
+      const clean = stripMeta(record);
+      const text = extractTextFromRecord(clean);
+      if (text) walToEmbed.push({ id, text, record });
+    }
+
+    for (let i = 0; i < walToEmbed.length; i += batchSize) {
+      const batch = walToEmbed.slice(i, i + batchSize);
+      let vectors: number[][];
+      try {
+        vectors = await this.embeddingProvider.embed(batch.map((b) => b.text));
+      } catch (err) {
+        console.warn(`agentdb: reembedAll WAL batch ${Math.floor(i / batchSize)} failed: ${err}`);
+        continue;
+      }
+      await this.store.batch(() => {
+        for (let j = 0; j < batch.length; j++) {
+          const { id, record } = batch[j];
+          const q = quantize(vectors[j]);
+          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
+          this.store.set(id, updated);
+        }
+      });
+      for (let j = 0; j < batch.length; j++) {
+        this.hnswIdx!.add(batch[j].id, vectors[j]);
+      }
+      embedded += batch.length;
+    }
+
+    // --- Disk records (compacted Parquet/JSONL) ---
+    if (this._diskStore?.hasParquetData) {
+      const diskBatch: { id: string; text: string; record: StoredRecord }[] = [];
+
+      const flushDiskBatch = async (): Promise<void> => {
+        if (diskBatch.length === 0) return;
+        let vectors: number[][];
+        try {
+          vectors = await this.embeddingProvider!.embed(diskBatch.map((b) => b.text));
+        } catch (err) {
+          console.warn(`agentdb: reembedAll disk batch failed: ${err}`);
+          diskBatch.length = 0;
+          return;
+        }
+        const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
+          const q = quantize(vectors[j]);
+          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(q) }];
+        });
+        await this._diskStore!.appendEmbeddings(updates);
+        for (let j = 0; j < diskBatch.length; j++) {
+          this.hnswIdx!.add(diskBatch[j].id, vectors[j]);
+        }
+        embedded += diskBatch.length;
+        diskBatch.length = 0;
+      };
+
+      // Single pass: process every non-expired disk record (skip WAL-shadowed ids)
+      const diskSeen = new Set<string>();
+      for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+        if (walSeen.has(id) || diskSeen.has(id)) continue;
+        diskSeen.add(id);
+        if (isExpired(record as StoredRecord)) continue;
+        const clean = stripMeta(record as StoredRecord);
+        const text = extractTextFromRecord(clean);
+        if (!text) continue;
+        diskBatch.push({ id, text, record: record as StoredRecord });
+        if (diskBatch.length >= batchSize) await flushDiskBatch();
+      }
+      await flushDiskBatch();
+    }
+
+    return embedded;
+  }
+
   // --- Explicit Vector API ---
 
   /**
