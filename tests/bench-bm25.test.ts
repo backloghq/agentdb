@@ -467,6 +467,61 @@ describe.skipIf(!process.env.BENCH)("BM25 + hybrid search benchmarks", { timeout
     // Re-index throughput should be at least half of add-only throughput (remove+add ~2x cost)
     expect(docsPerSec).toBeGreaterThan(2_500);
   });
+
+  // 11. rebuildHnswFromDisk cold-open heap delta (skipCache flag)
+  it("rebuildHnswFromDisk cold-open heap delta — 10K and 100K docs", async () => {
+    const provider = new FakeEmbedProvider();
+    const schema = defineSchema({
+      name: "hnsw-rebuild-bench",
+      fields: { body: { type: "string" } },
+    });
+
+    async function measureRebuild(N: number): Promise<number> {
+      const dir = await mkdtemp(join(tmpDir, `hnsw-${N}-`));
+      // Phase 1: insert + embed
+      const dbW = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, cacheSize: N });
+      await dbW.init();
+      const colW = await dbW.collection(schema);
+      const BATCH = 500;
+      for (let i = 0; i < N; i += BATCH) {
+        const end = Math.min(i + BATCH, N);
+        await colW.insertMany(
+          Array.from({ length: end - i }, (_, j) => ({ _id: `d${i + j}`, body: randomDoc(20) }))
+        );
+      }
+      await colW.embedUnembedded();
+      await dbW.close();
+
+      // Phase 2: cold reopen — tiny cache forces skipCache path in rebuildHnswFromDisk
+      const heapBefore = process.memoryUsage().heapUsed;
+      const dbR = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, cacheSize: 100 });
+      await dbR.init();
+      const colR = await dbR.collection(schema);
+      const heapAfter = process.memoryUsage().heapUsed;
+      const deltaBytes = heapAfter - heapBefore;
+
+      // Verify HNSW works post-rebuild
+      const result = await colR.semanticSearch("word000", { limit: 5 });
+      expect(result.records.length).toBeGreaterThan(0);
+
+      await dbR.close();
+      await rm(dir, { recursive: true, force: true });
+
+      return deltaBytes;
+    }
+
+    const delta10k = await measureRebuild(10_000);
+    const delta100k = await measureRebuild(100_000);
+
+    console.log("  rebuildHnswFromDisk heap delta (skipCache=true):");
+    console.log(`    10K docs:  ${(delta10k / 1024 / 1024).toFixed(1)} MB heap delta`);
+    console.log(`    100K docs: ${(delta100k / 1024 / 1024).toFixed(1)} MB heap delta`);
+
+    // With skipCache=true, the LRU is not populated during rebuild.
+    // The heap delta should be dominated by the HNSW index itself, not the record cache.
+    // Very loose assertion: < 2 GB for 100K docs.
+    expect(delta100k).toBeLessThan(2 * 1024 * 1024 * 1024);
+  });
 });
 
 // Ollama real-embedder hybrid latency — requires OLLAMA_EMBED=1 and a running Ollama instance

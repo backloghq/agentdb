@@ -837,3 +837,38 @@ describe("hybridSearch — empty-query short-circuit", () => {
     bm25Spy.mockRestore();
   });
 });
+
+describe("DiskStore.entries — skipCache flag", () => {
+  it("skipCache:true does not populate the LRU cache", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "skipcache", fields: { title: { type: "string" } } });
+
+    // Set up disk-mode collection with records
+    const db = new AgentDB(dir, { storageMode: "disk" });
+    await db.init();
+    const col = await db.collection(schema);
+    for (let i = 0; i < 10; i++) {
+      await col.insert({ _id: `d${i}`, title: `hello world ${i}` });
+    }
+    // Force compaction so records land in JSONL (entries() reads JSONL)
+    const ds = col.getDiskStore()!;
+    const allRecords = await col.findAll();
+    await ds.compact(allRecords.map((r) => [r._id as string, r]));
+
+    ds.clearCache();
+    expect(ds.cacheStats.size).toBe(0);
+
+    // entries({ skipCache: true }) — cache must stay empty
+    let count = 0;
+    for await (const [, ] of ds.entries({ skipCache: true })) { count++; }
+    expect(count).toBeGreaterThan(0);
+    expect(ds.cacheStats.size).toBe(0);
+
+    // entries() without flag — cache must be populated
+    for await (const [, ] of ds.entries()) { /* no-op */ }
+    expect(ds.cacheStats.size).toBeGreaterThan(0);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});

@@ -234,12 +234,13 @@ export class DiskStore {
     return allIds;
   }
 
-  /** Iterate all records from all JSONL files. */
-  async *entries(): AsyncGenerator<[string, Record<string, unknown>]> {
+  /** Iterate all records from all JSONL files. Pass skipCache:true to bypass LRU population (e.g. during HNSW rebuild). */
+  async *entries(opts?: { skipCache?: boolean }): AsyncGenerator<[string, Record<string, unknown>]> {
+    const skipCache = opts?.skipCache ?? false;
     for (const jsonlFile of this.getAllJsonlFiles()) {
       const all = await readAllFromJsonl(this.backend, jsonlFile);
       for (const [id, record] of all) {
-        this.cache.set(id, record);
+        if (!skipCache) this.cache.set(id, record);
         yield [id, record];
       }
     }

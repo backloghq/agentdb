@@ -121,7 +121,7 @@ export class Collection {
   /** Rebuild the HNSW index from all embeddings stored in the disk store. Called by AgentDB after setDiskStore when an embedding provider is configured. */
   async rebuildHnswFromDisk(): Promise<void> {
     if (!this._diskStore || !this.hnswIdx) return;
-    for await (const [id, record] of this._diskStore.entries()) {
+    for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
       if (isExpired(record as StoredRecord)) continue;
       const stored = (record as StoredRecord)[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
       if (!stored) continue;
