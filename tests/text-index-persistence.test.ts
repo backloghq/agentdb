@@ -286,6 +286,39 @@ describe("IndexFileTooLargeError — oversized text-index throws on reopen", () 
     }
   });
 
+  it("load succeeds at exactly MAX_INDEX_FILE_SIZE (uses >, not >=)", async () => {
+    // Reset to real limit so we can set a content-length-matching cap
+    DiskStore.MAX_INDEX_FILE_SIZE = REAL_LIMIT;
+
+    const dir = await makeTmpDir();
+    try {
+      let db = new AgentDB(dir);
+      await db.init();
+      const s = defineSchema({ name: "edgecase", textSearch: true, storageMode: "disk",
+        fields: { title: { type: "string", searchable: true } } });
+      const col = await db.collection(s);
+      await col.insert({ title: "hello world" });
+      await db.close(); // saves text-index.json
+
+      // Read the actual file size and set MAX_INDEX_FILE_SIZE = exact content length
+      const { readFile } = await import("node:fs/promises");
+      const { join: pathJoin } = await import("node:path");
+      const indexPath = pathJoin(dir, "collections", "edgecase", "indexes", "text-index.json");
+      const content = await readFile(indexPath);
+      DiskStore.MAX_INDEX_FILE_SIZE = content.length; // exactly equal — must NOT throw (uses >)
+
+      db = new AgentDB(dir);
+      await db.init();
+      const col2 = await db.collection(s);
+      // Must succeed (> not >=)
+      await expect(col2.bm25Search("hello")).resolves.toBeDefined();
+      await db.close().catch(() => {});
+    } finally {
+      DiskStore.MAX_INDEX_FILE_SIZE = REAL_LIMIT;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("IndexFileTooLargeError message includes filename, actual size, and limit", async () => {
     const dir = await makeTmpDir();
     try {

@@ -3,7 +3,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../../src/agentdb.js";
-import { Collection } from "../../src/collection.js";
 import { defineSchema } from "../../src/schema.js";
 import { getTools } from "../../src/tools/index.js";
 import type { AgentTool } from "../../src/tools/index.js";

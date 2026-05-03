@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
 import { Collection } from "../src/collection.js";
+import { DiskStore } from "../src/disk-store.js";
 import { defineSchema } from "../src/schema.js";
 import { getTools } from "../src/tools/index.js";
 import type { AgentTool } from "../src/tools/index.js";
@@ -1000,6 +1001,141 @@ describe("materializeCandidates — concurrency cap", () => {
     isLocalFsSpy.mockRestore();
     getSpy.mockRestore();
     await db2.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("hybridSearch — arm failure modes", () => {
+  it("BM25 arm throws (IndexFileTooLargeError): hybrid returns semantic results only", async () => {
+    const REAL_LIMIT = DiskStore.MAX_INDEX_FILE_SIZE;
+    const dir = await makeTmpDir();
+
+    // Disk-mode schema with text search so we get a real text-index.json on disk
+    const schema = defineSchema({
+      name: "armthrow",
+      textSearch: true,
+      storageMode: "disk",
+      fields: { title: { type: "string", searchable: true } },
+    });
+
+    const vectors = new Map<string, number[]>([
+      ["typescript generics", [1, 0, 0, 0]],
+      ["typescript guide", [0.9, 0.1, 0, 0]],
+    ]);
+    const provider = new FakeEmbeddingProvider(vectors);
+
+    // Session 1: insert + embed → compacts text-index.json to disk
+    {
+      const db = new AgentDB(dir, { embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+      await col.insert({ _id: "d1", title: "typescript guide" });
+      await col.embedUnembedded();
+      await db.close();
+    }
+
+    // Lower the size cap so the on-disk text-index.json now exceeds the limit
+    DiskStore.MAX_INDEX_FILE_SIZE = 1;
+    let db2: AgentDB | null = null;
+    try {
+      // Session 2: reopen — BM25 arm will throw IndexFileTooLargeError on ensureIndexesLoaded
+      db2 = new AgentDB(dir, { embeddings: { provider } });
+      await db2.init();
+      const col = await db2.collection(schema);
+
+      // hybridSearch must not reject; semantic arm degrades gracefully
+      const result = await col.hybridSearch("typescript generics", { limit: 5 });
+      expect(Array.isArray(result.records)).toBe(true);
+      expect(Array.isArray(result.scores)).toBe(true);
+      // Semantic arm provides results even though BM25 arm threw
+      expect(result.records.length).toBeGreaterThan(0);
+    } finally {
+      // Restore limit before close so compaction can write the index cleanly
+      DiskStore.MAX_INDEX_FILE_SIZE = REAL_LIMIT;
+      if (db2) await db2.close().catch(() => {});
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("both arms throw: hybrid returns {records:[], scores:[]}", async () => {
+    const REAL_LIMIT = DiskStore.MAX_INDEX_FILE_SIZE;
+    const dir = await makeTmpDir();
+
+    const schema = defineSchema({
+      name: "boththrow",
+      textSearch: true,
+      storageMode: "disk",
+      fields: { title: { type: "string", searchable: true } },
+    });
+
+    const throwingProvider: EmbeddingProvider = {
+      dimensions: 4,
+      embed: async (): Promise<number[][]> => { throw new Error("provider offline"); },
+    };
+
+    // Session 1: insert → compacts text-index.json to disk (no embedding)
+    {
+      const db = new AgentDB(dir, { embeddings: { provider: throwingProvider } });
+      await db.init();
+      const col = await db.collection(schema);
+      await col.insert({ _id: "d1", title: "typescript guide" });
+      await db.close();
+    }
+
+    // Lower size cap so BM25 arm throws; provider always throws too
+    DiskStore.MAX_INDEX_FILE_SIZE = 1;
+    let db2: AgentDB | null = null;
+    try {
+      db2 = new AgentDB(dir, { embeddings: { provider: throwingProvider } });
+      await db2.init();
+      const col = await db2.collection(schema);
+
+      const result = await col.hybridSearch("typescript", { limit: 5 });
+      expect(result.records).toEqual([]);
+      expect(result.scores).toEqual([]);
+    } finally {
+      // Restore limit before close so compaction can write the index cleanly
+      DiskStore.MAX_INDEX_FILE_SIZE = REAL_LIMIT;
+      if (db2) await db2.close().catch(() => {});
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("TTL'd record is excluded from materializeCandidates (bm25Search and hybridSearch)", async () => {
+    const dir = await makeTmpDir();
+    const vectors = new Map<string, number[]>([
+      ["typescript", [1, 0, 0, 0]],
+      ["typescript guide permanent", [0.9, 0.1, 0, 0]],
+      ["typescript expired doc", [0.8, 0.2, 0, 0]],
+    ]);
+    const provider = new FakeEmbeddingProvider(vectors);
+    const db = new AgentDB(dir, { embeddings: { provider } });
+    await db.init();
+
+    const schema = defineSchema({
+      name: "ttlcheck",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+    const col = await db.collection(schema);
+
+    await col.insert({ _id: "permanent", title: "typescript guide permanent" });
+    // TTL of 1ms — will be expired by the time we query
+    await col.insert({ _id: "expired", title: "typescript expired doc" }, { ttl: 0.001 });
+    await col.embedUnembedded();
+
+    // Wait for TTL to elapse
+    await new Promise((r) => setTimeout(r, 50));
+
+    const bm25Result = await col.bm25Search("typescript", { limit: 10 });
+    expect(bm25Result.records.map((r) => r._id)).not.toContain("expired");
+    expect(bm25Result.records.map((r) => r._id)).toContain("permanent");
+
+    const hybridResult = await col.hybridSearch("typescript", { limit: 10 });
+    expect(hybridResult.records.map((r) => r._id)).not.toContain("expired");
+    expect(hybridResult.records.map((r) => r._id)).toContain("permanent");
+
+    await db.close();
     await rm(dir, { recursive: true, force: true });
   });
 });

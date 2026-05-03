@@ -723,6 +723,8 @@ const { records, scores } = await notes.hybridSearch("typescript generics", {
 
 **Upgrading from v1.3:** collections indexed before v1.4 use a v1 text-index format with no TF data. These docs are excluded from BM25 results until re-indexed. To upgrade a collection in-place, iterate its records and reinsert them (or call `bm25Search` after any mutation — each write upgrades that doc automatically).
 
+**Unicode normalisation:** AgentDB does not normalise Unicode before tokenizing. Precomposed (`é`, U+00E9) and decomposed (`e` + U+0301) forms of the same character are treated as distinct tokens. Ensure your application uses consistent Unicode normalisation (e.g. NFC) on both indexed text and queries; otherwise the same word in different normal forms will not match.
+
 #### Limits
 
 The BM25 text index is stored as a single JSON blob on disk. At ~10 KB per document the `256 MB` safety cap (`DiskStore.MAX_INDEX_FILE_SIZE`) is reached at roughly **25–30K documents**. When this limit is exceeded on reopen, AgentDB throws `IndexFileTooLargeError` instead of silently returning empty BM25 results.

@@ -214,6 +214,20 @@ describe("TextIndex.searchScored (BM25)", () => {
     }
   });
 
+  it("NFC vs NFD: no normalisation — precomposed and decomposed forms are distinct tokens", () => {
+    // Pin behaviour (b): AgentDB does NOT normalise Unicode.
+    // Callers must ensure consistent normalisation between indexed text and queries.
+    const idx = new TextIndex();
+    idx.add("d1", { text: "café" });           // precomposed é (U+00E9)
+    idx.add("d2", { text: "café" });      // decomposed e + combining acute (U+0301)
+
+    // Query with precomposed form — only d1 matches (no NFC normalisation)
+    const results = idx.searchScored("café");
+    const ids = results.map((r) => r.id);
+    expect(ids).toContain("d1");
+    expect(ids).not.toContain("d2");
+  });
+
   it("fromJSON accepts v1 data — AND search still works, BM25 skips v1 docs", () => {
     const v1Data = {
       version: 1,
