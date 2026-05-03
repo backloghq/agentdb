@@ -359,3 +359,61 @@ describe("db_hybrid_search tool round-trip", () => {
     }
   });
 });
+
+describe("hybridSearch — disk-mode correctness", () => {
+  it("semantic-arm records are present after close/reopen in disk mode", async () => {
+    const dir = await makeTmpDir();
+
+    // "sem-only" has a unique semantic vector and no BM25 tokens matching the query.
+    // "bm25-match" has strong BM25 overlap with the query "neural networks".
+    // The query string is registered in the vectors map so the FakeEmbeddingProvider
+    // returns a non-zero vector (close to sem-only's) rather than [0,0,0,0].
+    const vectors = new Map<string, number[]>([
+      ["neural networks query", [0, 1, 0, 0]],          // query vector — close to sem-only
+      ["doc about neural networks deep learning", [1, 0, 0, 0]],
+      ["semantic only document xqz", [0, 1, 0, 0]],
+    ]);
+    const provider = new FakeEmbeddingProvider(vectors);
+
+    const schema = defineSchema({
+      name: "articles",
+      textSearch: true,
+      fields: {
+        title: { type: "string", searchable: true },
+        body: { type: "string", searchable: true },
+      },
+    });
+
+    // Phase 1: insert, embed, close.
+    {
+      const db = new AgentDB(dir, { embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+      await col.insert({ _id: "bm25-match", title: "doc about neural networks deep learning" });
+      await col.insert({ _id: "sem-only", title: "semantic only document xqz" });
+      await col.embedUnembedded();
+      await db.close();
+    }
+
+    // Phase 2: reopen, hybrid search with query whose vector points toward sem-only.
+    {
+      const db = new AgentDB(dir, { embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+
+      // "neural networks query" → [0,1,0,0] is identical to sem-only's vector.
+      // BM25 arm ranks bm25-match for "neural networks"; semantic arm ranks sem-only.
+      // After RRF both must appear in the result.
+      const result = await col.hybridSearch("neural networks query", { limit: 10 });
+
+      const ids = result.records.map((r) => r._id as string);
+      // Both docs must appear — the semantic arm must hydrate sem-only.
+      expect(ids).toContain("bm25-match");
+      expect(ids).toContain("sem-only");
+
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});

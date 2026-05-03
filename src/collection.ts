@@ -114,6 +114,22 @@ export class Collection {
   /** Set disk store for disk-backed mode. Called by AgentDB during open. */
   setDiskStore(ds: DiskStore): void { this._diskStore = ds; }
 
+  /** Rebuild the HNSW index from all embeddings stored in the disk store. Called by AgentDB after setDiskStore when an embedding provider is configured. */
+  async rebuildHnswFromDisk(): Promise<void> {
+    if (!this._diskStore || !this.hnswIdx) return;
+    for await (const [id, record] of this._diskStore.entries()) {
+      if (isExpired(record as StoredRecord)) continue;
+      const stored = (record as StoredRecord)[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
+      if (!stored) continue;
+      const q = deserializeQuantized(stored);
+      const vec = Array.from(q.data).map((v) => v / q.scale);
+      if (this.hnswIdx.dims === 0) {
+        this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+      }
+      this.hnswIdx.add(id, vec);
+    }
+  }
+
   /** Get disk store (if in disk mode). */
   getDiskStore(): DiskStore | null { return this._diskStore; }
 
@@ -1149,6 +1165,41 @@ export class Collection {
   }
 
   /**
+   * Hydrate a scored candidate list into clean records.
+   * Disk-mode aware: fetches from _diskStore in parallel, falls back to in-memory store.
+   * Applies expiry, attribute filter, computed fields, and optional summary projection.
+   */
+  private async materializeCandidates(
+    candidates: Array<{ id: string; score: number }>,
+    opts: { limit: number; filter?: Filter; summary?: boolean },
+  ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
+    const predicate = opts.filter ? this.resolve(opts.filter) : null;
+    const allAccessor = this.allCleanRecords();
+
+    let hydrated: Array<StoredRecord | undefined>;
+    if (this._diskStore) {
+      hydrated = (await Promise.all(candidates.map((c) => this._diskStore!.get(c.id)))) as Array<StoredRecord | undefined>;
+    } else {
+      hydrated = candidates.map((c) => this.store.get(c.id));
+    }
+
+    const records: Record<string, unknown>[] = [];
+    const scores: number[] = [];
+    for (let i = 0; i < candidates.length; i++) {
+      if (records.length >= opts.limit) break;
+      const record = hydrated[i];
+      if (!record || isExpired(record)) continue;
+      const clean = stripMeta(record);
+      if (predicate && !predicate(clean)) continue;
+      const withComputed = this.applyComputed(clean, allAccessor);
+      records.push(opts.summary ? summarize(withComputed) : withComputed);
+      scores.push(candidates[i].score);
+    }
+
+    return { records, scores };
+  }
+
+  /**
    * BM25-ranked full-text search. Returns records sorted by BM25 score descending.
    *
    * Indexing is restricted to schema-declared `searchable` fields when the collection
@@ -1182,29 +1233,7 @@ export class Collection {
     const candidates = this.textIdx.searchScored(query, { limit: candidateLimit });
     if (candidates.length === 0) return { records: [], scores: [] };
 
-    const predicate = opts?.filter ? this.resolve(opts.filter) : null;
-    const allAccessor = this.allCleanRecords();
-
-    const records: Record<string, unknown>[] = [];
-    const scores: number[] = [];
-
-    for (const { id, score } of candidates) {
-      if (records.length >= limit) break;
-      let record: StoredRecord | undefined;
-      if (this._diskStore) {
-        record = await this._diskStore.get(id) as StoredRecord | undefined;
-      } else {
-        record = this.store.get(id);
-      }
-      if (!record || isExpired(record)) continue;
-      const clean = stripMeta(record);
-      if (predicate && !predicate(clean)) continue;
-      const withComputed = this.applyComputed(clean, allAccessor);
-      records.push(opts?.summary ? summarize(withComputed) : withComputed);
-      scores.push(score);
-    }
-
-    return { records, scores };
+    return this.materializeCandidates(candidates, { limit, filter: opts?.filter, summary: opts?.summary });
   }
 
   /**
@@ -1356,24 +1385,7 @@ export class Collection {
     const limit = opts?.limit ?? 10;
     const candidates = this.hnswIdx.search(queryVec, limit * 3); // over-fetch for post-filter
 
-    // Apply attribute filter if provided
-    const predicate = opts?.filter ? this.resolve(opts.filter) : () => true;
-    const allAccessor = this.allCleanRecords();
-
-    const records: Record<string, unknown>[] = [];
-    const scores: number[] = [];
-    for (const { id, score } of candidates) {
-      if (records.length >= limit) break;
-      const record = this.store.get(id);
-      if (!record || isExpired(record)) continue;
-      const clean = stripMeta(record);
-      if (!predicate(clean)) continue;
-      const withComputed = this.applyComputed(clean, allAccessor);
-      records.push(opts?.summary ? summarize(withComputed) : withComputed);
-      scores.push(score);
-    }
-
-    return { records, scores };
+    return this.materializeCandidates(candidates, { limit, filter: opts?.filter, summary: opts?.summary });
   }
 
   /**
@@ -1455,10 +1467,10 @@ export class Collection {
    * Search the HNSW index by a raw vector. No embedding provider required.
    * Returns records sorted by similarity with scores.
    */
-  searchByVector(
+  async searchByVector(
     vector: number[],
     opts?: { filter?: Filter; limit?: number; summary?: boolean },
-  ): { records: Record<string, unknown>[]; scores: number[] } {
+  ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
     if (!this.hnswIdx) {
       throw new Error("Vector search not available. Call insertVector first or configure an embedding provider.");
     }
@@ -1467,23 +1479,8 @@ export class Collection {
     }
     const limit = opts?.limit ?? 10;
     const candidates = this.hnswIdx.search(vector, limit * 3);
-    const predicate = opts?.filter ? this.resolve(opts.filter) : () => true;
-    const allAccessor = this.opts.computed ? this.allCleanRecords() : () => [];
 
-    const records: Record<string, unknown>[] = [];
-    const scores: number[] = [];
-    for (const { id, score } of candidates) {
-      if (records.length >= limit) break;
-      const record = this.store.get(id);
-      if (!record || isExpired(record)) continue;
-      const clean = stripMeta(record);
-      if (!predicate(clean)) continue;
-      const withComputed = this.opts.computed ? this.applyComputed(clean, allAccessor) : clean;
-      records.push(opts?.summary ? summarize(withComputed) : withComputed);
-      scores.push(score);
-    }
-
-    return { records, scores };
+    return this.materializeCandidates(candidates, { limit, filter: opts?.filter, summary: opts?.summary });
   }
 
   // --- Blob storage ---

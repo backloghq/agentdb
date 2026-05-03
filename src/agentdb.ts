@@ -331,6 +331,10 @@ export class AgentDB {
       await diskStore.loadIndexes(col.getIndexManager(), col.getTextIndex());
 
       col.setDiskStore(diskStore);
+      // Rebuild HNSW from disk embeddings if an embedding provider is configured.
+      // In disk mode, open() is called with skipLoad=true so the WAL pass never
+      // runs — HNSW must be reconstructed from Parquet/JSONL entries instead.
+      await col.rebuildHnswFromDisk();
     } else {
       // Memory mode: normal open (load all records into Map)
       await col.open(colDir, {

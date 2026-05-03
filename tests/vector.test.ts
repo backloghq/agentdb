@@ -89,14 +89,14 @@ describe("Explicit Vector API", () => {
       const emptyDir = await mkdtemp(join(tmpdir(), "agentdb-vec-empty-"));
       await emptyCol.open(emptyDir, { checkpointThreshold: 1000 });
 
-      expect(() => emptyCol.searchByVector([1, 0, 0])).toThrow("not available");
+      await expect(emptyCol.searchByVector([1, 0, 0])).rejects.toThrow("not available");
 
       await emptyCol.close();
       await rm(emptyDir, { recursive: true, force: true });
     });
 
     it("validates query dimension", async () => {
-      expect(() => col.searchByVector([1, 0])).toThrow("dimension mismatch");
+      await expect(col.searchByVector([1, 0])).rejects.toThrow("dimension mismatch");
     });
 
     it("respects limit", async () => {
