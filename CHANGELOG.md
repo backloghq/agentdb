@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`tests/disk-embed.test.ts`** — 5 new tests covering batching (3 provider calls for 600 records with `batchSize=256`, partial-batch failure, custom `batchSize=100`) and durability (1000 disk records with `cacheSize=100` embeddings survive close/reopen, partial embed survives mid-run).
 
 ### Changed
+- **`readAllFromJsonl` deduped** — now collects from `readJsonlStream` instead of duplicating the line-split parser; removes ~20 lines of identical buffer-scan logic.
 - **`diskConcurrency` moved from `SchemaDefinition` to `AgentDBOptions`** — it is now a db-wide default (like `cacheSize`) rather than a per-schema option; `CollectionOptions.diskConcurrency` remains for per-collection overrides. Updated test to pass via `new AgentDB(dir, { diskConcurrency: 3 })`.
 
 ### Fixed

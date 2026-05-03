@@ -452,34 +452,16 @@ export async function* readJsonlStream(
 }
 
 /**
- * Read all records from JSONL file sequentially.
- * Parses line-by-line from Buffer without converting the entire file to a string
- * (avoids V8 string limit at ~500MB).
+ * Read all records from a JSONL file into a Map.
+ * Delegates parsing to readJsonlStream; last write wins for duplicate IDs.
  */
 export async function readAllFromJsonl(
   backend: StorageBackend,
   jsonlPath: string,
 ): Promise<Map<string, Record<string, unknown>>> {
-  const buf = await backend.readBlob(jsonlPath);
   const records = new Map<string, Record<string, unknown>>();
-  let start = 0;
-  for (let i = 0; i < buf.length; i++) {
-    if (buf[i] === 0x0a) { // newline
-      if (i > start) {
-        const line = buf.subarray(start, i).toString("utf-8");
-        const record = JSON.parse(line) as Record<string, unknown>;
-        records.set(record._id as string, record);
-      }
-      start = i + 1;
-    }
-  }
-  // Handle last line without trailing newline
-  if (start < buf.length) {
-    const line = buf.subarray(start).toString("utf-8");
-    if (line.trim()) {
-      const record = JSON.parse(line) as Record<string, unknown>;
-      records.set(record._id as string, record);
-    }
+  for await (const [id, record] of readJsonlStream(backend, jsonlPath)) {
+    records.set(id, record);
   }
   return records;
 }
