@@ -698,6 +698,9 @@ export function validatePersistedSchema(schema: unknown): asserts schema is Pers
       if (fd.searchable !== undefined && typeof fd.searchable !== "boolean") {
         throw new Error(`Field '${fieldName}.searchable' must be a boolean`);
       }
+      if (fd.searchable === true && fd.type !== "string" && fd.type !== "string[]") {
+        throw new Error(`schema '${s.name}': field '${fieldName}' has searchable:true but type '${fd.type}' is not string or string[]`);
+      }
     }
   }
 }

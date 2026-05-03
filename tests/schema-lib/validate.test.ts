@@ -262,5 +262,23 @@ describe("validatePersistedSchema", () => {
   it("bm25: non-object throws", () => {
     expect(() => validatePersistedSchema({ name: "t", bm25: "bad" })).toThrow("bm25");
   });
-});
 
+  it("searchable:true on non-string field type throws (#167)", () => {
+    expect(() => validatePersistedSchema({
+      name: "s",
+      fields: { score: { type: "number", searchable: true } },
+    })).toThrow(/searchable:true.*not string/i);
+    expect(() => validatePersistedSchema({
+      name: "s",
+      fields: { flag: { type: "boolean", searchable: true } },
+    })).toThrow(/searchable:true.*not string/i);
+    expect(() => validatePersistedSchema({
+      name: "s",
+      fields: { title: { type: "string", searchable: true } },
+    })).not.toThrow();
+    expect(() => validatePersistedSchema({
+      name: "s",
+      fields: { tags: { type: "string[]", searchable: true } },
+    })).not.toThrow();
+  });
+});
