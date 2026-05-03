@@ -1180,12 +1180,31 @@ describe("hybridSearch — arm failure modes", () => {
       await db2.init();
       const col = await db2.collection(schema);
 
-      // hybridSearch must not reject; semantic arm degrades gracefully
+      // Spy on both arms to observe actual outcomes (vitest tracks .mock.results)
+      const bm25Spy = vi.spyOn(Collection.prototype, "bm25Search");
+      const semSpy = vi.spyOn(Collection.prototype, "semanticSearch");
+
+      // hybridSearch must not reject; BM25 arm failure absorbed by .catch(empty)
       const result = await col.hybridSearch("typescript generics", { limit: 5 });
-      expect(Array.isArray(result.records)).toBe(true);
-      expect(Array.isArray(result.scores)).toBe(true);
-      // Semantic arm provides results even though BM25 arm threw
+
+      // bm25Search was called and its returned promise rejected (threw, not returned [])
+      expect(bm25Spy).toHaveBeenCalledOnce();
+      const bm25Outcome = await bm25Spy.mock.results[0].value.catch((e: Error) => e);
+      expect(bm25Outcome).toBeInstanceOf(Error);
+      expect((bm25Outcome as Error).message).toMatch(/exceeds MAX_INDEX_FILE_SIZE|IndexFileTooLarge/i);
+
+      // semanticSearch was called and its returned promise resolved with records
+      expect(semSpy).toHaveBeenCalledOnce();
+      const semOutcome = await semSpy.mock.results[0].value;
+      expect(semOutcome.records.length).toBeGreaterThan(0);
+
+      bm25Spy.mockRestore();
+      semSpy.mockRestore();
+
+      // Final result comes only from the semantic arm — d1 is present, scores match
       expect(result.records.length).toBeGreaterThan(0);
+      expect(result.records.map((r) => r._id)).toContain("d1");
+      expect(result.records.length).toBe(result.scores.length);
     } finally {
       // Restore limit before close so compaction can write the index cleanly
       DiskStore.MAX_INDEX_FILE_SIZE = REAL_LIMIT;
