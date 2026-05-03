@@ -322,11 +322,16 @@ export class DiskStore {
     await writeCompactionMeta(this.backend, this.compactionMeta);
 
     this._cachedJsonlFiles = null;
-    this._dirty = false;
+    // Mark dirty so close() compacts: the new JSONL file(s) should be merged
+    // into Parquet to avoid unbounded file proliferation.  The previous code
+    // set _dirty=false here, which incorrectly suppressed compaction.
+    this._dirty = true;
   }
 
-  /** Max incremental files before triggering a full merge. */
+  /** Max incremental Parquet files before triggering a full merge. */
   private static readonly MERGE_THRESHOLD = 10;
+  /** Max incremental JSONL files before triggering a full merge. */
+  private static readonly MERGE_JSONL_THRESHOLD = 8;
 
   // --- Compaction ---
 
@@ -339,8 +344,9 @@ export class DiskStore {
     allRecords: AsyncIterable<[string, Record<string, unknown>]> | Iterable<[string, Record<string, unknown>]>,
     newRecords?: Array<[string, Record<string, unknown>]>,
   ): Promise<void> {
-    const fileCount = (this.compactionMeta?.parquetFiles?.length ?? 0) + 1;
-    const shouldMerge = !this.compactionMeta || fileCount >= DiskStore.MERGE_THRESHOLD || !newRecords;
+    const parquetFileCount = (this.compactionMeta?.parquetFiles?.length ?? 0) + 1;
+    const jsonlFileCount = (this.compactionMeta?.jsonlFiles?.length ?? 0) + 1;
+    const shouldMerge = !this.compactionMeta || parquetFileCount >= DiskStore.MERGE_THRESHOLD || jsonlFileCount >= DiskStore.MERGE_JSONL_THRESHOLD || !newRecords;
 
     if (shouldMerge) {
       await this._compactFull(allRecords);

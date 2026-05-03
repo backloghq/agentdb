@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -265,6 +265,111 @@ describe("embedUnembedded — durable disk embedding (N > cacheSize) (#153 + #16
       // Second embedUnembedded: only the remaining 44 need embedding
       const remaining = await col.embedUnembedded();
       expect(remaining).toBe(44);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("appendEmbeddings — _dirty flag (#165)", () => {
+  it("_dirty stays true after embedUnembedded so close() still compacts", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const schema = defineSchema({
+      name: "dirtycheck",
+      fields: { title: { type: "string" } },
+    });
+
+    // Phase 1: insert without provider — compacts to disk (dirty=false after compact)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 100; i++) {
+        await col.insert({ _id: `d${i}`, title: `title ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reopen, insert more (dirty=true), then embedUnembedded
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+
+      // Insert additional records — marks the store dirty
+      for (let i = 100; i < 120; i++) {
+        await col.insert({ _id: `d${i}`, title: `title ${i}` });
+      }
+
+      const ds = col.getDiskStore()!;
+      expect(ds.isDirty).toBe(true);
+
+      // embedUnembedded calls appendEmbeddings — must NOT clear _dirty
+      await col.embedUnembedded();
+      expect(ds.isDirty).toBe(true);
+
+      // close() sees dirty=true → compaction runs
+      const compactSpy = vi.spyOn(ds, "compact");
+      await db.close();
+      expect(compactSpy.mock.calls.length).toBeGreaterThan(0);
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("JSONL file proliferation — compaction threshold (#169)", () => {
+  it("JSONL files >= MERGE_JSONL_THRESHOLD triggers full merge on next compact()", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+
+    // Use batchSize=50 so 500 records → 10 JSONL files from appendEmbeddings (> threshold of 8)
+    const schema = defineSchema({
+      name: "jsonlthresh",
+      fields: { title: { type: "string" } },
+      embeddingBatchSize: 50,
+    });
+    const schemaPlain = defineSchema({
+      name: "jsonlthresh",
+      fields: { title: { type: "string" } },
+    });
+
+    // Phase 1: insert without provider
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      for (let i = 0; i < 500; i++) {
+        await col.insert({ _id: `d${i}`, title: `doc ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: embed with small batch size → 10 JSONL files from appendEmbeddings
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+      await col.embedUnembedded();
+
+      const ds = col.getDiskStore()!;
+      // Confirm threshold crossed before close (10 files > MERGE_JSONL_THRESHOLD=8)
+      const meta = (ds as unknown as { compactionMeta: { jsonlFiles?: string[] } }).compactionMeta;
+      expect((meta?.jsonlFiles?.length ?? 0)).toBeGreaterThanOrEqual(8);
+
+      await db.close(); // dirty + JSONL threshold → full merge on compact
+    }
+
+    // Phase 3: reopen — full merge produced a single base JSONL (jsonlFiles list is empty)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      const ds = col.getDiskStore()!;
+      const meta = (ds as unknown as { compactionMeta: { jsonlFiles?: string[] } }).compactionMeta;
+      expect((meta?.jsonlFiles?.length ?? 0)).toBe(0);
       await db.close();
     }
 
