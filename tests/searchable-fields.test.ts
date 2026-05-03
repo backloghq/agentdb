@@ -226,6 +226,50 @@ describe("searchable fields — PersistedSchema round-trip", () => {
   });
 });
 
+describe("textRecord fallback — _id and _version excluded from BM25 index", () => {
+  let dir: string;
+  let db: AgentDB;
+
+  beforeEach(async () => {
+    dir = makeTmpDir();
+    db = new AgentDB(dir);
+    await db.init();
+  });
+
+  afterEach(async () => {
+    await db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("BM25 search on _id value returns no results (UUID not indexed)", async () => {
+    // No searchableFields — fallback path (all fields). _id must be excluded.
+    const schema = defineSchema({ name: "noid", textSearch: true });
+    const col = await db.collection(schema);
+
+    // Use a deterministic _id with a unique token (zxqid) not in any field value
+    await col.insert({ _id: "zxqid-abc123", title: "hello world" });
+
+    // Searching for the unique _id token must return nothing
+    const result = await col.bm25Search("zxqid");
+    expect(result.records).toHaveLength(0);
+  });
+
+  it("field content is still BM25-searchable in fallback mode", async () => {
+    const schema = defineSchema({ name: "nover", textSearch: true });
+    const col = await db.collection(schema);
+    // _id contains "xqtoken" which is a unique string not in title
+    await col.insert({ _id: "xqtoken-doc", title: "hello world content" });
+
+    // Field content must be found
+    const found = await col.bm25Search("hello");
+    expect(found.records.map(r => r._id)).toContain("xqtoken-doc");
+
+    // _id token must NOT be found
+    const notFound = await col.bm25Search("xqtoken");
+    expect(notFound.records).toHaveLength(0);
+  });
+});
+
 describe("bm25 schema option — Collection plumbing", () => {
   let dir: string;
   let db: AgentDB;

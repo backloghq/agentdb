@@ -208,10 +208,17 @@ export class Collection {
     this.indexes.updateIndexes(id, oldRecord, newRecord);
   }
 
-  /** Project a clean record to only searchable fields, or return as-is when fallback is active. */
+  /** Project a clean record to only searchable fields, or all non-meta fields when fallback is active. */
   private textRecord(record: Record<string, unknown>): Record<string, unknown> {
     const fields = this.opts.searchableFields;
-    if (!fields || fields.length === 0) return record;
+    if (!fields || fields.length === 0) {
+      // Fallback: index all fields except _id and _version to avoid UUIDs and counters in BM25
+      const result: Record<string, unknown> = {};
+      for (const key of Object.keys(record)) {
+        if (key !== "_id" && key !== "_version") result[key] = record[key];
+      }
+      return result;
+    }
     const projected: Record<string, unknown> = {};
     for (const f of fields) {
       if (f in record) projected[f] = record[f];

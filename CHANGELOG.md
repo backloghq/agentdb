@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **BM25 tuning via schema** — `bm25?: { k1?: number; b?: number }` added to `SchemaDefinition`, `PersistedSchema`, and `CollectionOptions` (`bm25K1`/`bm25B`); `Collection` constructor passes these to `new TextIndex({ k1, b })`; `extractPersistedSchema`, `mergeSchemas` (code wins), `mergePersistedSchemas` (overlay wins), and `validatePersistedSchema` all handle the new field.
 
 ### Fixed
+- **`_id`/`_version` leaked into BM25 index in fallback mode** — `Collection.textRecord` fallback (no `searchableFields`) returned the full `stripMeta` record, which still contains `_id` and `_version`; now explicitly excludes those keys so UUID tokens and version numbers are never indexed.
 - **Semantic search broken in disk mode** — `semanticSearch` and `searchByVector` used `this.store.get(id)` (memory-only opslog store), missing records in Parquet/JSONL; fixed via `materializeCandidates` which checks `_diskStore` first.
 - **Sequential disk hydration in BM25 search** — `bm25Search` was awaiting each `_diskStore.get(id)` serially; replaced with parallel `Promise.all` via `materializeCandidates`.
 - **`searchByVector` now async** — was synchronous, preventing disk hydration; return type changed to `Promise<{ records, scores }>`.
