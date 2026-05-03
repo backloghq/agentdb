@@ -510,3 +510,46 @@ describe("embedUnembedded — single-pass disk scan (#168)", () => {
     await rm(dir, { recursive: true, force: true });
   });
 });
+
+describe("config knob unification (#170)", () => {
+  it("AgentDBOptions.embeddingBatchSize flows as db-wide default; CollectionOptions overrides it", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    // db-wide default: 50 records per provider call
+    const db = new AgentDB(dir, { embeddings: { provider }, embeddingBatchSize: 50 });
+    await db.init();
+
+    // No schema embeddingBatchSize — should inherit db-wide 50
+    const schemaDefault = defineSchema({ name: "default-batch", fields: { title: { type: "string" } } });
+    const colDefault = await db.collection(schemaDefault);
+    for (let i = 0; i < 120; i++) {
+      await colDefault.insert({ _id: `d${i}`, title: `document ${i}` });
+    }
+    provider.calls.length = 0;
+    await colDefault.embedUnembedded();
+    // 120 records / 50 per call = 3 calls (50 + 50 + 20)
+    expect(provider.calls.length).toBe(3);
+    expect(provider.calls[0].length).toBe(50);
+    expect(provider.calls[2].length).toBe(20);
+
+    // Schema overrides to 100 — should use 100, not 50
+    const schemaOverride = defineSchema({
+      name: "override-batch",
+      fields: { title: { type: "string" } },
+      embeddingBatchSize: 100,
+    });
+    const colOverride = await db.collection(schemaOverride);
+    for (let i = 0; i < 120; i++) {
+      await colOverride.insert({ _id: `d${i}`, title: `document ${i}` });
+    }
+    provider.calls.length = 0;
+    await colOverride.embedUnembedded();
+    // 120 records / 100 per call = 2 calls (100 + 20)
+    expect(provider.calls.length).toBe(2);
+    expect(provider.calls[0].length).toBe(100);
+    expect(provider.calls[1].length).toBe(20);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});

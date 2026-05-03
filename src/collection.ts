@@ -88,6 +88,10 @@ export interface CollectionOptions {
   diskConcurrency?: number;
   /** Number of records per embedding provider call in embedUnembedded (default: 256). */
   embeddingBatchSize?: number;
+  /** LRU cache size for disk mode (max records, default: 1000). Overrides AgentDBOptions.cacheSize for this collection. */
+  cacheSize?: number;
+  /** Parquet row group size for disk mode (default: 5000). Overrides AgentDBOptions.rowGroupSize for this collection. */
+  rowGroupSize?: number;
 }
 
 /** Change event emitted after mutations. */

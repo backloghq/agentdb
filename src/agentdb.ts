@@ -66,6 +66,8 @@ export interface AgentDBOptions {
   rowGroupSize?: number;
   /** Max concurrent disk fetches for non-FS backends (e.g. S3). Default: 16. Per-collection override via CollectionOptions.diskConcurrency. */
   diskConcurrency?: number;
+  /** Number of records per embedding provider call in embedUnembedded (default: 256). Per-collection override via CollectionOptions.embeddingBatchSize. */
+  embeddingBatchSize?: number;
 }
 
 export interface CollectionInfo {
@@ -133,6 +135,7 @@ export class AgentDB {
       cacheSize: opts?.cacheSize,
       rowGroupSize: opts?.rowGroupSize,
       diskConcurrency: opts?.diskConcurrency,
+      embeddingBatchSize: opts?.embeddingBatchSize,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -261,9 +264,19 @@ export class AgentDB {
 
     const store = new Store<Record<string, unknown>>();
     const baseOpts = this.collectionOpts.get(name);
-    const mergedOpts = (this.opts.diskConcurrency !== undefined && baseOpts?.diskConcurrency === undefined)
-      ? { ...baseOpts, diskConcurrency: this.opts.diskConcurrency }
-      : baseOpts;
+    // Apply db-wide defaults for knobs that also have per-collection overrides.
+    // Per-collection value wins; db default fills in only when the collection didn't specify one.
+    const mergedOpts: typeof baseOpts = {
+      ...baseOpts,
+      ...(this.opts.diskConcurrency !== undefined && baseOpts?.diskConcurrency === undefined
+        ? { diskConcurrency: this.opts.diskConcurrency } : {}),
+      ...(this.opts.embeddingBatchSize !== undefined && baseOpts?.embeddingBatchSize === undefined
+        ? { embeddingBatchSize: this.opts.embeddingBatchSize } : {}),
+      ...(this.opts.cacheSize !== undefined && baseOpts?.cacheSize === undefined
+        ? { cacheSize: this.opts.cacheSize } : {}),
+      ...(this.opts.rowGroupSize !== undefined && baseOpts?.rowGroupSize === undefined
+        ? { rowGroupSize: this.opts.rowGroupSize } : {}),
+    };
     const col = new Collection(name, store, mergedOpts);
     if (this.embeddingProvider) {
       col.setEmbeddingProvider(this.embeddingProvider);
@@ -292,8 +305,8 @@ export class AgentDB {
       });
 
       const diskStore = new DiskStore(col.getBackend(), {
-        cacheSize: this.opts.cacheSize ?? 1_000,
-        rowGroupSize: this.opts.rowGroupSize ?? 5000,
+        cacheSize: mergedOpts?.cacheSize ?? 1_000,
+        rowGroupSize: mergedOpts?.rowGroupSize ?? 5000,
         extractColumns: schema?.indexes ?? [],
       });
       await diskStore.load();
