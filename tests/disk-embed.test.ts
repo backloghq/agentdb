@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
 import { defineSchema } from "../src/schema.js";
 import type { EmbeddingProvider } from "../src/embeddings/types.js";
+import { extractTextFromRecord } from "../src/collection-helpers.js";
 
 async function makeTmpDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "agentdb-diskembed-"));
@@ -536,5 +537,52 @@ describe("config knob unification (#170)", () => {
 
     await db.close();
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("extractTextFromRecord — meta field exclusion (#173)", () => {
+  it("excludes _id from embedding text", () => {
+    const result = extractTextFromRecord({ _id: "abc-123", title: "hello" });
+    expect(result).toBe("hello");
+    expect(result).not.toContain("abc-123");
+  });
+
+  it("excludes _version from embedding text", () => {
+    const result = extractTextFromRecord({ _version: 5, title: "hello" });
+    expect(result).toBe("hello");
+  });
+
+  it("excludes _agent from embedding text", () => {
+    const result = extractTextFromRecord({ _agent: "agent-007", title: "hello" });
+    expect(result).toBe("hello");
+  });
+
+  it("excludes _reason from embedding text", () => {
+    const result = extractTextFromRecord({ _reason: "migration", title: "hello" });
+    expect(result).toBe("hello");
+  });
+
+  it("excludes _embedding from embedding text", () => {
+    const result = extractTextFromRecord({ _embedding: [0.1, 0.2], title: "hello" });
+    expect(result).toBe("hello");
+  });
+
+  it("excludes all meta fields simultaneously", () => {
+    const result = extractTextFromRecord({
+      _id: "x",
+      _version: 3,
+      _agent: "bot",
+      _reason: "seed",
+      _embedding: [0],
+      _expires: 9999999,
+      title: "world",
+      body: "content",
+    });
+    expect(result).toBe("world content");
+  });
+
+  it("includes non-underscore user fields", () => {
+    const result = extractTextFromRecord({ name: "Alice", tags: ["foo", "bar"], count: 1 });
+    expect(result).toBe("Alice foo bar");
   });
 });
