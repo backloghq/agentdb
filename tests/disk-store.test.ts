@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FsBackend } from "@backloghq/opslog";
+import type { StorageBackend } from "@backloghq/opslog";
 import { DiskStore } from "../src/disk-store.js";
 
 describe("DiskStore", () => {
@@ -260,5 +261,18 @@ describe("DiskStore", () => {
       expect(r0?._embedding).toEqual([1]);
       expect(r1?._embedding).toEqual([2]);
     });
+  });
+});
+
+describe("DiskStore.isLocalFs (#177)", () => {
+  it("returns true for FsBackend", () => {
+    const store = new DiskStore(new FsBackend());
+    expect(store.isLocalFs()).toBe(true);
+  });
+
+  it("returns false for a non-FsBackend stub", () => {
+    const stub = {} as StorageBackend;
+    const store = new DiskStore(stub);
+    expect(store.isLocalFs()).toBe(false);
   });
 });
