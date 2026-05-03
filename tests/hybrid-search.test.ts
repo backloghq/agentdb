@@ -1002,6 +1002,144 @@ describe("materializeCandidates — concurrency cap", () => {
     await db2.close();
     await rm(dir, { recursive: true, force: true });
   });
+
+  it("local-FS path: ds.get() rejection mid-pool propagates out of bm25Search", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({
+      name: "localfail",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+
+    const db = new AgentDB(dir, { storageMode: "disk" });
+    await db.init();
+    const col = await db.collection(schema);
+    for (let i = 0; i < 20; i++) {
+      await col.insert({ _id: `d${i}`, title: `word error test ${i}` });
+    }
+    await db.close();
+
+    const db2 = new AgentDB(dir, { storageMode: "disk" });
+    await db2.init();
+    const col2 = await db2.collection(schema);
+    const ds = col2.getDiskStore()!;
+
+    // isLocalFs() remains true — exercises the Promise.all path
+    expect(ds.isLocalFs()).toBe(true);
+
+    const diskError = new Error("simulated disk read failure");
+    let callCount = 0;
+    const originalGet = ds.get.bind(ds);
+    const getSpy = vi.spyOn(ds, "get").mockImplementation(async (id: string) => {
+      callCount++;
+      // Fail on the 5th candidate to ensure we're mid-pool
+      if (callCount === 5) throw diskError;
+      return originalGet(id);
+    });
+
+    await expect(col2.bm25Search("word", { limit: 10 })).rejects.toThrow("simulated disk read failure");
+
+    getSpy.mockRestore();
+    await db2.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("non-FS worker-pool path: ds.get() rejection mid-pool propagates out of bm25Search", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({
+      name: "workerfail",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+
+    const db = new AgentDB(dir, { storageMode: "disk" });
+    await db.init();
+    const col = await db.collection(schema);
+    for (let i = 0; i < 60; i++) {
+      await col.insert({ _id: `d${i}`, title: `word pool test ${i}` });
+    }
+    await db.close();
+
+    const db2 = new AgentDB(dir, { storageMode: "disk" });
+    await db2.init();
+    const col2 = await db2.collection(schema);
+    const ds = col2.getDiskStore()!;
+
+    const isLocalFsSpy = vi.spyOn(ds, "isLocalFs").mockReturnValue(false);
+
+    const diskError = new Error("simulated S3 read failure");
+    let callCount = 0;
+    const originalGet = ds.get.bind(ds);
+    const getSpy = vi.spyOn(ds, "get").mockImplementation(async (id: string) => {
+      const n = ++callCount;
+      // Fail on the 10th call to ensure other workers are already in-flight
+      if (n === 10) throw diskError;
+      return originalGet(id);
+    });
+
+    await expect(col2.bm25Search("word", { limit: 10 })).rejects.toThrow("simulated S3 read failure");
+
+    // At least one get() was called before the error (verifies we entered the pool)
+    expect(callCount).toBeGreaterThan(1);
+
+    isLocalFsSpy.mockRestore();
+    getSpy.mockRestore();
+    await db2.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("hybridSearch degrades gracefully when one arm's ds.get() rejects mid-pool", async () => {
+    const dir = await makeTmpDir();
+    // BM25 arm: "word" is in titles; semantic arm: queries embed to [1,0,0,0]
+    const vectors = new Map<string, number[]>();
+    for (let i = 0; i < 10; i++) vectors.set(`word pool hybrid ${i}`, [1, 0, 0, 0]);
+    vectors.set("word pool hybrid", [1, 0, 0, 0]);
+
+    const schema = defineSchema({
+      name: "hybridfail",
+      textSearch: true,
+      storageMode: "disk",
+      fields: { title: { type: "string", searchable: true } },
+    });
+
+    const db = new AgentDB(dir, {
+      storageMode: "disk",
+      embeddings: { provider: new FakeEmbeddingProvider(vectors) },
+    });
+    await db.init();
+    const col = await db.collection(schema);
+    for (let i = 0; i < 10; i++) {
+      await col.insert({ _id: `d${i}`, title: `word pool hybrid ${i}` });
+    }
+    await col.embedUnembedded();
+    await db.close();
+
+    const db2 = new AgentDB(dir, {
+      storageMode: "disk",
+      embeddings: { provider: new FakeEmbeddingProvider(vectors) },
+    });
+    await db2.init();
+    const col2 = await db2.collection(schema);
+    const ds = col2.getDiskStore()!;
+
+    // Fail on the very first get() — ensures the BM25 arm rejects from materializeCandidates
+    let callCount = 0;
+    const originalGet = ds.get.bind(ds);
+    const getSpy = vi.spyOn(ds, "get").mockImplementation(async (id: string) => {
+      if (++callCount === 1) throw new Error("simulated disk error in hybridSearch");
+      return originalGet(id);
+    });
+
+    // hybridSearch per-arm .catch(empty) absorbs the failing arm; the other arm
+    // runs a fresh set of get() calls and succeeds — overall call does not reject
+    const result = await col2.hybridSearch("word pool hybrid", { limit: 5 });
+    expect(result.records.length).toBeGreaterThan(0);
+    expect(result.records.length).toBe(result.scores.length);
+
+    getSpy.mockRestore();
+    await db2.close();
+    await rm(dir, { recursive: true, force: true });
+  });
 });
 
 describe("hybridSearch — arm failure modes", () => {

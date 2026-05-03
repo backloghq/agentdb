@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- **`materializeCandidates` mid-pool failure tests** — 3 new tests in `tests/hybrid-search.test.ts`: local-FS `Promise.all` path propagates `ds.get()` rejection out of `bm25Search`; non-FS worker-pool path propagates the same rejection; `hybridSearch` per-arm `.catch(empty)` absorbs the failing arm and returns results from the surviving arm (degraded success, not rejection).
 - **Malformed JSONL tests** — 3 new tests in `tests/disk-io.test.ts` pinning `readJsonlStream` throws `SyntaxError` on a truncated line mid-file; `readAllFromJsonl` propagates the same error; `DiskStore.entries({skipCache:true})` propagates `SyntaxError` from a corrupt JSONL file rather than crashing silently.
 - **`embeddingBatchSize` on `SchemaDefinition` / `CollectionOptions`** — controls the number of records per embedding provider call in `embedUnembedded` (default 256); exposed via `defineSchema({ embeddingBatchSize })`.
 - **`DiskStore.appendEmbeddings()`** — durably appends embedding-updated records to a new JSONL file and registers it in `compactionMeta` without a Parquet rewrite; also updates the LRU cache so subsequent `entries()` calls return the embedded version.
