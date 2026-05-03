@@ -439,3 +439,60 @@ describe("TextIndex — Unicode/CJK/emoji tokenization", () => {
     expect(idx.search("🔥")).toEqual(new Set());
   });
 });
+
+describe("TextIndex — prototype-pollution guards in loadFromJSON", () => {
+  it("ignores __proto__ / constructor / prototype keys in terms map", () => {
+    const data = {
+      version: 2,
+      terms: {
+        hello: ["doc1"],
+        __proto__: ["doc1"],
+        constructor: ["doc1"],
+        prototype: ["doc1"],
+      },
+      docs: {
+        doc1: { terms: { hello: 1 }, len: 1 },
+      },
+    };
+    const idx = TextIndex.fromJSON(data as Parameters<typeof TextIndex.fromJSON>[0]);
+    // Legit term works
+    expect(idx.search("hello")).toEqual(new Set(["doc1"]));
+    // Poison keys must not be in the index
+    expect(idx.termCount).toBe(1); // only "hello"
+    // No prototype pollution — a fresh plain object has no own "evil" property
+    const probe: Record<string, unknown> = {};
+    expect(Object.prototype.hasOwnProperty.call(probe, "evil")).toBe(false);
+  });
+
+  it("ignores __proto__ / constructor / prototype in docs map", () => {
+    const data = {
+      version: 2,
+      terms: { hello: ["doc1"] },
+      docs: {
+        doc1: { terms: { hello: 1 }, len: 1 },
+        __proto__: { terms: { hello: 1 }, len: 1 },
+        constructor: { terms: { hello: 1 }, len: 1 },
+      },
+    };
+    const idx = TextIndex.fromJSON(data as Parameters<typeof TextIndex.fromJSON>[0]);
+    expect(idx.docCount).toBe(1); // only doc1
+  });
+
+  it("ignores __proto__ / constructor / prototype in per-doc TF map", () => {
+    const data = {
+      version: 2,
+      terms: { hello: ["doc1"] },
+      docs: {
+        doc1: {
+          terms: { hello: 1, __proto__: 99, constructor: 99 },
+          len: 1,
+        },
+      },
+    };
+    const idx = TextIndex.fromJSON(data as Parameters<typeof TextIndex.fromJSON>[0]);
+    // "hello" should be found; poison terms must not be
+    const results = idx.searchScored("hello");
+    expect(results.length).toBe(1);
+    expect(results[0].id).toBe("doc1");
+  });
+});

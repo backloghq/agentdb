@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { AgentDB } from "../src/agentdb.js";
 import { defineSchema } from "../src/schema.js";
-import { loadSchemaFromJSON, extractPersistedSchema, validatePersistedSchema } from "../src/schema.js";
+import { loadSchemaFromJSON, extractPersistedSchema, validatePersistedSchema, mergeSchemas, mergePersistedSchemas } from "../src/schema.js";
+import type { PersistedSchema } from "../src/schema.js";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -305,5 +306,122 @@ describe("bm25 schema option — Collection plumbing", () => {
 
     // With b=1.0, shorter doc (less length dilution) must score higher
     expect(scores["short"]).toBeGreaterThan(scores["long"]);
+  });
+});
+
+describe("searchable fields — non-string FieldDef types warn and are excluded", () => {
+  const offendingTypes: Array<{ label: string; fieldDef: Record<string, unknown> }> = [
+    { label: "boolean", fieldDef: { type: "boolean", searchable: true } },
+    { label: "number",  fieldDef: { type: "number",  searchable: true } },
+    { label: "enum",    fieldDef: { type: "enum", values: ["a", "b"], searchable: true } },
+    { label: "autoIncrement", fieldDef: { type: "autoIncrement", searchable: true } },
+    { label: "object",  fieldDef: { type: "object", searchable: true } },
+  ];
+
+  for (const { label, fieldDef } of offendingTypes) {
+    it(`searchable:true on '${label}' field warns and excludes it from searchableFields()`, () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const schema = defineSchema({
+          name: "things",
+          textSearch: true,
+          fields: {
+            title: { type: "string", searchable: true },
+            bad:   fieldDef as Parameters<typeof defineSchema>[0]["fields"][string],
+          },
+        });
+        // At least one warning about the offending field
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("bad"));
+        // Only string field survives
+        const { collectionOptions } = schema;
+        expect(collectionOptions?.searchableFields).toEqual(["title"]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }
+
+  it("string[] field with searchable:true is accepted without warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const schema = defineSchema({
+        name: "things2",
+        textSearch: true,
+        fields: {
+          tags: { type: "string[]", searchable: true },
+        },
+      });
+      expect(warn).not.toHaveBeenCalled();
+      expect(schema.collectionOptions?.searchableFields).toEqual(["tags"]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("searchable — mergeSchemas: code wins", () => {
+  it("code searchable:false overrides persisted searchable:true", () => {
+    const code = defineSchema({
+      name: "col",
+      fields: { body: { type: "string", searchable: false } },
+    });
+    const persisted: PersistedSchema = {
+      name: "col",
+      version: 1,
+      fields: { body: { type: "string", searchable: true } },
+    };
+    const { persisted: merged } = mergeSchemas(code.definition!, persisted);
+    expect(merged.fields?.body?.searchable).toBe(false);
+  });
+
+  it("code searchable:true overrides persisted searchable:false", () => {
+    const code = defineSchema({
+      name: "col",
+      fields: { body: { type: "string", searchable: true } },
+    });
+    const persisted: PersistedSchema = {
+      name: "col",
+      version: 1,
+      fields: { body: { type: "string", searchable: false } },
+    };
+    const { persisted: merged } = mergeSchemas(code.definition!, persisted);
+    expect(merged.fields?.body?.searchable).toBe(true);
+  });
+
+  it("persisted searchable used as fallback when code omits it", () => {
+    const code = defineSchema({
+      name: "col",
+      fields: { body: { type: "string" } },
+    });
+    const persisted: PersistedSchema = {
+      name: "col",
+      version: 1,
+      fields: { body: { type: "string", searchable: true } },
+    };
+    const { persisted: merged } = mergeSchemas(code.definition!, persisted);
+    expect(merged.fields?.body?.searchable).toBe(true);
+  });
+});
+
+describe("searchable — mergePersistedSchemas: overlay wins", () => {
+  it("base searchable:true + overlay omits → preserved", () => {
+    const base: PersistedSchema = { name: "col", version: 1, fields: { body: { type: "string", searchable: true } } };
+    const overlay: PersistedSchema = { name: "col", version: 1, fields: { body: { type: "string" } } };
+    const merged = mergePersistedSchemas(base, overlay);
+    expect(merged.fields?.body?.searchable).toBe(true);
+  });
+
+  it("base omits + overlay searchable:true → set", () => {
+    const base: PersistedSchema = { name: "col", version: 1, fields: { body: { type: "string" } } };
+    const overlay: PersistedSchema = { name: "col", version: 1, fields: { body: { type: "string", searchable: true } } };
+    const merged = mergePersistedSchemas(base, overlay);
+    expect(merged.fields?.body?.searchable).toBe(true);
+  });
+
+  it("base searchable:true + overlay searchable:false → false", () => {
+    const base: PersistedSchema = { name: "col", version: 1, fields: { body: { type: "string", searchable: true } } };
+    const overlay: PersistedSchema = { name: "col", version: 1, fields: { body: { type: "string", searchable: false } } };
+    const merged = mergePersistedSchemas(base, overlay);
+    expect(merged.fields?.body?.searchable).toBe(false);
   });
 });

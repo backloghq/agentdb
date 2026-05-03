@@ -525,3 +525,182 @@ describe("hybridSearch — disk-mode correctness", () => {
     await rm(dir, { recursive: true, force: true });
   });
 });
+
+describe("hybridSearch — coverage gaps", () => {
+  let dir: string;
+  let db: AgentDB;
+  let fakeVectors: Map<string, number[]>;
+
+  beforeEach(async () => {
+    dir = await makeTmpDir();
+    fakeVectors = new Map();
+    db = new AgentDB(dir, { embeddings: { provider: new FakeEmbeddingProvider(fakeVectors) } });
+    await db.init();
+  });
+
+  afterEach(async () => {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("dedup: record appearing in both arms is returned once with combined RRF score", async () => {
+    const schema = defineSchema({
+      name: "dedup",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+    const col = await db.collection(schema);
+
+    // "shared" appears top in both BM25 ("typescript typescript") and semantic (nearest vector)
+    fakeVectors.set("typescript", [1, 0, 0, 0]);
+    fakeVectors.set("typescript typescript", [1, 0, 0, 0]);
+    fakeVectors.set("other content here", [0, 1, 0, 0]);
+
+    await col.insert({ _id: "shared", title: "typescript typescript" });
+    await col.insert({ _id: "other",  title: "other content here" });
+    await col.embedUnembedded();
+
+    const result = await col.hybridSearch("typescript", { limit: 10 });
+    const ids = result.records.map((r) => r._id);
+
+    // "shared" appears exactly once
+    expect(ids.filter((id) => id === "shared").length).toBe(1);
+    // scores and records are aligned
+    expect(result.scores.length).toBe(result.records.length);
+  });
+
+  it("summary:true strips long fields from both BM25-arm-only and semantic-arm-only records", async () => {
+    const schema = defineSchema({
+      name: "summcol",
+      textSearch: true,
+      fields: {
+        title: { type: "string", searchable: true },
+        body: { type: "string" },
+      },
+    });
+    const col = await db.collection(schema);
+    const longBody = "x".repeat(300);
+
+    fakeVectors.set("lexical search", [1, 0, 0, 0]);
+    fakeVectors.set("lex only doc title", [0.1, 0.9, 0, 0]);
+    fakeVectors.set("sem only document", [1, 0, 0, 0]);
+
+    await col.insert({ _id: "lex", title: "lex only doc title", body: longBody });
+    await col.insert({ _id: "sem", title: "sem only document",  body: longBody });
+    await col.embedUnembedded();
+
+    const result = await col.hybridSearch("lexical search", { limit: 10, summary: true });
+    for (const rec of result.records) {
+      // summary strips long string fields
+      expect((rec.body as string | undefined) === undefined || (rec.body as string).length < 300).toBe(true);
+    }
+    expect(result.records.length).toBeGreaterThan(0);
+  });
+
+  it("one arm returns zero matches: semantic hits pass through when BM25 vocab misses", async () => {
+    const schema = defineSchema({
+      name: "onematch",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+    const col = await db.collection(schema);
+
+    fakeVectors.set("xyzzy quux completely unknown vocab", [1, 0, 0, 0]);
+    fakeVectors.set("machine learning basics", [1, 0, 0, 0]);
+
+    await col.insert({ _id: "ml", title: "machine learning basics" });
+    await col.embedUnembedded();
+
+    // "xyzzy quux" has no BM25 match; semantic arm returns "ml" (vectors equal)
+    const result = await col.hybridSearch("xyzzy quux completely unknown vocab", { limit: 5 });
+    const ids = result.records.map((r) => r._id);
+    expect(ids).toContain("ml");
+    expect(result.scores.length).toBe(result.records.length);
+    expect(result.scores.every((s) => s > 0)).toBe(true);
+  });
+
+  it("one arm returns zero matches: BM25 hits pass through when semantic vec is zero", async () => {
+    const schema = defineSchema({
+      name: "bm25pass",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+    const col = await db.collection(schema);
+
+    // query vector maps to zero → semantic arm returns nothing (cosine similarity undefined/0)
+    // BM25 arm matches "typescript"
+    fakeVectors.set("typescript", [0, 0, 0, 0]);
+    fakeVectors.set("typescript language guide", [0, 0, 0, 0]);
+
+    await col.insert({ _id: "ts", title: "typescript language guide" });
+    await col.embedUnembedded();
+
+    const result = await col.hybridSearch("typescript", { limit: 5 });
+    // BM25 arm must deliver "ts"
+    expect(result.records.map((r) => r._id)).toContain("ts");
+    expect(result.scores.length).toBe(result.records.length);
+  });
+});
+
+describe("db_hybrid_search tool — argument forwarding", () => {
+  let dir: string;
+  let db: AgentDB;
+
+  beforeEach(async () => {
+    dir = await makeTmpDir();
+    const fakeVectors = new Map<string, number[]>([
+      ["typescript generics", [1, 0, 0, 0]],
+      ["typescript language intro", [0.9, 0.1, 0, 0]],
+      ["javascript guide", [0, 1, 0, 0]],
+    ]);
+    db = new AgentDB(dir, { embeddings: { provider: new FakeEmbeddingProvider(fakeVectors) } });
+    await db.init();
+  });
+
+  afterEach(async () => {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("summary, filter, k, and candidateLimit all reach hybridSearch via the tool", async () => {
+    const tools = getTools(db);
+    const schema = defineSchema({
+      name: "argfwd",
+      textSearch: true,
+      fields: {
+        title:    { type: "string", searchable: true },
+        body:     { type: "string" },
+        category: { type: "string" },
+      },
+    });
+    const col = await db.collection(schema);
+    const longBody = "z".repeat(400);
+    await col.insert({ _id: "ts",  title: "typescript language intro", body: longBody, category: "keep" });
+    await col.insert({ _id: "js",  title: "javascript guide",          body: longBody, category: "drop" });
+    await col.embedUnembedded();
+
+    const t = tools.find((t) => t.name === "db_hybrid_search")!;
+    const raw = await t.execute({
+      collection: "argfwd",
+      query: "typescript generics",
+      limit: 10,
+      k: 30,
+      candidateLimit: 100,
+      summary: true,
+      filter: { category: "keep" },
+    });
+
+    expect(raw.isError).toBeFalsy();
+    const result = JSON.parse((raw.content[0] as { text: string }).text);
+
+    // filter: only "keep" category passes
+    expect(result.records.every((r: Record<string, unknown>) => r.category === "keep")).toBe(true);
+    // summary: long body stripped
+    for (const rec of result.records) {
+      const body = rec.body as string | undefined;
+      expect(body === undefined || body.length < 400).toBe(true);
+    }
+    // scores aligned
+    expect(result.scores.length).toBe(result.records.length);
+  });
+});
