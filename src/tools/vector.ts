@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AgentDB } from "../agentdb.js";
 import { makeSafe, API_NOTE, collectionParam, filterParam, READ, WRITE } from "./shared.js";
 import type { AgentTool } from "./shared.js";
+import type { Filter } from "../collection.js";
 
 export function getVectorTools(db: AgentDB): AgentTool[] {
   function safe(name: string, annotations: { readOnlyHint?: boolean; destructiveHint?: boolean }) {
@@ -88,6 +89,38 @@ export function getVectorTools(db: AgentDB): AgentTool[] {
           filter: args.filter as Record<string, unknown> | string | undefined,
           limit: args.limit as number | undefined,
           summary: args.summary as boolean | undefined,
+        });
+      }),
+    },
+
+    {
+      name: "db_bm25_search",
+      title: "BM25 Lexical Search",
+      description:
+        "Search records using BM25 lexical scoring over the collection's " +
+        "text index. Returns records sorted by BM25 score descending. No " +
+        "embedding provider required. Use db_hybrid_search if you also " +
+        "want semantic similarity." + API_NOTE,
+      schema: z.object({
+        collection: collectionParam,
+        query: z.string().meta({ description: "Lexical query — tokenized into terms with OR semantics" }),
+        filter: filterParam,
+        limit: z.number().optional().default(10).meta({ description: "Max results (default 10)" }),
+        candidateLimit: z.number().optional().meta({ description: "BM25 candidates fetched before filter pruning (default max(limit*4, 50))" }),
+        summary: z.boolean().optional().default(false).meta({ description: "Return summary fields only" }),
+      }),
+      outputSchema: z.object({
+        records: z.array(z.record(z.string(), z.unknown())),
+        scores: z.array(z.number()),
+      }),
+      annotations: READ,
+      execute: safe("db_bm25_search", READ)(async (args) => {
+        const col = await db.collection(args.collection as string);
+        return col.bm25Search(args.query as string, {
+          filter: args.filter as Filter | undefined,
+          limit: args.limit as number,
+          candidateLimit: args.candidateLimit as number | undefined,
+          summary: args.summary as boolean,
         });
       }),
     },

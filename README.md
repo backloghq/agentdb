@@ -500,6 +500,7 @@ const { persisted, warnings } = mergeSchemas(codeSchema, persistedSchema);
 | `db_embed` | Manually trigger embedding |
 | `db_vector_upsert` | Store a pre-computed vector with metadata |
 | `db_vector_search` | Search by raw vector (no embedding provider needed) |
+| `db_bm25_search` | Pure BM25 lexical search (no embedding provider needed) |
 | `db_hybrid_search` | Hybrid BM25 + semantic search fused via RRF (degrades gracefully) |
 | `db_blob_write` | Attach a file (base64) to a record |
 | `db_blob_read` | Read an attached file |

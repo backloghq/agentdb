@@ -37,8 +37,8 @@ describe("Tool Definitions — admin", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns 37 tools", () => {
-    expect(tools).toHaveLength(37);
+  it("returns 38 tools", () => {
+    expect(tools).toHaveLength(38);
   });
 
   it("tool order is canonical (admin → crud → schema → migrate → archive → vector → blob → backup)", () => {
@@ -55,7 +55,7 @@ describe("Tool Definitions — admin", () => {
       // archive
       "db_archive", "db_archive_list", "db_archive_load",
       // vector
-      "db_semantic_search", "db_embed", "db_vector_upsert", "db_vector_search", "db_hybrid_search",
+      "db_semantic_search", "db_embed", "db_vector_upsert", "db_vector_search", "db_bm25_search", "db_hybrid_search",
       // blob
       "db_blob_write", "db_blob_read", "db_blob_list", "db_blob_delete",
       // backup

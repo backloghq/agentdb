@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ## [Unreleased]
 
 ### Added
+- **`db_bm25_search` MCP tool** — exposes `Collection.bm25Search` via MCP; supports `filter`, `limit`, `candidateLimit`, and `summary`; no embedding provider required. 38 core tools (40 with HTTP).
 - **`Collection.materializeCandidates()`** — private helper factoring the fetch→filter→compute→summarize loop shared by `bm25Search`, `semanticSearch`, and `searchByVector`; disk-mode aware (parallel `Promise.all` via `_diskStore`) vs in-memory path.
 - **HNSW rebuild from disk on reopen** — `Collection.rebuildHnswFromDisk()` reconstructs the HNSW index from `_diskStore` entries after a disk-mode open (where `skipLoad=true` prevents the WAL-based HNSW rebuild); called by `AgentDB._openCollection` after `setDiskStore`.
 - **Disk-mode hybrid search test** — `tests/hybrid-search.test.ts` extended with a close/reopen disk-mode test asserting both semantic-arm-only and BM25-arm-only docs appear in `hybridSearch` results after reopen.

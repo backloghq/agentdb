@@ -388,6 +388,48 @@ describe("db_hybrid_search tool round-trip", () => {
       await rm(plainDir, { recursive: true, force: true });
     }
   });
+
+  it("db_bm25_search returns records and scores in BM25 order", async () => {
+    const toolSchema = defineSchema({
+      name: "docs",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+    const col = await db.collection(toolSchema);
+    await col.insert({ _id: "d1", title: "hello world" });
+    await col.insert({ _id: "d2", title: "goodbye moon" });
+
+    const result = await exec("db_bm25_search", {
+      collection: "docs",
+      query: "hello world",
+      limit: 5,
+    });
+
+    expect(Array.isArray(result.records)).toBe(true);
+    expect(Array.isArray(result.scores)).toBe(true);
+    expect(result.records.length).toBeGreaterThan(0);
+    expect(result.scores.length).toBe(result.records.length);
+    expect(result.records[0]._id).toBe("d1");
+  });
+
+  it("db_bm25_search returns isError when collection has no text index", async () => {
+    const noTextDir = dir + "-notext";
+    const noTextDb = new AgentDB(noTextDir);
+    await noTextDb.init();
+    const noTextTools = getTools(noTextDb);
+    try {
+      const createT = noTextTools.find((t) => t.name === "db_create")!;
+      await createT.execute({ collection: "plain" });
+      const insertT = noTextTools.find((t) => t.name === "db_insert")!;
+      await insertT.execute({ collection: "plain", record: { title: "hello" } });
+      const t = noTextTools.find((t) => t.name === "db_bm25_search")!;
+      const result = await t.execute({ collection: "plain", query: "hello" });
+      expect(result.isError).toBe(true);
+    } finally {
+      await noTextDb.close();
+      await rm(noTextDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("hybridSearch — disk-mode correctness", () => {
