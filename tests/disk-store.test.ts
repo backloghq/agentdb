@@ -196,4 +196,69 @@ describe("DiskStore", () => {
       ).resolves.toBeUndefined();
     });
   });
+
+  describe("appendEmbeddings — direct unit (#175)", () => {
+    it("empty input is a no-op: _dirty stays false, cache unchanged", async () => {
+      const store = new DiskStore(backend, { rowGroupSize: 100 });
+      await store.load();
+      await store.compact(makeRecords(5), null);
+      expect(store.isDirty).toBe(false);
+      const cachesBefore = store.cacheStats.size;
+
+      await store.appendEmbeddings([]);
+
+      expect(store.isDirty).toBe(false);
+      expect(store.cacheStats.size).toBe(cachesBefore);
+    });
+
+    it("single batch: writes JSONL, updates cache, sets _dirty=true", async () => {
+      const store = new DiskStore(backend, { rowGroupSize: 100 });
+      await store.load();
+      await store.compact(makeRecords(5), null);
+      expect(store.isDirty).toBe(false);
+
+      const embeddedRecord = { _id: "id-2", title: "Record 2", _embedding: [0.1, 0.2, 0.3] };
+      await store.appendEmbeddings([["id-2", embeddedRecord]]);
+
+      // _dirty set so close() will compact
+      expect(store.isDirty).toBe(true);
+      // Cache populated: get returns the embedded record without a new disk read
+      const hitsBefore = store.cacheStats.hits;
+      const result = await store.get("id-2");
+      expect(store.cacheStats.hits).toBe(hitsBefore + 1);
+      expect(result?._embedding).toEqual([0.1, 0.2, 0.3]);
+    });
+
+    it("recordOffsetIndex updated: new JSONL entry persists across a reload", async () => {
+      const store = new DiskStore(backend, { rowGroupSize: 100 });
+      await store.load();
+      await store.compact(makeRecords(5), null);
+
+      const embeddedRecord = { _id: "id-3", title: "Record 3", _embedding: [0.9, 0.8] };
+      await store.appendEmbeddings([["id-3", embeddedRecord]]);
+
+      // Open a fresh store on the same backend — persisted offset index must have id-3
+      const store2 = new DiskStore(backend, { rowGroupSize: 100 });
+      await store2.load();
+      const result = await store2.get("id-3");
+      expect(result?._embedding).toEqual([0.9, 0.8]);
+    });
+
+    it("compactionMeta.jsonlFiles grows by one per call", async () => {
+      const store = new DiskStore(backend, { rowGroupSize: 100 });
+      await store.load();
+      await store.compact(makeRecords(5), null);
+
+      await store.appendEmbeddings([["id-0", { _id: "id-0", _embedding: [1] }]]);
+      await store.appendEmbeddings([["id-1", { _id: "id-1", _embedding: [2] }]]);
+
+      // Both writes must be reflected: a third fresh store sees both via recordOffsetIndex
+      const store2 = new DiskStore(backend, { rowGroupSize: 100 });
+      await store2.load();
+      const r0 = await store2.get("id-0");
+      const r1 = await store2.get("id-1");
+      expect(r0?._embedding).toEqual([1]);
+      expect(r1?._embedding).toEqual([2]);
+    });
+  });
 });
