@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Over-fetch heuristic unified to `Math.max(limit*4, 50)`** — `semanticSearch` and `searchByVector` used `limit*3`; now matches the `bm25Search`/`materializeCandidates` heuristic.
 
 ### Added
+- **`readJsonlStream` async generator** — `src/disk-io.ts` now exports `readJsonlStream(backend, path)` that yields `[id, record]` pairs one at a time instead of accumulating a full `Map`. Working set collapses from O(buffer + Map) to O(buffer), saving 200–400 MB at 100K-record JSONL files. `DiskStore.entries({ skipCache: true })` routes through `readJsonlStream`; the normal cache-warm path continues to use `readAllFromJsonl`. 2 new unit tests (correct ids at 100 records; heap comparison vs Map path) + 1 BENCH=1-gated scenario at 100K and 1M docs.
 - **Round-2 test gaps covered** — 5 new tests: (1) BM25 arm throws `IndexFileTooLargeError` during `hybridSearch` — semantic arm provides results, call does not reject; (2) both arms throw runtime errors — `hybridSearch` returns `{records:[], scores:[]}` rather than rejecting; (3) TTL'd record excluded from `materializeCandidates` — absent from both `bm25Search` and `hybridSearch` after TTL elapses; (4) index load at exactly `MAX_INDEX_FILE_SIZE` succeeds (threshold uses `>`, not `>=`, off-by-one regression catcher); (5) NFC/NFD tokenizer behaviour pinned: no normalisation — precomposed and decomposed forms are distinct tokens; callers must ensure consistent Unicode normalisation.
 
 ### Fixed

@@ -522,6 +522,78 @@ describe.skipIf(!process.env.BENCH)("BM25 + hybrid search benchmarks", { timeout
     // Very loose assertion: < 2 GB for 100K docs.
     expect(delta100k).toBeLessThan(2 * 1024 * 1024 * 1024);
   });
+
+  // 12. readJsonlStream cold-open heap delta — streaming vs Map materialisation
+  it("readJsonlStream: cold-open heap delta at 100K and 1M docs (skipCache path)", async () => {
+    const schema = defineSchema({
+      name: "streamjsonl",
+      fields: { body: { type: "string" } },
+    });
+
+    async function measureColdOpen(N: number): Promise<{ streamDelta: number; mapDelta: number }> {
+      const dir = await mkdtemp(join(tmpDir, `jsonl-stream-${N}-`));
+
+      // Phase 1: insert records → compacted to disk JSONL on close
+      const dbW = new AgentDB(dir, { storageMode: "disk", cacheSize: N });
+      await dbW.init();
+      const colW = await dbW.collection(schema);
+      const BATCH = 1000;
+      for (let i = 0; i < N; i += BATCH) {
+        const end = Math.min(i + BATCH, N);
+        await colW.insertMany(
+          Array.from({ length: end - i }, (_, j) => ({ _id: `d${i + j}`, body: randomDoc(20) }))
+        );
+      }
+      await dbW.close();
+
+      // Phase 2a: cold reopen with tiny cache — entries({skipCache:true}) routes through readJsonlStream
+      if (global.gc) global.gc();
+      const heapBeforeStream = process.memoryUsage().heapUsed;
+      const dbStream = new AgentDB(dir, { storageMode: "disk", cacheSize: 10 });
+      await dbStream.init();
+      const colStream = await dbStream.collection(schema);
+      const ds = colStream.getDiskStore()!;
+      let streamCount = 0;
+      for await (const [,] of ds.entries({ skipCache: true })) { streamCount++; }
+      const streamDelta = process.memoryUsage().heapUsed - heapBeforeStream;
+      await dbStream.close();
+
+      // Phase 2b: same reopen with cache-mode entries() — uses readAllFromJsonl (Map path)
+      if (global.gc) global.gc();
+      const heapBeforeMap = process.memoryUsage().heapUsed;
+      const dbMap = new AgentDB(dir, { storageMode: "disk", cacheSize: 10 });
+      await dbMap.init();
+      const colMap = await dbMap.collection(schema);
+      const dsMap = colMap.getDiskStore()!;
+      let mapCount = 0;
+      for await (const [,] of dsMap.entries()) { mapCount++; }
+      const mapDelta = process.memoryUsage().heapUsed - heapBeforeMap;
+      await dbMap.close();
+
+      expect(streamCount).toBe(N);
+      expect(mapCount).toBe(N);
+
+      await rm(dir, { recursive: true, force: true });
+      return { streamDelta, mapDelta };
+    }
+
+    const r100k = await measureColdOpen(100_000);
+    const r1m   = await measureColdOpen(1_000_000);
+
+    console.log("  readJsonlStream cold-open heap delta:");
+    console.log(`    100K: stream ${(r100k.streamDelta / 1024 / 1024).toFixed(1)} MB  map ${(r100k.mapDelta / 1024 / 1024).toFixed(1)} MB`);
+    console.log(`    1M:   stream ${(r1m.streamDelta   / 1024 / 1024).toFixed(1)} MB  map ${(r1m.mapDelta   / 1024 / 1024).toFixed(1)} MB`);
+
+    // Stream delta must be smaller than map delta (streaming avoids the per-entry Map allocation)
+    // Only assert when GC is exposed so heap readings are reliable
+    if (global.gc) {
+      expect(r100k.streamDelta).toBeLessThan(r100k.mapDelta);
+      expect(r1m.streamDelta).toBeLessThan(r1m.mapDelta);
+    }
+
+    // Absolute ceiling: streaming must fit in 2 GB even at 1M docs
+    expect(r1m.streamDelta).toBeLessThan(2 * 1024 * 1024 * 1024);
+  });
 });
 
 // Ollama real-embedder hybrid latency — requires OLLAMA_EMBED=1 and a running Ollama instance

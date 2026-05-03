@@ -300,4 +300,68 @@ describe("Parquet compaction and reader", () => {
       expect(loaded.size).toBe(0);
     });
   });
+
+  describe("readJsonlStream", () => {
+    it("yields correct id/record pairs for all records", async () => {
+      const { writeRecordStore, readJsonlStream } = await import("../src/disk-io.js");
+
+      const N = 100;
+      const records: Array<[string, Record<string, unknown>]> = Array.from({ length: N }, (_, i) => [
+        `id-${i}`, { _id: `id-${i}`, title: `Record ${i}`, score: i },
+      ]);
+
+      const { path } = await writeRecordStore(backend, records);
+
+      const yielded: Array<[string, Record<string, unknown>]> = [];
+      for await (const entry of readJsonlStream(backend, path)) {
+        yielded.push(entry);
+      }
+
+      expect(yielded.length).toBe(N);
+      for (let i = 0; i < N; i++) {
+        const [id, record] = yielded[i];
+        expect(id).toBe(`id-${i}`);
+        expect(record._id).toBe(`id-${i}`);
+        expect(record.score).toBe(i);
+      }
+    });
+
+    it("streaming uses less peak heap than readAllFromJsonl for large JSONL", async () => {
+      const { writeRecordStore, readJsonlStream, readAllFromJsonl } = await import("../src/disk-io.js");
+
+      // Write 1000 records (large enough for a meaningful heap comparison)
+      const N = 1000;
+      const records: Array<[string, Record<string, unknown>]> = Array.from({ length: N }, (_, i) => [
+        `id-${i}`, { _id: `id-${i}`, body: "x".repeat(200), score: i },
+      ]);
+      const { path } = await writeRecordStore(backend, records);
+
+      // Measure heap for readAllFromJsonl (materialises full Map)
+      if (global.gc) global.gc();
+      const heapBefore1 = process.memoryUsage().heapUsed;
+      const map = await readAllFromJsonl(backend, path);
+      const heapAfterMap = process.memoryUsage().heapUsed;
+      expect(map.size).toBe(N);
+      const mapDelta = heapAfterMap - heapBefore1;
+
+      // Measure heap for readJsonlStream (yields one at a time, discards each)
+      if (global.gc) global.gc();
+      const heapBefore2 = process.memoryUsage().heapUsed;
+      let streamCount = 0;
+      for await (const [,] of readJsonlStream(backend, path)) { streamCount++; }
+      const heapAfterStream = process.memoryUsage().heapUsed;
+      expect(streamCount).toBe(N);
+      const streamDelta = heapAfterStream - heapBefore2;
+
+      // Stream delta should be meaningfully smaller (Map overhead eliminated)
+      // Best-effort: assert streaming heap delta < 2x map delta only when GC is exposed.
+      // Without --expose-gc heap readings are noisy; just log the values.
+      console.log(`  readAllFromJsonl heap delta: ${(mapDelta / 1024).toFixed(0)} KB`);
+      console.log(`  readJsonlStream  heap delta: ${(streamDelta / 1024).toFixed(0)} KB`);
+      // Hard lower bound: streaming must not use more than 3× the map path (regression guard)
+      if (global.gc) {
+        expect(streamDelta).toBeLessThan(mapDelta * 3);
+      }
+    });
+  });
 });

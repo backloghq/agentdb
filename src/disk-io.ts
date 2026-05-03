@@ -422,6 +422,36 @@ export async function readRecordsByOffsets(
 }
 
 /**
+ * Stream records from a JSONL file one at a time.
+ * Parses the same way as readAllFromJsonl but yields each record instead of
+ * accumulating into a Map — working set is O(buffer) not O(buffer + Map).
+ */
+export async function* readJsonlStream(
+  backend: StorageBackend,
+  jsonlPath: string,
+): AsyncGenerator<[string, Record<string, unknown>]> {
+  const buf = await backend.readBlob(jsonlPath);
+  let start = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x0a) {
+      if (i > start) {
+        const line = buf.subarray(start, i).toString("utf-8");
+        const record = JSON.parse(line) as Record<string, unknown>;
+        yield [record._id as string, record];
+      }
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) {
+    const line = buf.subarray(start).toString("utf-8");
+    if (line.trim()) {
+      const record = JSON.parse(line) as Record<string, unknown>;
+      yield [record._id as string, record];
+    }
+  }
+}
+
+/**
  * Read all records from JSONL file sequentially.
  * Parses line-by-line from Buffer without converting the entire file to a string
  * (avoids V8 string limit at ~500MB).

@@ -19,6 +19,7 @@ import {
   readRecordByOffset,
   readRecordsByOffsets,
   readAllFromJsonl,
+  readJsonlStream,
   writeRecordOffsetIndex,
   readRecordOffsetIndex,
   cleanupOldJsonlFiles,
@@ -243,13 +244,21 @@ export class DiskStore {
   async *entries(opts?: { skipCache?: boolean }): AsyncGenerator<[string, Record<string, unknown>]> {
     const skipCache = opts?.skipCache ?? false;
     for (const jsonlFile of this.getAllJsonlFiles()) {
-      const all = await readAllFromJsonl(this.backend, jsonlFile);
-      for (const [id, diskRecord] of all) {
-        // Prefer the LRU-cached version — it may have been updated (e.g. _embedding written via cacheWrite)
-        const cached = this.cache.peek(id);
-        const record = cached ?? diskRecord;
-        if (!skipCache) this.cache.set(id, record);
-        yield [id, record];
+      if (skipCache) {
+        // Stream one record at a time — avoids building a full Map in memory
+        for await (const [id, diskRecord] of readJsonlStream(this.backend, jsonlFile)) {
+          // Prefer the LRU-cached version — it may have been updated (e.g. _embedding written via cacheWrite)
+          const cached = this.cache.peek(id);
+          yield [id, cached ?? diskRecord];
+        }
+      } else {
+        const all = await readAllFromJsonl(this.backend, jsonlFile);
+        for (const [id, diskRecord] of all) {
+          const cached = this.cache.peek(id);
+          const record = cached ?? diskRecord;
+          this.cache.set(id, record);
+          yield [id, record];
+        }
       }
     }
   }
