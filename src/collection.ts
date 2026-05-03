@@ -84,6 +84,8 @@ export interface CollectionOptions {
   bm25K1?: number;
   /** BM25 b length normalization parameter (default: 0.75). */
   bm25B?: number;
+  /** Max concurrent disk fetches in materializeCandidates for non-FS backends (default: 16). Has no effect on local FS. */
+  diskConcurrency?: number;
 }
 
 /** Change event emitted after mutations. */
@@ -1189,7 +1191,21 @@ export class Collection {
 
     let hydrated: Array<StoredRecord | undefined>;
     if (this._diskStore) {
-      hydrated = (await Promise.all(candidates.map((c) => this._diskStore!.get(c.id)))) as Array<StoredRecord | undefined>;
+      const ds = this._diskStore;
+      if (ds.isLocalFs()) {
+        hydrated = (await Promise.all(candidates.map((c) => ds.get(c.id)))) as Array<StoredRecord | undefined>;
+      } else {
+        const cap = this.opts.diskConcurrency ?? 16;
+        hydrated = new Array(candidates.length);
+        let next = 0;
+        const workers = Array.from({ length: Math.min(cap, candidates.length) }, async () => {
+          while (next < candidates.length) {
+            const i = next++;
+            (hydrated as Array<StoredRecord | undefined>)[i] = (await ds.get(candidates[i].id)) as StoredRecord | undefined;
+          }
+        });
+        await Promise.all(workers);
+      }
     } else {
       hydrated = candidates.map((c) => this.store.get(c.id));
     }

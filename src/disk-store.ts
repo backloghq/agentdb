@@ -126,6 +126,11 @@ export class DiskStore {
     return this.cache.stats();
   }
 
+  /** True when the backend is a local filesystem (FsBackend). Used to decide concurrency caps. */
+  isLocalFs(): boolean {
+    return this.backend.constructor.name === "FsBackend";
+  }
+
   /** Get or lazily load the cached Parquet file buffer. */
   private async getParquetBuffer(): Promise<ArrayBuffer | undefined> {
     if (!this.compactionMeta) return undefined;

@@ -88,6 +88,8 @@ export interface SchemaDefinition {
   tagField?: string;
   /** Storage mode override: "memory", "disk", or "auto". */
   storageMode?: "memory" | "disk" | "auto";
+  /** Max concurrent disk fetches for non-FS backends (e.g. S3). Default: 16. */
+  diskConcurrency?: number;
 }
 
 // --- Compiled schema ---
@@ -164,6 +166,7 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     ...(searchableFields.length > 0 ? { searchableFields } : {}),
     ...(def.bm25?.k1 !== undefined ? { bm25K1: def.bm25.k1 } : {}),
     ...(def.bm25?.b !== undefined ? { bm25B: def.bm25.b } : {}),
+    ...(def.diskConcurrency !== undefined ? { diskConcurrency: def.diskConcurrency } : {}),
   };
 
   return {

@@ -872,3 +872,134 @@ describe("DiskStore.entries — skipCache flag", () => {
     await rm(dir, { recursive: true, force: true });
   });
 });
+
+describe("materializeCandidates — concurrency cap", () => {
+  it("non-FS backend: peak in-flight get() calls ≤ diskConcurrency cap", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({
+      name: "concap",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+
+    // Set up a disk-mode collection with enough records to fill candidateLimit
+    const db = new AgentDB(dir, { storageMode: "disk" });
+    await db.init();
+    const col = await db.collection(schema);
+    for (let i = 0; i < 60; i++) {
+      await col.insert({ _id: `d${i}`, title: `word alpha beta ${i}` });
+    }
+    await db.close();
+
+    // Reopen and measure peak concurrency with isLocalFs() → false (simulates S3)
+    const db2 = new AgentDB(dir, { storageMode: "disk" });
+    await db2.init();
+    const col2 = await db2.collection(schema);
+
+    const ds = col2.getDiskStore()!;
+
+    // Spy: make isLocalFs() return false (simulates non-FS backend)
+    const isLocalFsSpy = vi.spyOn(ds, "isLocalFs").mockReturnValue(false);
+
+    // Spy on get() to track peak in-flight
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const originalGet = ds.get.bind(ds);
+    const getSpy = vi.spyOn(ds, "get").mockImplementation(async (id: string) => {
+      inFlight++;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      const result = await originalGet(id);
+      inFlight--;
+      return result;
+    });
+
+    // diskConcurrency defaults to 16; corpus of 60 docs → candidateLimit = max(10*4,50) = 50
+    await col2.bm25Search("word", { limit: 10 });
+
+    expect(peakInFlight).toBeGreaterThan(0);
+    expect(peakInFlight).toBeLessThanOrEqual(16);
+
+    isLocalFsSpy.mockRestore();
+    getSpy.mockRestore();
+    await db2.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("local FS backend: unbounded — all candidates hydrated in parallel", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({
+      name: "fsunbounded",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+
+    const db = new AgentDB(dir, { storageMode: "disk" });
+    await db.init();
+    const col = await db.collection(schema);
+    for (let i = 0; i < 20; i++) {
+      await col.insert({ _id: `d${i}`, title: `word gamma ${i}` });
+    }
+    await db.close();
+
+    const db2 = new AgentDB(dir, { storageMode: "disk" });
+    await db2.init();
+    const col2 = await db2.collection(schema);
+    const ds = col2.getDiskStore()!;
+
+    // isLocalFs() should return true for FsBackend (real FS)
+    expect(ds.isLocalFs()).toBe(true);
+
+    // Verify search still works correctly (unbounded path)
+    const result = await col2.bm25Search("word", { limit: 10 });
+    expect(result.records.length).toBeGreaterThan(0);
+
+    await db2.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("diskConcurrency option overrides the default cap", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({
+      name: "customcap",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+      diskConcurrency: 3,
+    });
+
+    const db = new AgentDB(dir, { storageMode: "disk" });
+    await db.init();
+    const col = await db.collection(schema);
+    for (let i = 0; i < 60; i++) {
+      await col.insert({ _id: `d${i}`, title: `word delta ${i}` });
+    }
+    await db.close();
+
+    const db2 = new AgentDB(dir, { storageMode: "disk" });
+    await db2.init();
+    const col2 = await db2.collection(schema);
+    const ds = col2.getDiskStore()!;
+
+    const isLocalFsSpy = vi.spyOn(ds, "isLocalFs").mockReturnValue(false);
+
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const originalGet = ds.get.bind(ds);
+    const getSpy = vi.spyOn(ds, "get").mockImplementation(async (id: string) => {
+      inFlight++;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      const result = await originalGet(id);
+      inFlight--;
+      return result;
+    });
+
+    await col2.bm25Search("word", { limit: 10 });
+
+    expect(peakInFlight).toBeGreaterThan(0);
+    expect(peakInFlight).toBeLessThanOrEqual(3);
+
+    isLocalFsSpy.mockRestore();
+    getSpy.mockRestore();
+    await db2.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
