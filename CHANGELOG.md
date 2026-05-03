@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`tests/disk-embed.test.ts`** — 5 new tests covering batching (3 provider calls for 600 records with `batchSize=256`, partial-batch failure, custom `batchSize=100`) and durability (1000 disk records with `cacheSize=100` embeddings survive close/reopen, partial embed survives mid-run).
 
 ### Fixed
+- **`DiskStore.isLocalFs()` minifier-unsafe** — `constructor.name === "FsBackend"` is broken by minification; replaced with `instanceof FsBackend` (imported from `@backloghq/opslog`).
 - **Embedding-loss on disk-backed collections (N > cacheSize)** — `embedUnembedded` previously wrote embeddings only to the LRU cache; with N > cacheSize, eviction silently dropped embeddings before compaction, causing HNSW rebuild failures on reopen. Fixed by writing each batch durably to disk via `DiskStore.appendEmbeddings` immediately after provider call.
 - **`extractTextFromRecord` included `_id` in embedding text** — causing a mismatch between stored embeddings (computed from `"<id> <content>"`) and query embeddings (computed from content only); `_id` is now excluded from text extraction.
 

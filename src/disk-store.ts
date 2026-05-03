@@ -30,6 +30,7 @@ import {
 } from "./disk-io.js";
 import type { IndexManager } from "./collection-indexes.js";
 import type { TextIndex } from "./text-index.js";
+import { FsBackend } from "@backloghq/opslog";
 import type { StorageBackend } from "@backloghq/opslog";
 
 export class IndexFileTooLargeError extends Error {
@@ -129,7 +130,7 @@ export class DiskStore {
 
   /** True when the backend is a local filesystem (FsBackend). Used to decide concurrency caps. */
   isLocalFs(): boolean {
-    return this.backend.constructor.name === "FsBackend";
+    return this.backend instanceof FsBackend;
   }
 
   /** Get or lazily load the cached Parquet file buffer. */
