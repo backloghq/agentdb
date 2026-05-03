@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Sequential disk hydration in BM25 search** — `bm25Search` was awaiting each `_diskStore.get(id)` serially; replaced with parallel `Promise.all` via `materializeCandidates`.
 - **`searchByVector` now async** — was synchronous, preventing disk hydration; return type changed to `Promise<{ records, scores }>`.
 - **v1→v2 BM25 mixed-corpus ghost results** — `searchScored` was returning v1 docs with score=0, tie-broken by id (silently wrong rank order); v1 placeholder docs (empty tfMap, no TF data) are now skipped. A v1-only corpus returns `[]` from `searchScored`; mixed corpora return only v2-indexed docs. AND-search (`search()`) is unaffected. Each `add()` call upgrades that doc in place.
+- **`hybridSearch` per-arm error isolation** — a runtime failure in one arm (e.g. embedding provider throws) no longer rejects the entire call; the failing arm is treated as empty and the other arm's results are returned via RRF as usual.
 
 ## [1.4.0] - 2026-05-02
 

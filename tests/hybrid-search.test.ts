@@ -272,6 +272,36 @@ describe("Collection.hybridSearch — integration", () => {
     await diskDb.close();
     await rm(diskDir, { recursive: true, force: true });
   });
+
+  it("semantic arm runtime failure degrades to BM25-only result", async () => {
+    // Provider throws on embed — semantic arm must fail silently, BM25 results still returned
+    const throwingProvider = {
+      dimensions: 4,
+      embed: async (): Promise<number[][]> => {
+        throw new Error("provider offline");
+      },
+    };
+    const throwDir = dir + "-throw";
+    const throwDb = new AgentDB(throwDir, { embeddings: { provider: throwingProvider } });
+    await throwDb.init();
+    try {
+      const col = await throwDb.collection(hybridSchema);
+      await col.insert({ _id: "bm25-doc", title: "typescript generics advanced" });
+      await col.insert({ _id: "other-doc", title: "rust systems programming" });
+
+      const result = await col.hybridSearch("typescript generics", { limit: 5 });
+
+      // Must not throw — semantic arm failure is swallowed
+      expect(Array.isArray(result.records)).toBe(true);
+      expect(Array.isArray(result.scores)).toBe(true);
+      // BM25 arm still provides results
+      expect(result.records.length).toBeGreaterThan(0);
+      expect(result.records.map((r) => r._id)).toContain("bm25-doc");
+    } finally {
+      await throwDb.close();
+      await rm(throwDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("db_hybrid_search tool round-trip", () => {

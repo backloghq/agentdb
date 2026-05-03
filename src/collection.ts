@@ -1268,10 +1268,11 @@ export class Collection {
     const k = opts?.k ?? 60;
     const armOpts = { limit: candidateLimit, filter: opts?.filter, summary: opts?.summary };
 
-    // Run available arms in parallel
+    const empty = (): { records: Record<string, unknown>[]; scores: number[] } => ({ records: [], scores: [] });
+    // Run available arms in parallel; catch runtime failures so one arm degrading doesn't reject the whole call
     const [bm25Result, semResult] = await Promise.all([
-      hasBm25 ? this.bm25Search(query, armOpts) : Promise.resolve({ records: [] as Record<string, unknown>[], scores: [] as number[] }),
-      hasSemantic ? this.semanticSearch(query, armOpts) : Promise.resolve({ records: [] as Record<string, unknown>[], scores: [] as number[] }),
+      hasBm25 ? this.bm25Search(query, armOpts).catch(empty) : Promise.resolve(empty()),
+      hasSemantic ? this.semanticSearch(query, armOpts).catch(empty) : Promise.resolve(empty()),
     ]);
 
     // Build id lists preserving arm order; build record map from both arms
