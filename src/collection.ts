@@ -1507,15 +1507,16 @@ export class Collection {
 
     // --- Disk records (compacted Parquet/JSONL) ---
     if (this._diskStore?.hasParquetData) {
-      // Single-pass: stream entries oldest→newest. Later file entry wins.
-      // pending tracks records needing embedding; a subsequent entry with _embedding
-      // means a prior embedUnembedded already handled it — remove from pending.
+      // Single-pass: stream entries oldest→newest (last file wins for each id).
+      // pending accumulates the final decision for each id; a later entry with _embedding
+      // (written by a prior embedUnembedded) removes the id so we don't re-embed it.
+      // Memory is bounded by unique-id count, not record size — each entry stores only
+      // the stripped text + record needed for the embedding call.
       const pending = new Map<string, { text: string; record: StoredRecord }>();
 
       for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
         if (walSeen.has(id)) continue;
         if ((record as StoredRecord)[META_EMBEDDING]) {
-          // This id already has an embedding (appended by a prior embedUnembedded call)
           pending.delete(id);
         } else {
           if (isExpired(record as StoredRecord)) continue;
@@ -1646,6 +1647,11 @@ export class Collection {
           return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(q) }];
         });
         await this._diskStore!.appendEmbeddings(updates);
+        // Mid-flight compaction: merge accumulated JSONL files when threshold hit,
+        // bounding file count and index rewrite cost for large reembed runs.
+        if (this._diskStore!.shouldCompact()) {
+          await this._diskStore!.compactInPlace();
+        }
         for (let j = 0; j < diskBatch.length; j++) {
           this.hnswIdx!.add(diskBatch[j].id, vectors[j]);
         }

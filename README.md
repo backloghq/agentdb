@@ -665,7 +665,7 @@ const col = await db.collection("docs");
 await col.insertVector("doc1", [0.1, 0.2, ...], { title: "My Document" });
 
 // Search by vector
-const results = col.searchByVector([0.1, 0.2, ...], { limit: 10, filter: { status: "active" } });
+const results = await col.searchByVector([0.1, 0.2, ...], { limit: 10, filter: { status: "active" } });
 // → { records: [...], scores: [0.98, 0.91, ...] }
 ```
 

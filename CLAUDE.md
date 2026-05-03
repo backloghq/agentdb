@@ -2,11 +2,11 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status: v1.4 — hybrid search (BM25+RRF+vector), disk-backed embeddings, persisted schemas. 1226 tests.**
+**Status: v1.4 — hybrid search (BM25+RRF+vector), disk-backed embeddings, persisted schemas. 1232 tests.**
 
 Major capabilities:
 - **Search:** `bm25Search` (BM25 k1/b tunable, `searchable:true` per field, Unicode tokenizer, 256 MB index cap), `semanticSearch` (HNSW, 6 providers, Int8 quantization), `hybridSearch` (RRF fusion, per-arm failure degrades gracefully), `searchByVector`
-- **Disk mode:** JSONL for point lookups + Parquet for column scans; LRU cache; async `entries()` iterator; `appendEmbeddings` writes embedding batches durably to JSONL (bypasses eviction race); `embedUnembedded` single-pass disk scan (halves S3 I/O); `reembedAll` for v1.3→v1.4 migration (`_id` was incorrectly included in embedding text); `rebuildHnswFromDisk` on reopen
+- **Disk mode:** JSONL for point lookups + Parquet for column scans; LRU cache; async `entries()` iterator; `appendEmbeddings` writes embedding batches durably to JSONL (bypasses eviction race); `embedUnembedded` single-pass disk scan (halves S3 I/O); `reembedAll` for v1.3→v1.4 migration (`_id` was incorrectly included in embedding text) with mid-flight `compactInPlace()` every 8 JSONL files (bounds index rewrite cost for large runs); `rebuildHnswFromDisk` on reopen
 - **Embeddings:** batched `embedUnembedded` (configurable `embeddingBatchSize`, continue-on-error per batch); `extractTextFromRecord` excludes explicit `META_FIELDS_FOR_EMBED` set (`_id`,`_version`,`_agent`,`_reason`,`_expires`,`_embedding`) — user `_`-prefixed fields are included; `reembedAll()` returns `ReembedResult{embedded,failed,errors[]}` for structured partial-failure reporting; `db_reembed_all` admin tool (DESTRUCTIVE)
 - **Config knobs:** `embeddingBatchSize`, `diskConcurrency`, `cacheSize`, `rowGroupSize` — all follow AgentDB (db-wide default) + CollectionOptions (per-collection override) shape
 - **Schemas:** `PersistedSchema` in `meta/{name}.schema.json` (description, instructions, field types); `db_get/set/delete/diff/infer/migrate` lifecycle tools; `validatePersistedSchema` rejects `searchable:true` on non-string types; schema bootstrap from `schemas/*.json` glob
@@ -59,7 +59,7 @@ src/
   collection-indexes.ts # IndexManager: B-tree, composite, array, bloom filter indexes + query planning
   record-cache.ts       # LRU cache for disk-backed mode (Map insertion-order eviction)
   array-index.ts        # Inverted element index for O(1) $contains on arrays
-  disk-store.ts         # Disk-backed storage: Parquet + LRU cache + persistent indexes; entries() async iterator
+  disk-store.ts         # Disk-backed storage: Parquet + LRU cache + persistent indexes; entries() async iterator; shouldCompact()/compactInPlace() for mid-flight reembedAll compaction; MERGE_JSONL_THRESHOLD=8 (parity with MERGE_THRESHOLD=10 Parquet limit — both chosen as ~10× batch size for smooth S3 write amplification)
   disk-io.ts            # Parquet compaction + JSONL record store + readers via hyparquet
   filter.ts             # JSON filter compiler (15 operators incl. $strLen, dot-notation)
   compact-filter.ts     # Compact string parser (role:admin age.gt:18)
@@ -89,7 +89,7 @@ src/
     schema.ts           # db_schema, db_get_schema, db_set_schema, db_delete_schema, db_diff_schema, db_infer_schema (6 tools)
     migrate.ts          # db_migrate — two-phase snapshot, deletion-as-failed, ops cap, prototype-pollution guards (1 tool)
     archive.ts          # db_archive, db_archive_list, db_archive_load (3 tools)
-    vector.ts           # db_semantic_search, db_embed, db_vector_upsert, db_vector_search, db_bm25_search, db_hybrid_search (6 tools)
+    vector.ts           # db_semantic_search, db_embed, db_vector_upsert, db_vector_search, db_bm25_search, db_reembed_all, db_hybrid_search (7 tools)
     blob.ts             # db_blob_write, db_blob_read, db_blob_list, db_blob_delete (4 tools)
     backup.ts           # db_export, db_import (2 tools)
   mcp/index.ts          # MCP server (stdio + HTTP/Streamable transport); startHttp/startStdio accept schemaPaths option

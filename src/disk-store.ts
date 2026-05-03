@@ -337,10 +337,30 @@ export class DiskStore {
 
   /** Max incremental Parquet files before triggering a full merge. */
   private static readonly MERGE_THRESHOLD = 10;
-  /** Max incremental JSONL files before triggering a full merge. */
+  /**
+   * Max incremental JSONL files before triggering a full merge.
+   * Set to 8 (≈ MERGE_THRESHOLD=10) — both sit at ~10× the default batch size, giving
+   * smooth S3 write amplification: compact often enough to bound index rewrite cost,
+   * infrequently enough to amortize the per-compact Parquet write.
+   */
   private static readonly MERGE_JSONL_THRESHOLD = 8;
 
   // --- Compaction ---
+
+  /** True when accumulated JSONL files exceed the merge threshold. */
+  shouldCompact(): boolean {
+    const jsonlFileCount = (this.compactionMeta?.jsonlFiles?.length ?? 0) + 1;
+    return jsonlFileCount >= DiskStore.MERGE_JSONL_THRESHOLD;
+  }
+
+  /**
+   * Full compaction using only the store's own on-disk data.
+   * Used by reembedAll to periodically compact accumulated embedding JSONL files
+   * without needing external record lists (WAL records remain in WAL, replayed on open).
+   */
+  async compactInPlace(): Promise<void> {
+    await this._compactFull(this.entries({ skipCache: true }));
+  }
 
   /**
    * Compact: incremental if possible, full if first time or merge threshold reached.

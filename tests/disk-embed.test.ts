@@ -745,3 +745,151 @@ describe("_id exclusion regression catcher (#174)", () => {
     await rm(dir, { recursive: true, force: true });
   });
 });
+
+describe("reembedAll — mid-flight failure semantics (#188)", () => {
+  it("successful batches are persisted; failed batch records are tracked in errors; unembedded remain retrievable", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "reembed188", fields: { title: { type: "string" } } });
+
+    // Phase 1: insert 30 records, compact to disk
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 30; i++) {
+        await col.insert({ _id: `d${i}`, title: `document ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reembedAll with batch=10; provider throws on batch index 1 (second batch)
+    const baseProvider = new HashProvider();
+    let callCount = 0;
+    const flakyProvider: EmbeddingProvider = {
+      dimensions: 32,
+      async embed(texts: string[]): Promise<number[][]> {
+        callCount++;
+        if (callCount === 2) throw new Error("provider timeout");
+        return baseProvider.embed(texts);
+      },
+    };
+
+    {
+      const db = new AgentDB(dir, {
+        storageMode: "disk",
+        embeddings: { provider: flakyProvider },
+        embeddingBatchSize: 10,
+      });
+      await db.init();
+      const col = await db.collection(schema);
+      const result = await col.reembedAll();
+
+      // 30 records / 10 per batch = 3 batches; batch 2 fails
+      expect(result.embedded).toBe(20);
+      expect(result.failed).toBe(10);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].recordIds).toHaveLength(10);
+      expect(result.errors[0].reason).toContain("provider timeout");
+
+      await db.close();
+    }
+
+    // Phase 3: reopen with working provider — only the 10 failed records need reembedding
+    {
+      const db = new AgentDB(dir, {
+        storageMode: "disk",
+        embeddings: { provider: baseProvider },
+        embeddingBatchSize: 10,
+      });
+      await db.init();
+      const col = await db.collection(schema);
+      const result2 = await col.reembedAll();
+      // reembedAll always re-embeds everything (force path)
+      expect(result2.embedded).toBe(30);
+      expect(result2.failed).toBe(0);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("reembedAll — 3+ JSONL mixed states (#191)", () => {
+  it("same id across 3+ JSONL files: no-embed → with-embed → no-embed uses last-write-wins", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "reembed191", fields: { title: { type: "string" } } });
+    const provider = new HashProvider();
+
+    // Phase 1: insert 5 records, compact to disk (no embeddings)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 5; i++) {
+        await col.insert({ _id: `d${i}`, title: `doc ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: embed all → writes embedding JSONL (records now have _embedding)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, embeddingBatchSize: 5 });
+      await db.init();
+      const col = await db.collection(schema);
+      const count = await col.embedUnembedded();
+      expect(count).toBe(5);
+      await db.close();
+    }
+
+    // Phase 3: update all records via insert (stores without _embedding in WAL),
+    // then close — compaction merges WAL (no _embedding) with disk; latest wins.
+    // Reopen and check reembedAll re-embeds 5 records.
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, embeddingBatchSize: 5 });
+      await db.init();
+      const col = await db.collection(schema);
+
+      // Upsert with updated title — these WAL records have no _embedding
+      for (let i = 0; i < 5; i++) {
+        await col.upsert(`d${i}`, { title: `updated doc ${i}` });
+      }
+
+      provider.calls.length = 0;
+      const reembedResult = await col.reembedAll();
+      // reembedAll force-reembeds WAL records (no _embedding check, all re-done)
+      expect(reembedResult.embedded).toBe(5);
+      expect(reembedResult.failed).toBe(0);
+      expect(provider.calls.length).toBeGreaterThan(0);
+
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("extractTextFromRecord — user _-prefixed field policy (#190)", () => {
+  it("user fields starting with _ are included (not treated as reserved)", () => {
+    const result = extractTextFromRecord({ _custom_field: "custom value", title: "normal" });
+    expect(result).toContain("custom value");
+    expect(result).toContain("normal");
+  });
+
+  it("only the 6 explicit META_FIELDS_FOR_EMBED members are excluded", () => {
+    const result = extractTextFromRecord({
+      _id: "excluded",
+      _version: 1,
+      _agent: "excluded-agent",
+      _reason: "excluded-reason",
+      _expires: 999,
+      _embedding: [0],
+      _user_tag: "included",
+      _internal_ref: "also-included",
+    });
+    expect(result).not.toContain("excluded");
+    expect(result).not.toContain("excluded-agent");
+    expect(result).not.toContain("excluded-reason");
+    expect(result).toContain("included");
+    expect(result).toContain("also-included");
+  });
+});
