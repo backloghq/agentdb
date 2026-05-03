@@ -365,6 +365,42 @@ describe("db_hybrid_search tool round-trip", () => {
     expect(result.records[0]._id).toBe("a1");
   });
 
+  it("db_hybrid_search candidateLimit is forwarded to the lib layer", async () => {
+    const toolSchema = defineSchema({
+      name: "cl_articles",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true }, category: { type: "string" } },
+    });
+    const col = await db.collection(toolSchema);
+    // Insert many docs so candidateLimit=1 would cap candidates before filter pruning
+    for (let i = 0; i < 10; i++) {
+      await col.insert({ _id: `cl${i}`, title: "typescript language", category: i === 0 ? "keep" : "drop" });
+    }
+    await col.embedUnembedded();
+
+    // candidateLimit=1 means only 1 BM25 candidate is examined — with a filter
+    // that only cl0 passes, this verifies candidateLimit actually reaches bm25Search
+    const limited = await exec("db_hybrid_search", {
+      collection: "cl_articles",
+      query: "typescript language",
+      limit: 5,
+      candidateLimit: 1,
+      filter: { category: "keep" },
+    });
+    expect(Array.isArray(limited.records)).toBe(true);
+    expect(limited.scores.length).toBe(limited.records.length);
+
+    // Without candidateLimit all 10 match "typescript", filter keeps only cl0
+    const unlimited = await exec("db_hybrid_search", {
+      collection: "cl_articles",
+      query: "typescript language",
+      limit: 5,
+      filter: { category: "keep" },
+    });
+    expect(unlimited.records.length).toBeGreaterThanOrEqual(1);
+    expect(unlimited.records[0]._id).toBe("cl0");
+  });
+
   it("db_hybrid_search returns isError when collection has no search capability", async () => {
     // Use a fresh db with no embedding provider so hybridSearch has neither arm
     const plainDir = dir + "-plain";

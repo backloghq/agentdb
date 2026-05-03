@@ -140,6 +140,7 @@ export function getVectorTools(db: AgentDB): AgentTool[] {
         filter: filterParam,
         limit: z.number().optional().default(10).meta({ description: "Max results (default 10)" }),
         k: z.number().optional().default(60).meta({ description: "RRF k parameter (default 60)" }),
+        candidateLimit: z.number().optional().meta({ description: "Candidates fetched per arm before filter pruning (default max(limit*4, 50))" }),
         summary: z.boolean().optional().default(false).meta({ description: "Return summary fields only" }),
       }),
       outputSchema: z.object({
@@ -150,9 +151,10 @@ export function getVectorTools(db: AgentDB): AgentTool[] {
       execute: safe("db_hybrid_search", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         return col.hybridSearch(args.query as string, {
-          filter: args.filter as Record<string, unknown> | string | undefined,
+          filter: args.filter as Filter | undefined,
           limit: args.limit as number,
           k: args.k as number,
+          candidateLimit: args.candidateLimit as number | undefined,
           summary: args.summary as boolean,
         });
       }),
