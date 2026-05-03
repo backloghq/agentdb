@@ -736,6 +736,34 @@ Recovery options:
 
 A sharded/streamed v3 text-index format that removes this ceiling is planned for a future release.
 
+### Embedding and disk performance knobs
+
+Two options control embedding throughput and disk-mode concurrency. Both follow the same placement rule: set a db-wide default in `AgentDBOptions`; override per-collection in `CollectionOptions`.
+
+**`embeddingBatchSize`** — number of records sent to the embedding provider in a single `embed()` call during `embedUnembedded`. Default: `256`.
+
+```typescript
+// db-wide default
+const db = new AgentDB("./data", { embeddingBatchSize: 128 });
+
+// per-collection override (wins over db-wide)
+const col = await db.collection("articles", { embeddingBatchSize: 64 });
+```
+
+Smaller batches reduce peak memory and provider timeout risk; larger batches reduce round-trips. Most hosted providers cap at 512–2048 texts per call — stay below their limit.
+
+**`diskConcurrency`** — maximum number of concurrent `DiskStore.get()` calls when materializing BM25/vector candidates in disk mode. Default: `16` for non-local-filesystem backends (e.g. S3); local filesystem is unbounded.
+
+```typescript
+// db-wide default (applied to every disk-mode collection)
+const db = new AgentDB("./data", { diskConcurrency: 32 });
+
+// per-collection override
+const col = await db.collection("embeddings", { diskConcurrency: 8 });
+```
+
+S3 sizing guidance: the default of `16` prevents per-prefix request throttling at typical QPS. If you are running at very high query concurrency (dozens of simultaneous `hybridSearch` calls) and observe `SlowDown` errors, raise to `32`. If you share an S3 prefix with other workloads, lower to `8` to leave headroom.
+
 ### Rate limiting and CORS
 
 ```bash
