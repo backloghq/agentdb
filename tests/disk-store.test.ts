@@ -276,3 +276,65 @@ describe("DiskStore.isLocalFs (#177)", () => {
     expect(store.isLocalFs()).toBe(false);
   });
 });
+
+describe("DiskStore.shouldCompact + compactInPlace (#193)", () => {
+  let tmpDir: string;
+  let backend: FsBackend;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "agentdb-should-compact-"));
+    backend = new FsBackend();
+    await backend.initialize(tmpDir, { readOnly: false });
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeRecords(count: number): Array<[string, Record<string, unknown>]> {
+    return Array.from({ length: count }, (_, i) => [`r${i}`, { _id: `r${i}`, v: i }]);
+  }
+
+  it("shouldCompact returns false when jsonlFiles.length < threshold - 1", async () => {
+    const store = new DiskStore(backend);
+    await store.compact(makeRecords(5), null);
+    // After initial compact jsonlFiles is empty; with base jsonlFile count = 1, total = 1 < 8
+    expect(store.shouldCompact()).toBe(false);
+  });
+
+  it("shouldCompact returns false at 7 JSONL files, true at 8", async () => {
+    const store = new DiskStore(backend, { rowGroupSize: 10 });
+    await store.compact(makeRecords(5), null);
+
+    // Append 6 embedding JSONLs → base + 6 = 7 total → still false
+    for (let i = 0; i < 6; i++) {
+      await store.appendEmbeddings([[`r${i}`, { _id: `r${i}`, _embedding: [i] }]]);
+    }
+    expect(store.shouldCompact()).toBe(false);
+
+    // Append one more → base + 7 = 8 total → true
+    await store.appendEmbeddings([["r99", { _id: "r99", v: 99 }]]);
+    expect(store.shouldCompact()).toBe(true);
+  });
+
+  it("compactInPlace resets jsonlFiles to empty and data is still readable", async () => {
+    const store = new DiskStore(backend, { rowGroupSize: 10 });
+    await store.compact(makeRecords(5), null);
+
+    // Append enough to exceed threshold
+    for (let i = 0; i < 8; i++) {
+      await store.appendEmbeddings([[`r${i}`, { _id: `r${i}`, _embedding: [i * 0.1] }]]);
+    }
+    expect(store.shouldCompact()).toBe(true);
+
+    await store.compactInPlace();
+
+    const meta = (store as unknown as { compactionMeta: { jsonlFiles?: string[] } }).compactionMeta;
+    expect((meta?.jsonlFiles?.length ?? 0)).toBe(0);
+    expect(store.shouldCompact()).toBe(false);
+
+    // Data still readable after compaction
+    const r0 = await store.get("r0");
+    expect(r0?._embedding).toEqual([0]);
+  });
+});

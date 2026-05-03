@@ -357,6 +357,10 @@ export class DiskStore {
    * Full compaction using only the store's own on-disk data.
    * Used by reembedAll to periodically compact accumulated embedding JSONL files
    * without needing external record lists (WAL records remain in WAL, replayed on open).
+   *
+   * **Memory:** fully materializes all on-disk records during the merge
+   * (~1 KB/record; expect ~1 GB at 1M records). Called at most once per
+   * `MERGE_JSONL_THRESHOLD` batches, so total cost is amortized across the run.
    */
   async compactInPlace(): Promise<void> {
     await this._compactFull(this.entries({ skipCache: true }));

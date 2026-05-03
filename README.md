@@ -689,7 +689,7 @@ const queryText = `${record._id} ${record.title} ${record.body}`; // don't do th
 
 **v1.3 → v1.4 migration:** v1.3 incorrectly included `_id` in the embedding text. If you have a disk-mode collection indexed by v1.3, call `col.reembedAll()` once after upgrading to fix the stored embeddings. The `db_reembed_all` MCP tool does the same thing (requires admin permission).
 
-**Memory note:** `embedUnembedded` (lazy path) holds all unembedded record references in memory before batching — roughly 1 KB/record, so ~1 GB at 1M unembedded. For large collections, call `col.reembedAll()` instead: it streams and flushes mid-run with bounded memory.
+**Memory note:** `embedUnembedded` (lazy path) holds all unembedded record references in memory before batching — roughly 1 KB/record, so ~1 GB at 1M unembedded. For large collections, call `col.reembedAll()` instead: it streams and flushes mid-run with bounded memory. `reembedAll` triggers an internal `compactInPlace()` every 8 batches, which itself fully materializes the on-disk dataset (~1 KB/record peak per compaction); cost is amortized across the run.
 
 ### Hybrid search (BM25 + semantic)
 

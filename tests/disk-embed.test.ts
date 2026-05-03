@@ -893,3 +893,145 @@ describe("extractTextFromRecord — user _-prefixed field policy (#190)", () => 
     expect(result).toContain("also-included");
   });
 });
+
+describe("shouldCompact + compactInPlace — reembedAll integration spy (#193)", () => {
+  it("reembedAll calls compactInPlace when JSONL file count crosses threshold", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "spy193", fields: { title: { type: "string" } } });
+    const provider = new HashProvider();
+
+    // Phase 1: insert 80 records, compact to disk (no embeddings)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 80; i++) {
+        await col.insert({ _id: `d${i}`, title: `document ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reembedAll with batchSize=10 → 8 flushes → at least one compactInPlace
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, embeddingBatchSize: 10 });
+      await db.init();
+      const col = await db.collection(schema);
+      const ds = col.getDiskStore()!;
+      const spyCompact = vi.spyOn(ds, "compactInPlace");
+
+      const result = await col.reembedAll();
+      expect(result.embedded).toBe(80);
+      expect(result.failed).toBe(0);
+      // 8 batches of 10 → MERGE_JSONL_THRESHOLD=8, so compactInPlace must fire at least once
+      expect(spyCompact.mock.calls.length).toBeGreaterThanOrEqual(1);
+
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("reembedAll — batchIndex and WAL-path failure (#194)", () => {
+  it("error.batchIndex is correct and non-zero for disk batch failures", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "batchidx194", fields: { title: { type: "string" } } });
+
+    // Phase 1: insert 30 disk records
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 30; i++) {
+        await col.insert({ _id: `d${i}`, title: `doc ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reembedAll — provider fails on call 2 (disk batch index 1)
+    const base = new HashProvider();
+    let calls = 0;
+    const flaky: EmbeddingProvider = {
+      dimensions: 32,
+      async embed(texts: string[]): Promise<number[][]> {
+        calls++;
+        if (calls === 2) throw new Error("timeout");
+        return base.embed(texts);
+      },
+    };
+
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider: flaky }, embeddingBatchSize: 10 });
+      await db.init();
+      const col = await db.collection(schema);
+      const result = await col.reembedAll();
+
+      expect(result.errors).toHaveLength(1);
+      // Disk batches start after WAL batches; 0 WAL records → WAL contributes 0 batches
+      // First disk batch is index 0, second (failed) is index 1
+      expect(result.errors[0].batchIndex).toBe(1);
+      expect(result.errors[0].recordIds).toHaveLength(10);
+      expect(result.errors[0].reason).toBe("timeout");
+
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("WAL-batch failure produces batchIndex 0 and disk batches continue with offset", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "walbatch194", fields: { title: { type: "string" } } });
+    const base = new HashProvider();
+
+    // Insert 20 WAL records (no disk compaction) and 20 disk records
+    {
+      // Disk records first
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 20; i++) {
+        await col.insert({ _id: `disk${i}`, title: `disk doc ${i}` });
+      }
+      await db.close();
+    }
+
+    {
+      // Reopen and add WAL records (not yet compacted to disk) — these go into in-memory store
+      // WAL records will be processed first in reembedAll; fail on call 1 (first WAL batch)
+      let calls = 0;
+      const flaky: EmbeddingProvider = {
+        dimensions: 32,
+        async embed(texts: string[]): Promise<number[][]> {
+          calls++;
+          if (calls === 1) throw new Error("wal-fail");
+          return base.embed(texts);
+        },
+      };
+
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider: flaky }, embeddingBatchSize: 20 });
+      await db.init();
+      const col = await db.collection(schema);
+
+      // Insert WAL records (not yet flushed to disk)
+      for (let i = 0; i < 20; i++) {
+        await col.insert({ _id: `wal${i}`, title: `wal doc ${i}` });
+      }
+
+      const result = await col.reembedAll();
+
+      // WAL batch 0 fails; disk batch 0 succeeds (batchIndex = ceil(20/20) = 1)
+      expect(result.failed).toBe(20);
+      expect(result.embedded).toBe(20);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].batchIndex).toBe(0);
+      expect(result.errors[0].reason).toBe("wal-fail");
+      // WAL record IDs in the failed batch
+      expect(result.errors[0].recordIds.every((id: string) => id.startsWith("wal"))).toBe(true);
+
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
