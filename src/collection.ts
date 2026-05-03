@@ -1267,6 +1267,8 @@ export class Collection {
       candidateLimit?: number;
     },
   ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
+    if (!query || !query.trim()) return { records: [], scores: [] };
+
     const hasBm25 = !!this.textIdx;
     const hasSemantic = !!(this.embeddingProvider && this.hnswIdx);
 
@@ -1383,6 +1385,8 @@ export class Collection {
     query: string,
     opts?: { filter?: Filter; limit?: number; summary?: boolean; candidateLimit?: number },
   ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
+    if (!query || !query.trim()) return { records: [], scores: [] };
+
     if (!this.embeddingProvider || !this.hnswIdx) {
       throw new Error("Semantic search not available. Configure an embedding provider on AgentDB.");
     }

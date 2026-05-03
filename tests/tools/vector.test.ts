@@ -1,10 +1,22 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../../src/agentdb.js";
+import { Collection } from "../../src/collection.js";
+import { defineSchema } from "../../src/schema.js";
 import { getTools } from "../../src/tools/index.js";
 import type { AgentTool } from "../../src/tools/index.js";
+import type { EmbeddingProvider } from "../../src/embeddings/types.js";
+
+class FakeProvider implements EmbeddingProvider {
+  readonly dimensions = 4;
+  readonly calls: string[][] = [];
+  async embed(texts: string[]): Promise<number[][]> {
+    this.calls.push(texts);
+    return texts.map(() => [1, 0, 0, 0]);
+  }
+}
 
 describe("Tool Definitions — vector", () => {
   let tmpDir: string;
@@ -47,6 +59,38 @@ describe("Tool Definitions — vector", () => {
       const t = tool("db_semantic_search");
       const result = await t.execute({ collection: "users", query: "test" });
       expect(result.isError).toBe(true);
+    });
+
+    it("semanticSearch empty query returns [] without calling the embedding provider", async () => {
+      const provider = new FakeProvider();
+      const embedDb = new AgentDB(tmpDir + "-sem-empty", { embeddings: { provider } });
+      await embedDb.init();
+      const col = await embedDb.collection(defineSchema({ name: "emptyq", fields: { text: { type: "string" } } }));
+      await col.insert({ _id: "a", text: "hello" });
+
+      const embedSpy = vi.spyOn(provider, "embed");
+      const result = await col.semanticSearch("   ");
+      expect(result.records).toHaveLength(0);
+      expect(result.scores).toHaveLength(0);
+      expect(embedSpy).not.toHaveBeenCalled();
+
+      await embedDb.close();
+      await rm(tmpDir + "-sem-empty", { recursive: true, force: true });
+    });
+
+    it("semanticSearch empty string returns [] without calling the embedding provider", async () => {
+      const provider = new FakeProvider();
+      const embedDb = new AgentDB(tmpDir + "-sem-empty2", { embeddings: { provider } });
+      await embedDb.init();
+      const col = await embedDb.collection(defineSchema({ name: "emptyq2", fields: { text: { type: "string" } } }));
+
+      const embedSpy = vi.spyOn(provider, "embed");
+      const result = await col.semanticSearch("");
+      expect(result.records).toHaveLength(0);
+      expect(embedSpy).not.toHaveBeenCalled();
+
+      await embedDb.close();
+      await rm(tmpDir + "-sem-empty2", { recursive: true, force: true });
     });
   });
 });

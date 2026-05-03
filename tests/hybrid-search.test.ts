@@ -782,3 +782,58 @@ describe("hybridSearch — candidateLimit no-double-amplification", () => {
     bm25Spy.mockRestore();
   });
 });
+
+describe("hybridSearch — empty-query short-circuit", () => {
+  let dir: string;
+  let db: AgentDB;
+
+  beforeEach(async () => {
+    dir = await makeTmpDir();
+    db = new AgentDB(dir, { embeddings: { provider: new FakeEmbeddingProvider(new Map()) } });
+    await db.init();
+  });
+
+  afterEach(async () => {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("empty string returns [] without calling either arm", async () => {
+    const schema = defineSchema({
+      name: "emptyqhybrid",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+    const col = await db.collection(schema);
+    await col.insert({ _id: "a", title: "typescript generics" });
+    await col.embedUnembedded();
+
+    const bm25Spy = vi.spyOn(Collection.prototype, "bm25Search");
+    const semSpy = vi.spyOn(Collection.prototype, "semanticSearch");
+
+    const result = await col.hybridSearch("");
+    expect(result.records).toHaveLength(0);
+    expect(result.scores).toHaveLength(0);
+    expect(bm25Spy).not.toHaveBeenCalled();
+    expect(semSpy).not.toHaveBeenCalled();
+
+    bm25Spy.mockRestore();
+    semSpy.mockRestore();
+  });
+
+  it("whitespace-only query returns [] without calling either arm", async () => {
+    const schema = defineSchema({
+      name: "emptyqhybrid2",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+    const col = await db.collection(schema);
+
+    const bm25Spy = vi.spyOn(Collection.prototype, "bm25Search");
+    const result = await col.hybridSearch("   ");
+    expect(result.records).toHaveLength(0);
+    expect(bm25Spy).not.toHaveBeenCalled();
+
+    bm25Spy.mockRestore();
+  });
+});
