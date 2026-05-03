@@ -326,6 +326,72 @@ describe("Parquet compaction and reader", () => {
       }
     });
 
+    it("throws SyntaxError on malformed JSON line (truncated record in the middle)", async () => {
+      const { readJsonlStream } = await import("../src/disk-io.js");
+
+      // Write a JSONL with a valid record, a truncated line, then another valid record
+      const corrupt = Buffer.from(
+        '{"_id":"id-0","title":"good"}\n' +
+        '{"_id":"id-1","title":"truncated\n' +     // missing closing brace/quote
+        '{"_id":"id-2","title":"good2"}\n',
+        "utf-8",
+      );
+      await backend.writeBlob("data/corrupt.jsonl", corrupt);
+
+      await expect(async () => {
+        for await (const [,] of readJsonlStream(backend, "data/corrupt.jsonl")) { /* consume */ }
+      }).rejects.toThrow(SyntaxError);
+    });
+
+    it("readAllFromJsonl throws on malformed JSONL (delegates to readJsonlStream)", async () => {
+      const { readAllFromJsonl } = await import("../src/disk-io.js");
+
+      const corrupt = Buffer.from(
+        '{"_id":"a","v":1}\n' +
+        'not valid json at all\n' +
+        '{"_id":"b","v":2}\n',
+        "utf-8",
+      );
+      await backend.writeBlob("data/corrupt2.jsonl", corrupt);
+
+      await expect(readAllFromJsonl(backend, "data/corrupt2.jsonl")).rejects.toThrow(SyntaxError);
+    });
+
+    it("DiskStore.entries({skipCache:true}) propagates SyntaxError from corrupt JSONL", async () => {
+      const { DiskStore } = await import("../src/disk-store.js");
+      const { writeRecordStore, writeCompactionMeta, compactToParquet } = await import("../src/disk-io.js");
+
+      // Bootstrap a valid compacted state first
+      const records: Array<[string, Record<string, unknown>]> = [
+        ["id-0", { _id: "id-0", title: "First" }],
+        ["id-1", { _id: "id-1", title: "Second" }],
+      ];
+      const { path: jsonlPath } = await writeRecordStore(backend, records);
+      const { file: parquetFile } = await compactToParquet(backend, records);
+      await writeCompactionMeta(backend, {
+        lastTimestamp: new Date().toISOString(),
+        parquetFile: parquetFile.path,
+        jsonlFile: jsonlPath,
+        rowCount: records.length,
+        rowGroups: parquetFile.rowGroups,
+      });
+
+      // Overwrite the JSONL with corrupt content
+      await backend.writeBlob(jsonlPath, Buffer.from(
+        '{"_id":"id-0","title":"First"}\n' +
+        '{CORRUPT\n' +
+        '{"_id":"id-1","title":"Second"}\n',
+        "utf-8",
+      ));
+
+      const store = new DiskStore(backend);
+      await store.load();
+
+      await expect(async () => {
+        for await (const [,] of store.entries({ skipCache: true })) { /* consume */ }
+      }).rejects.toThrow(SyntaxError);
+    });
+
     it("streaming uses less peak heap than readAllFromJsonl for large JSONL", async () => {
       const { writeRecordStore, readJsonlStream, readAllFromJsonl } = await import("../src/disk-io.js");
 
