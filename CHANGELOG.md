@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ### Changed
 - **`hybridSearch` candidate amplification fixed** — `armOpts` now passes `candidateLimit` explicitly to both `bm25Search` and `semanticSearch`; previously only `limit: candidateLimit` was passed so each arm re-applied `max(limit*4, 50)` internally, fetching 4× more candidates than the caller intended. `semanticSearch` opts extended with `candidateLimit?: number` to accept the explicit value.
 - **Filter type cleanup on `db_semantic_search` / `db_vector_search`** — both tools now cast `args.filter` as `Filter` (matching `db_bm25_search` and `db_hybrid_search`); `db_vector_search` schema replaces the inline `z.union([z.record(...), z.string()])` with the shared `filterParam` import.
+- **CLAUDE.md tool count drift fixed** — `Package Exports` block and `tools/` source-layout comment updated from 37 core / 39 HTTP to 38 core / 40 HTTP; test count updated to 1165.
 - **`Filter` type unified across all search methods** — `bm25Search` and `hybridSearch` `filter` opts now typed as `Filter` (`Record<string, unknown> | string | null | undefined`) matching `semanticSearch` and `searchByVector`; eliminates the narrower `Record<string, unknown> | string` overload.
 - **Over-fetch heuristic unified to `Math.max(limit*4, 50)`** — `semanticSearch` and `searchByVector` used `limit*3`; now matches the `bm25Search`/`materializeCandidates` heuristic.
 
