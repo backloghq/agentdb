@@ -14,6 +14,10 @@ import { parquetReadObjects, parquetMetadata } from "hyparquet";
 import type { FileMetaData } from "hyparquet";
 import type { StorageBackend } from "@backloghq/opslog";
 
+// Monotonic counter appended to filenames to prevent collision when two writes
+// happen within the same millisecond (e.g. rapid appendEmbeddings calls).
+let _fileSeq = 0;
+
 // --- Types ---
 
 export interface CompactionOptions {
@@ -356,7 +360,7 @@ export async function writeRecordStore(
   backend: StorageBackend,
   records: Iterable<[string, Record<string, unknown>]> | AsyncIterable<[string, Record<string, unknown>]>,
 ): Promise<{ path: string; offsetIndex: Map<string, RecordOffsetEntry> }> {
-  const filename = `records-${Date.now()}.jsonl`;
+  const filename = `records-${Date.now()}-${++_fileSeq}.jsonl`;
   const relativePath = `data/${filename}`;
 
   const offsetIndex = new Map<string, RecordOffsetEntry>();

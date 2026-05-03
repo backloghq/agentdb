@@ -224,7 +224,7 @@ describe("Parquet compaction and reader", () => {
       const { writeRecordStore, readRecordByOffset, readRecordsByOffsets, readAllFromJsonl } = await import("../src/disk-io.js");
 
       const { path, offsetIndex } = await writeRecordStore(backend, records);
-      expect(path).toMatch(/^data\/records-\d+\.jsonl$/);
+      expect(path).toMatch(/^data\/records-\d+-\d+\.jsonl$/);
       expect(offsetIndex.size).toBe(3);
 
       // Read single record by offset
@@ -245,6 +245,17 @@ describe("Parquet compaction and reader", () => {
       // Read all from JSONL
       const all = await readAllFromJsonl(backend, path);
       expect(all.size).toBe(3);
+    });
+
+    it("concurrent writeRecordStore calls produce distinct filenames (#172)", async () => {
+      const { writeRecordStore } = await import("../src/disk-io.js");
+      const records: Array<[string, Record<string, unknown>]> = [["x", { _id: "x" }]];
+      // Fire N calls without awaiting — all land within the same ms on fast machines
+      const paths = await Promise.all(
+        Array.from({ length: 20 }, () => writeRecordStore(backend, records).then((r) => r.path)),
+      );
+      const unique = new Set(paths);
+      expect(unique.size).toBe(20);
     });
 
     it("offset index binary round-trip", async () => {

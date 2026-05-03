@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+- **JSONL filename collision under concurrent appends (#172)** — `writeRecordStore` previously generated filenames as `records-${Date.now()}.jsonl`, which collides when two appends occur within the same millisecond. Replaced with `records-${Date.now()}-${++_fileSeq}.jsonl` using a module-level monotonic counter (`_fileSeq`) that guarantees uniqueness across concurrent calls. 1 updated test (regex now matches the counter suffix) and 1 new test (20 concurrent `Promise.all` calls produce 20 distinct filenames).
+
 ### Added
 - **`appendEmbeddings` precondition assert (#171)** — added JSDoc `@precondition` note and runtime `if (!this.compactionMeta)` guard at the top of `DiskStore.appendEmbeddings`: throws `"appendEmbeddings requires compactionMeta to be initialized (hasParquetData must be true)"` instead of crashing on the `compactionMeta!` spread. Also replaced the non-null assertion (`this.compactionMeta!`) and optional-chain (`this.compactionMeta?.jsonlFiles`) with plain property accesses (now safe after the guard). 2 new tests in `tests/disk-store.test.ts`: throws before first compaction, succeeds after.
 - **Unified config knob placement (#170)** — `embeddingBatchSize` added to `AgentDBOptions` as a db-wide default (was only on `SchemaDefinition`/`CollectionOptions`); `cacheSize` and `rowGroupSize` added to `CollectionOptions` as per-collection overrides (was `AgentDBOptions` only). `AgentDB._openCollection` now applies all four knobs via a single merge: db-wide default fills in only when the collection didn't specify one; per-collection value always wins. `DiskStore` construction uses `mergedOpts.cacheSize`/`rowGroupSize`. 1 new test: `AgentDBOptions.embeddingBatchSize: 50` → 3 calls for 120 records; schema-level `embeddingBatchSize: 100` overrides to 2 calls.
