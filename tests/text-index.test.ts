@@ -213,7 +213,7 @@ describe("TextIndex.searchScored (BM25)", () => {
     }
   });
 
-  it("fromJSON accepts v1 data — AND search still works, BM25 gives zero scores", () => {
+  it("fromJSON accepts v1 data — AND search still works, BM25 skips v1 docs", () => {
     const v1Data = {
       version: 1,
       terms: { hello: ["1", "2"], world: ["1"] },
@@ -222,9 +222,8 @@ describe("TextIndex.searchScored (BM25)", () => {
     const idx = TextIndex.fromJSON(v1Data);
     // AND search should still find docs
     expect(idx.search("hello world")).toEqual(new Set(["1"]));
-    // BM25 falls back — tf=0, scores will be 0 but docs still returned
-    const results = idx.searchScored("hello");
-    expect(results.map((r) => r.id).sort()).toEqual(["1", "2"]);
+    // BM25 skips v1 placeholder docs (empty tfMap) — returns []
+    expect(idx.searchScored("hello")).toEqual([]);
   });
 
   it("remove decrements totalLen and avgdl", () => {
@@ -349,19 +348,15 @@ describe("TextIndex BM25 math — hand-calculated expected scores", () => {
     expect(idx.avgdl).toBe(1);               // back to single doc
   });
 
-  it("v1 upgrade: BM25 scores are ≥0 (not NaN) even when totalLen=0", () => {
-    // totalLen=0 triggers the avgdl=1 fallback guard; without it dl/avgdl = 0/0 = NaN
+  it("v1 upgrade: searchScored returns [] for v1-only corpus (no NaN, no rank-by-id surprise)", () => {
     const v1Data = {
       version: 1,
       terms: { hello: ["d1", "d2"], world: ["d1"] },
       docCount: 2,
     };
     const idx = TextIndex.fromJSON(v1Data as Parameters<typeof TextIndex.fromJSON>[0]);
+    // v1 docs have empty tfMap — skipped entirely by searchScored
     const results = idx.searchScored("hello");
-    expect(results.map((r) => r.id).sort()).toEqual(["d1", "d2"]);
-    for (const r of results) {
-      expect(r.score).toBeGreaterThanOrEqual(0);
-      expect(Number.isNaN(r.score)).toBe(false);
-    }
+    expect(results).toEqual([]);
   });
 });

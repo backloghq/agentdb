@@ -720,6 +720,8 @@ const { records, scores } = await notes.hybridSearch("typescript generics", {
 
 **BM25 defaults:** `k1=1.2`, `b=0.75` (Okapi BM25 standard). Configurable via `Collection` constructor options. **RRF default:** `k=60` (Cormack et al. 2009).
 
+**Upgrading from v1.3:** collections indexed before v1.4 use a v1 text-index format with no TF data. These docs are excluded from BM25 results until re-indexed. To upgrade a collection in-place, iterate its records and reinsert them (or call `bm25Search` after any mutation — each write upgrades that doc automatically).
+
 ### Rate limiting and CORS
 
 ```bash

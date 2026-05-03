@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Semantic search broken in disk mode** — `semanticSearch` and `searchByVector` used `this.store.get(id)` (memory-only opslog store), missing records in Parquet/JSONL; fixed via `materializeCandidates` which checks `_diskStore` first.
 - **Sequential disk hydration in BM25 search** — `bm25Search` was awaiting each `_diskStore.get(id)` serially; replaced with parallel `Promise.all` via `materializeCandidates`.
 - **`searchByVector` now async** — was synchronous, preventing disk hydration; return type changed to `Promise<{ records, scores }>`.
+- **v1→v2 BM25 mixed-corpus ghost results** — `searchScored` was returning v1 docs with score=0, tie-broken by id (silently wrong rank order); v1 placeholder docs (empty tfMap, no TF data) are now skipped. A v1-only corpus returns `[]` from `searchScored`; mixed corpora return only v2-indexed docs. AND-search (`search()`) is unaffected. Each `add()` call upgrades that doc in place.
 
 ## [1.4.0] - 2026-05-02
 

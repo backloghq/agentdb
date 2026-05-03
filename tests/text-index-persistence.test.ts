@@ -203,16 +203,49 @@ describe("BM25 disk persistence — v1 upgrade path", () => {
     expect(andResult.has("doc1")).toBe(true);  // doc1 is in both "hello" and "world"
     expect(andResult.has("doc2")).toBe(false); // doc2 is in "hello" but not "world"
 
-    // BM25 falls back gracefully: docs returned with score >= 0
-    // v1 has tf=0 for all terms so numerator = 0, scores = 0 but docs still returned
+    // BM25 skips v1 placeholder docs (empty tfMap) — returns [] for a v1-only corpus.
+    // No NaN, no rank-by-id surprise.
     const bm25Result = textIdx.searchScored("hello");
-    const bm25Ids = bm25Result.map((r) => r.id).sort();
-    expect(bm25Ids).toEqual(["doc1", "doc2"].sort());
-    for (const r of bm25Result) {
-      expect(r.score).toBeGreaterThanOrEqual(0);
-    }
+    expect(bm25Result).toEqual([]);
 
     await db.close();
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it("v1-only corpus: searchScored returns [] (no score=0 ghost results)", async () => {
+    const { TextIndex } = await import("../src/text-index.js");
+    const v1Data = {
+      version: 1,
+      terms: { foo: ["a", "b"], bar: ["a"] },
+      docCount: 2,
+    };
+    const idx = TextIndex.fromJSON(v1Data);
+    // AND search still works
+    expect(idx.search("foo bar").has("a")).toBe(true);
+    expect(idx.search("foo bar").has("b")).toBe(false);
+    // BM25 returns nothing — v1 docs have no TF data
+    expect(idx.searchScored("foo")).toEqual([]);
+    expect(idx.searchScored("foo bar")).toEqual([]);
+  });
+
+  it("mixed corpus (v1 docs + one v2 insert): only the v2 doc scores", async () => {
+    const { TextIndex } = await import("../src/text-index.js");
+    const v1Data = {
+      version: 1,
+      terms: { hello: ["v1a", "v1b"] },
+      docCount: 2,
+    };
+    const idx = TextIndex.fromJSON(v1Data);
+
+    // Add one new v2 doc
+    idx.add("v2doc", { text: "hello hello world" });
+
+    const results = idx.searchScored("hello");
+    const ids = results.map((r) => r.id);
+    // Only v2doc should appear — v1a and v1b have no TF data
+    expect(ids).toEqual(["v2doc"]);
+    expect(results[0].score).toBeGreaterThan(0);
+    // No NaN
+    expect(Number.isNaN(results[0].score)).toBe(false);
   });
 });

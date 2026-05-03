@@ -3,12 +3,13 @@
  *
  * Persistence versions:
  *   v1 — posting lists only, no TF/DL data. On load, docTerms and docLen are
- *        rebuilt as empty Maps. AND-search still works; BM25 scores fall back
- *        to idf-only (tf=0 path). Stats update incrementally on next add().
+ *        rebuilt as empty Maps. AND-search (search()) still works.
  *   v2 — includes per-doc TF map and docLen. Full BM25 from cold start.
  *
- * v1→v2 upgrade is lazy: docs not yet re-added will score 0 on BM25 calls
- * until the caller's next add() pass. Disk repos upgrade incrementally.
+ * v1→v2 upgrade is lazy: docs not yet re-added via add() have empty TF Maps
+ * and are skipped by searchScored() — they do not appear in BM25 results.
+ * Each add() call upgrades that doc to v2 in place. To upgrade a full
+ * collection at once, iterate all records and call add() on each.
  */
 
 /** Tokenize a string into lowercase terms (with repeated occurrences). */
@@ -150,7 +151,8 @@ export class TextIndex {
 
       for (const id of ids) {
         const tfMap = this.docTerms.get(id);
-        const tf = tfMap?.get(term) ?? 0;
+        const tf = tfMap?.get(term);
+        if (!tf) continue; // skip v1 placeholders (empty tfMap) and zero-tf docs
         const dl = this.docLen.get(id) ?? 0;
         const norm = k1 * (1 - b + b * (dl / avgdl));
         const termScore = idf * (tf * (k1 + 1)) / (tf + norm);
