@@ -293,6 +293,37 @@ export class DiskStore {
     this.cache.clear();
   }
 
+  /**
+   * Durably append embedding updates to a new JSONL file and register it.
+   * Used by embedUnembedded to persist embeddings without cache eviction risk.
+   * Does NOT write a Parquet file — the next compact() will merge.
+   */
+  async appendEmbeddings(records: Array<[string, Record<string, unknown>]>): Promise<void> {
+    if (records.length === 0) return;
+    const { path: jsonlPath, offsetIndex: newRecordOffsets } = await writeRecordStore(this.backend, records);
+
+    for (const [id, entry] of newRecordOffsets) this.recordOffsetIndex.set(id, entry);
+    this._recordCount = this.recordOffsetIndex.size;
+
+    // Update LRU cache so entries() returns the embedded version on next iteration
+    for (const [id, record] of records) this.cache.set(id, record);
+
+    const jsonlFiles = [...(this.compactionMeta?.jsonlFiles ?? []), jsonlPath];
+
+    this.compactionMeta = {
+      ...(this.compactionMeta!),
+      lastTimestamp: new Date().toISOString(),
+      jsonlFiles,
+      rowCount: this._recordCount,
+    };
+
+    await writeRecordOffsetIndex(this.backend, this.recordOffsetIndex);
+    await writeCompactionMeta(this.backend, this.compactionMeta);
+
+    this._cachedJsonlFiles = null;
+    this._dirty = false;
+  }
+
   /** Max incremental files before triggering a full merge. */
   private static readonly MERGE_THRESHOLD = 10;
 

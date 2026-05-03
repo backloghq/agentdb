@@ -243,10 +243,11 @@ export function compositeIndexKey(fields: string[]): string {
   return fields.join(COMPOSITE_SEP);
 }
 
-/** Extract all text from a record for embedding (concatenate string fields). */
+/** Extract all text from a record for embedding (concatenate string fields, excluding _id). */
 export function extractTextFromRecord(record: Record<string, unknown>): string {
   const parts: string[] = [];
-  for (const value of Object.values(record)) {
+  for (const [key, value] of Object.entries(record)) {
+    if (key === "_id") continue;
     if (typeof value === "string" && value.length > 0) {
       parts.push(value);
     } else if (Array.isArray(value)) {

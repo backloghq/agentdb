@@ -86,6 +86,8 @@ export interface CollectionOptions {
   bm25B?: number;
   /** Max concurrent disk fetches in materializeCandidates for non-FS backends (default: 16). Has no effect on local FS. */
   diskConcurrency?: number;
+  /** Number of records per embedding provider call in embedUnembedded (default: 256). */
+  embeddingBatchSize?: number;
 }
 
 /** Change event emitted after mutations. */
@@ -1451,70 +1453,104 @@ export class Collection {
   async embedUnembedded(): Promise<number> {
     if (!this.embeddingProvider || !this.hnswIdx) return 0;
 
-    const toEmbed: { id: string; text: string; record: StoredRecord; fromDisk: boolean }[] = [];
+    const batchSize = this.opts.embeddingBatchSize ?? 256;
+    let embedded = 0;
 
-    // In-memory WAL records
+    // --- WAL (in-memory) records ---
     const walSeen = new Set<string>();
+    const walToEmbed: { id: string; text: string; record: StoredRecord }[] = [];
     for (const [id, record] of this.store.entries()) {
       if (isExpired(record)) continue;
       walSeen.add(id);
       if (record[META_EMBEDDING]) continue;
       const clean = stripMeta(record);
       const text = extractTextFromRecord(clean);
-      if (text) toEmbed.push({ id, text, record, fromDisk: false });
+      if (text) walToEmbed.push({ id, text, record });
     }
 
-    // Disk records not in WAL (compacted Parquet/JSONL) — use skipCache to avoid LRU thrash
-    if (this._diskStore?.hasParquetData) {
-      for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
-        if (walSeen.has(id)) continue; // WAL version already processed
-        if (isExpired(record as StoredRecord)) continue;
-        if ((record as StoredRecord)[META_EMBEDDING]) continue;
-        const clean = stripMeta(record as StoredRecord);
-        const text = extractTextFromRecord(clean);
-        if (text) toEmbed.push({ id, text, record: record as StoredRecord, fromDisk: true });
+    for (let i = 0; i < walToEmbed.length; i += batchSize) {
+      const batch = walToEmbed.slice(i, i + batchSize);
+      let vectors: number[][];
+      try {
+        vectors = await this.embeddingProvider.embed(batch.map((b) => b.text));
+      } catch (err) {
+        console.warn(`agentdb: embedUnembedded WAL batch ${Math.floor(i / batchSize)} failed: ${err}`);
+        continue;
       }
-    }
-
-    if (toEmbed.length === 0) return 0;
-
-    // Batch embed
-    const texts = toEmbed.map((t) => t.text);
-    const vectors = await this.embeddingProvider.embed(texts);
-
-    // Store embeddings for WAL records
-    const walItems = toEmbed.filter((t) => !t.fromDisk);
-    if (walItems.length > 0) {
       await this.store.batch(() => {
-        for (let i = 0; i < toEmbed.length; i++) {
-          if (toEmbed[i].fromDisk) continue;
-          const { id, record } = toEmbed[i];
-          const q = quantize(vectors[i]);
+        for (let j = 0; j < batch.length; j++) {
+          const { id, record } = batch[j];
+          const q = quantize(vectors[j]);
           const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
           this.store.set(id, updated);
         }
       });
+      for (let j = 0; j < batch.length; j++) {
+        this.hnswIdx.add(batch[j].id, vectors[j]);
+      }
+      embedded += batch.length;
     }
 
-    // Write embeddings for disk records into the LRU cache and mark dirty.
-    // findAllRaw() on close will pick them up via _diskStore.entries() (cache hit),
-    // preserving the embedding in the next compaction without touching the WAL.
-    if (this._diskStore) {
-      for (let i = 0; i < toEmbed.length; i++) {
-        if (!toEmbed[i].fromDisk) continue;
-        const { id, record } = toEmbed[i];
-        const q = quantize(vectors[i]);
-        const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
-        this._diskStore.cacheWrite(id, updated);
+    // --- Disk records (compacted Parquet/JSONL) ---
+    if (this._diskStore?.hasParquetData) {
+      const diskBatch: { id: string; text: string; record: StoredRecord }[] = [];
+      // Deduplicate across JSONL files: a record may appear in base file (no embedding)
+      // AND in an appended file (has embedding from a previous embedUnembedded call).
+      // Track the latest embedding-state per ID to avoid re-embedding.
+      const diskSeen = new Map<string, boolean>(); // id → hasEmbedding
+
+      const flushDiskBatch = async (): Promise<void> => {
+        if (diskBatch.length === 0) return;
+        let vectors: number[][];
+        try {
+          vectors = await this.embeddingProvider!.embed(diskBatch.map((b) => b.text));
+        } catch (err) {
+          console.warn(`agentdb: embedUnembedded disk batch failed: ${err}`);
+          diskBatch.length = 0;
+          return;
+        }
+        const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
+          const q = quantize(vectors[j]);
+          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(q) }];
+        });
+        await this._diskStore!.appendEmbeddings(updates);
+        for (let j = 0; j < diskBatch.length; j++) {
+          this.hnswIdx!.add(diskBatch[j].id, vectors[j]);
+        }
+        embedded += diskBatch.length;
+        diskBatch.length = 0;
+      };
+
+      for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+        if (walSeen.has(id)) continue;
+        const hasEmbed = !!(record as StoredRecord)[META_EMBEDDING];
+        // Update the seen map: later file entry (e.g. appended embedding) wins
+        diskSeen.set(id, hasEmbed);
+      }
+
+      // Second pass: collect records needing embedding
+      const needsEmbed = new Set<string>();
+      for (const [id, hasEmbed] of diskSeen) {
+        if (!hasEmbed) needsEmbed.add(id);
+      }
+
+      if (needsEmbed.size > 0) {
+        // Re-stream to get the actual records for unembedded IDs
+        for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+          if (!needsEmbed.has(id)) continue;
+          needsEmbed.delete(id); // process each id only once
+          if (isExpired(record as StoredRecord)) continue;
+          const clean = stripMeta(record as StoredRecord);
+          const text = extractTextFromRecord(clean);
+          if (!text) continue;
+          diskBatch.push({ id, text, record: record as StoredRecord });
+          if (diskBatch.length >= batchSize) await flushDiskBatch();
+        }
+        await flushDiskBatch();
       }
     }
 
-    // Add to HNSW index
-    for (let i = 0; i < toEmbed.length; i++) {
-      this.hnswIdx.add(toEmbed[i].id, vectors[i]);
-    }
-
-    return toEmbed.length;
+    return embedded;
   }
 
   // --- Explicit Vector API ---
