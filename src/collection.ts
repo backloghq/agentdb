@@ -1551,9 +1551,9 @@ export class Collection {
   }
 
   /** Get collection stats. */
-  stats(): { activeRecords: number; opsCount: number } {
+  stats(): { activeRecords: number; opsCount: number; textIndexBytes: number } {
     const s = this.store.stats();
-    return { activeRecords: s.activeRecords, opsCount: s.opsCount };
+    return { activeRecords: s.activeRecords, opsCount: s.opsCount, textIndexBytes: this.textIdx?.estimatedBytes() ?? 0 };
   }
 
   /**

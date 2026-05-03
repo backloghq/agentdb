@@ -189,6 +189,29 @@ export class TextIndex {
     return n > 0 ? this.totalLen / n : 0;
   }
 
+  /**
+   * Estimated resident memory in bytes.
+   * Heuristic (accurate within ~2x): Map/Set overhead per entry dominates.
+   *   docTerms: 80 B/doc (Map entry) + 32 B per (term,tf) pair
+   *   index: 64 B/term (Map entry + Set overhead) + 24 B per posting-list member
+   */
+  estimatedBytes(): number {
+    let bytes = 128; // object overhead + scalars
+    // Per-doc TF maps
+    bytes += this.docTerms.size * 80;
+    for (const tfMap of this.docTerms.values()) {
+      bytes += tfMap.size * 32;
+    }
+    // Inverted index (term → id set)
+    bytes += this.index.size * 64;
+    let totalEdges = 0;
+    for (const ids of this.index.values()) {
+      totalEdges += ids.size;
+    }
+    bytes += totalEdges * 24;
+    return bytes;
+  }
+
   /** Clear the entire index. */
   clear(): void {
     this.index.clear();

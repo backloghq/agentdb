@@ -152,7 +152,9 @@ export class AgentDB {
   private trackMemory(name: string, col: Collection): void {
     const stats = col.stats();
     // ~500 bytes per record average avoids full scan on every mutation
-    this.memoryMonitor.updateEstimate(name, stats.activeRecords, stats.activeRecords * 500);
+    const recordBytes = stats.activeRecords * 500;
+    const textIndexBytes = col.getTextIndex()?.estimatedBytes() ?? 0;
+    this.memoryMonitor.updateEstimate(name, stats.activeRecords, recordBytes + textIndexBytes);
   }
 
   /** Get the configured embedding provider, or null if none. */
@@ -688,14 +690,16 @@ export class AgentDB {
   }
 
   /** Database-level stats. */
-  async stats(): Promise<{ collections: number; totalRecords: number }> {
+  async stats(): Promise<{ collections: number; totalRecords: number; textIndexBytes: number }> {
     this.ensureOpen();
     let totalRecords = 0;
+    let textIndexBytes = 0;
     for (const name of this.meta.collections) {
       const col = await this.collection(name);
       totalRecords += await col.count();
+      textIndexBytes += col.getTextIndex()?.estimatedBytes() ?? 0;
     }
-    return { collections: this.meta.collections.length, totalRecords };
+    return { collections: this.meta.collections.length, totalRecords, textIndexBytes };
   }
 
   // --- Export / Import ---
