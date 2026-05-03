@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`Collection.hybridSearch()`** — fuses BM25 + semantic arms via RRF; both arms run in parallel; degrades to single-arm when embedding provider or text index is absent; throws only when both are unavailable; `k`, `candidateLimit`, `filter`, `summary` all forwarded to arms.
 - **`db_hybrid_search` MCP tool** — exposes `hybridSearch` via the tool layer; 37 core tools (39 with HTTP subscriptions).
 - **BM25 disk persistence tests** — `tests/text-index-persistence.test.ts` verifies that BM25 corpus stats (TF maps, per-doc lengths, avgdl) survive close/reopen via TextIndex v2 JSON; also covers v1→v2 upgrade path (posting-list-only index loads, AND search works, BM25 scores are ≥0).
+- **BM25 math tests** — `tests/text-index.test.ts` extended with 8 hand-calculated cases: exact single-term score, multi-term sum, two-doc corpus scores, IDF rare-vs-common contrast, b=1 length normalization penalty, k1 TF-saturation slope, avgdl accuracy, and v1-upgrade NaN guard.
 
 ### Fixed
 - **`TextIndex.searchScored` NaN scores on v1 indexes** — when `totalLen` is 0 (v1 upgrade, no length data), `avgdl` is now forced to 1 instead of dividing by N, preventing `dl/avgdl = 0/0 = NaN` in the BM25 norm term.
