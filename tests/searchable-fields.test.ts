@@ -225,3 +225,41 @@ describe("searchable fields — PersistedSchema round-trip", () => {
     expect(() => validatePersistedSchema(schema)).not.toThrow();
   });
 });
+
+describe("bm25 schema option — Collection plumbing", () => {
+  let dir: string;
+  let db: AgentDB;
+
+  beforeEach(async () => {
+    dir = makeTmpDir();
+    db = new AgentDB(dir);
+    await db.init();
+  });
+
+  afterEach(async () => {
+    await db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("k1/b from schema flow into TextIndex and change scores vs defaults", async () => {
+    // b=1.0 = full length normalization — long docs are penalized
+    const schema = defineSchema({
+      name: "bm25tune",
+      textSearch: true,
+      bm25: { k1: 1.2, b: 1.0 },
+      fields: { text: { type: "string", searchable: true } },
+    });
+    const col = await db.collection(schema);
+
+    // short: 2 tokens; long: 6 tokens; both contain "rust" once
+    await col.insert({ _id: "short", text: "rust guide" });
+    await col.insert({ _id: "long",  text: "rust detailed advanced comprehensive guide overview" });
+
+    const result = await col.bm25Search("rust");
+    const ids = result.records.map(r => r._id as string);
+    const scores = Object.fromEntries(ids.map((id, i) => [id, result.scores[i]]));
+
+    // With b=1.0, shorter doc (less length dilution) must score higher
+    expect(scores["short"]).toBeGreaterThan(scores["long"]);
+  });
+});

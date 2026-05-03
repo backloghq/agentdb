@@ -82,6 +82,8 @@ export interface SchemaDefinition {
   hooks?: SchemaHooks;
   /** Enable full-text search. */
   textSearch?: boolean;
+  /** BM25 tuning parameters. Overrides the TextIndex defaults (k1=1.2, b=0.75). */
+  bm25?: { k1?: number; b?: number };
   /** Array field name for +tag/-tag compact filter syntax. Default: "tags". */
   tagField?: string;
   /** Storage mode override: "memory", "disk", or "auto". */
@@ -160,6 +162,8 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     tagField: def.tagField,
     storageMode: def.storageMode,
     ...(searchableFields.length > 0 ? { searchableFields } : {}),
+    ...(def.bm25?.k1 !== undefined ? { bm25K1: def.bm25.k1 } : {}),
+    ...(def.bm25?.b !== undefined ? { bm25B: def.bm25.b } : {}),
   };
 
   return {
@@ -321,6 +325,8 @@ export interface PersistedSchema {
   arrayIndexes?: string[];
   tagField?: string;
   storageMode?: "memory" | "disk" | "auto";
+  /** BM25 tuning parameters persisted alongside the collection schema. */
+  bm25?: { k1?: number; b?: number };
 }
 
 /**
@@ -339,6 +345,7 @@ export function extractPersistedSchema(def: SchemaDefinition): PersistedSchema {
   if (def.arrayIndexes?.length) persisted.arrayIndexes = [...def.arrayIndexes];
   if (def.tagField !== undefined) persisted.tagField = def.tagField;
   if (def.storageMode !== undefined) persisted.storageMode = def.storageMode;
+  if (def.bm25 !== undefined) persisted.bm25 = { ...def.bm25 };
 
   if (def.fields) {
     persisted.fields = {};
@@ -406,6 +413,7 @@ export function mergeSchemas(code: SchemaDefinition, persisted: PersistedSchema)
     // Code wins for runtime config if set
     tagField: code.tagField ?? persisted.tagField,
     storageMode: code.storageMode ?? persisted.storageMode,
+    bm25: code.bm25 ?? persisted.bm25,
   };
 
   // Merge indexes (union, deduplicated)
@@ -483,6 +491,7 @@ export function mergeSchemas(code: SchemaDefinition, persisted: PersistedSchema)
   if (merged.instructions === undefined) delete merged.instructions;
   if (merged.tagField === undefined) delete merged.tagField;
   if (merged.storageMode === undefined) delete merged.storageMode;
+  if (merged.bm25 === undefined) delete merged.bm25;
 
   return { persisted: merged, warnings };
 }
@@ -515,6 +524,7 @@ export function mergePersistedSchemas(base: PersistedSchema, overlay: PersistedS
   merged.instructions = overlay.instructions ?? base.instructions;
   merged.tagField = overlay.tagField ?? base.tagField;
   merged.storageMode = overlay.storageMode ?? base.storageMode;
+  merged.bm25 = overlay.bm25 ?? base.bm25;
 
   const baseIndexes = base.indexes ?? [];
   const overlayIndexes = overlay.indexes ?? [];
@@ -577,6 +587,7 @@ export function mergePersistedSchemas(base: PersistedSchema, overlay: PersistedS
   if (merged.instructions === undefined) delete merged.instructions;
   if (merged.tagField === undefined) delete merged.tagField;
   if (merged.storageMode === undefined) delete merged.storageMode;
+  if (merged.bm25 === undefined) delete merged.bm25;
 
   return merged;
 }
@@ -620,6 +631,18 @@ export function validatePersistedSchema(schema: unknown): asserts schema is Pers
   }
   if (s.storageMode !== undefined && !["memory", "disk", "auto"].includes(s.storageMode as string)) {
     throw new Error("Schema 'storageMode' must be 'memory', 'disk', or 'auto'");
+  }
+  if (s.bm25 !== undefined) {
+    if (typeof s.bm25 !== "object" || s.bm25 === null || Array.isArray(s.bm25)) {
+      throw new Error("Schema 'bm25' must be an object");
+    }
+    const bm25 = s.bm25 as Record<string, unknown>;
+    if (bm25.k1 !== undefined && (typeof bm25.k1 !== "number" || bm25.k1 <= 0)) {
+      throw new Error("Schema 'bm25.k1' must be a positive number");
+    }
+    if (bm25.b !== undefined && (typeof bm25.b !== "number" || bm25.b < 0 || bm25.b > 1)) {
+      throw new Error("Schema 'bm25.b' must be a number between 0 and 1");
+    }
   }
 
   // Validate indexes arrays

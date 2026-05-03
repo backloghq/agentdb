@@ -359,4 +359,32 @@ describe("TextIndex BM25 math — hand-calculated expected scores", () => {
     const results = idx.searchScored("hello");
     expect(results).toEqual([]);
   });
+
+  it("custom k1/b actually changes scores vs defaults", () => {
+    // With b=0 (no length norm) a long doc is not penalized;
+    // with b=1 (full length norm) it is penalized.
+    // Use two docs: same TF but different lengths.
+    const idxNorm = new TextIndex({ k1: 1.2, b: 1.0 });  // full length normalization
+    const idxFlat = new TextIndex({ k1: 1.2, b: 0.0 });  // no length normalization
+
+    // "short": 2 tokens (rust, guide)
+    // "long": 6 tokens (rust, rust, detailed, advanced, comprehensive, guide)
+    idxNorm.add("short", { text: "rust guide" });
+    idxNorm.add("long",  { text: "rust detailed advanced comprehensive guide overview" });
+    idxFlat.add("short", { text: "rust guide" });
+    idxFlat.add("long",  { text: "rust detailed advanced comprehensive guide overview" });
+
+    const normResults = idxNorm.searchScored("rust");
+    const flatResults = idxFlat.searchScored("rust");
+
+    const normShort = normResults.find(r => r.id === "short")!.score;
+    const normLong  = normResults.find(r => r.id === "long")!.score;
+    const flatShort = flatResults.find(r => r.id === "short")!.score;
+    const flatLong  = flatResults.find(r => r.id === "long")!.score;
+
+    // With full length normalization, short doc scores higher than long (shorter = less diluted)
+    expect(normShort).toBeGreaterThan(normLong);
+    // With no length normalization, scores are equal (same tf=1, same norm term)
+    expect(flatShort).toBeCloseTo(flatLong, 10);
+  });
 });

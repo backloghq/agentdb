@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`Collection.materializeCandidates()`** — private helper factoring the fetch→filter→compute→summarize loop shared by `bm25Search`, `semanticSearch`, and `searchByVector`; disk-mode aware (parallel `Promise.all` via `_diskStore`) vs in-memory path.
 - **HNSW rebuild from disk on reopen** — `Collection.rebuildHnswFromDisk()` reconstructs the HNSW index from `_diskStore` entries after a disk-mode open (where `skipLoad=true` prevents the WAL-based HNSW rebuild); called by `AgentDB._openCollection` after `setDiskStore`.
 - **Disk-mode hybrid search test** — `tests/hybrid-search.test.ts` extended with a close/reopen disk-mode test asserting both semantic-arm-only and BM25-arm-only docs appear in `hybridSearch` results after reopen.
+- **BM25 tuning via schema** — `bm25?: { k1?: number; b?: number }` added to `SchemaDefinition`, `PersistedSchema`, and `CollectionOptions` (`bm25K1`/`bm25B`); `Collection` constructor passes these to `new TextIndex({ k1, b })`; `extractPersistedSchema`, `mergeSchemas` (code wins), `mergePersistedSchemas` (overlay wins), and `validatePersistedSchema` all handle the new field.
 
 ### Fixed
 - **Semantic search broken in disk mode** — `semanticSearch` and `searchByVector` used `this.store.get(id)` (memory-only opslog store), missing records in Parquet/JSONL; fixed via `materializeCandidates` which checks `_diskStore` first.

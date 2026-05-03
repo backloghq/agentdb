@@ -80,6 +80,10 @@ export interface CollectionOptions {
   storageMode?: "memory" | "disk" | "auto";
   /** Field names to restrict BM25/text indexing to. When empty, all string fields are indexed (fallback). */
   searchableFields?: string[];
+  /** BM25 k1 saturation parameter (default: 1.2). */
+  bm25K1?: number;
+  /** BM25 b length normalization parameter (default: 0.75). */
+  bm25B?: number;
 }
 
 /** Change event emitted after mutations. */
@@ -152,7 +156,7 @@ export class Collection {
     this.name = name;
     this.store = store;
     this.opts = opts ?? {};
-    if (this.opts.textSearch) this.textIdx = new TextIndex();
+    if (this.opts.textSearch) this.textIdx = new TextIndex({ k1: this.opts.bm25K1, b: this.opts.bm25B });
   }
 
   /** Check optimistic lock and throw on version mismatch. */
