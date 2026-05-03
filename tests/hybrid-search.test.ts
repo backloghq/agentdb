@@ -1003,3 +1003,135 @@ describe("materializeCandidates — concurrency cap", () => {
     await rm(dir, { recursive: true, force: true });
   });
 });
+
+// Hash-based embedding provider (deterministic, no exact-key lookup)
+class HashProvider implements EmbeddingProvider {
+  readonly dimensions = 4;
+  async embed(texts: string[]): Promise<number[][]> {
+    return texts.map((t) => {
+      let h = 0;
+      for (let i = 0; i < t.length; i++) h = (Math.imul(31, h) + t.charCodeAt(i)) | 0;
+      const vec = [Math.sin(h), Math.cos(h), Math.sin(h + 1), Math.cos(h + 1)];
+      const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
+      return vec.map((v) => v / norm);
+    });
+  }
+}
+
+describe("embedUnembedded — disk-mode lazy embedding gap", () => {
+  it("embeds records compacted to Parquet before embedding provider was available", async () => {
+    const dir = await makeTmpDir();
+    const N = 20;
+    const schema = defineSchema({ name: "lazyembed", fields: { title: { type: "string" } } });
+
+    // Phase 1: insert without embedding provider → compacted to disk without _embedding
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < N; i++) {
+        await col.insert({ _id: `d${i}`, title: `topic number ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reopen with provider → embedUnembedded must find and embed disk records
+    const provider = new HashProvider();
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+
+      const count = await col.embedUnembedded();
+      expect(count).toBe(N);
+
+      await db.close();
+    }
+
+    // Phase 3: reopen again → rebuildHnswFromDisk finds all N embeddings on disk
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+
+      // All N records should now be in the HNSW index → semantic search returns results
+      const result = await col.semanticSearch("topic", { limit: 5 });
+      expect(result.records.length).toBeGreaterThan(0);
+      expect(result.records.length).toBeLessThanOrEqual(5);
+
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("embedUnembedded skips already-embedded disk records on second call", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "noredundant", fields: { title: { type: "string" } } });
+
+    // Phase 1: insert without provider
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 10; i++) {
+        await col.insert({ _id: `d${i}`, title: `document ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reopen with provider, embed
+    const provider = new HashProvider();
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+      const count1 = await col.embedUnembedded();
+      expect(count1).toBe(10);
+      // Second call — all already embedded
+      const count2 = await col.embedUnembedded();
+      expect(count2).toBe(0);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("db_semantic_search returns expected matches end-to-end after disk-mode reopen", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "e2edisk", fields: { title: { type: "string" } } });
+
+    // Insert without provider — titles designed so hash-based vectors have structure
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      await col.insert({ _id: "match", title: "neural network deep learning" });
+      await col.insert({ _id: "other", title: "cooking recipe pasta" });
+      await db.close();
+    }
+
+    const provider = new HashProvider();
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+      await col.embedUnembedded();
+      await db.close();
+    }
+
+    // Reopen — semantic search should find something (HNSW rebuilt from disk embeddings)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+      const result = await col.semanticSearch("neural network", { limit: 2 });
+      expect(result.records.length).toBeGreaterThan(0);
+      const ids = result.records.map((r) => r._id as string);
+      expect(ids).toContain("match");
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});

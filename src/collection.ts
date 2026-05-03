@@ -468,6 +468,28 @@ export class Collection {
     return result;
   }
 
+  /** Return all non-expired records preserving internal meta fields (e.g. _embedding). For disk compaction only. */
+  async findAllRaw(): Promise<[string, StoredRecord][]> {
+    if (this._diskStore?.hasParquetData) {
+      const seen = new Set<string>();
+      const result: [string, StoredRecord][] = [];
+      for (const [id, record] of this.store.entries()) {
+        if (!isExpired(record)) { result.push([id, record]); seen.add(id); }
+      }
+      // Do NOT use skipCache:true here — LRU cache may have updated embeddings that haven't been
+      // flushed to JSONL yet (written via cacheWrite in embedUnembedded for disk-origin records)
+      for await (const [id, record] of this._diskStore.entries()) {
+        if (!seen.has(id) && !isExpired(record as StoredRecord)) result.push([id, record as StoredRecord]);
+      }
+      return result;
+    }
+    const result: [string, StoredRecord][] = [];
+    for (const [id, record] of this.store.entries()) {
+      if (!isExpired(record)) result.push([id, record]);
+    }
+    return result;
+  }
+
   /** Streaming record iterator — O(1) memory regardless of collection size.
    * In disk mode, yields records from Parquet one-at-a-time without accumulation.
    * In memory mode, yields from the in-memory store (already in memory).
@@ -1424,17 +1446,34 @@ export class Collection {
   /**
    * Embed all records that don't have embeddings yet.
    * Called lazily on first semantic search.
+   * In disk mode, also iterates Parquet/JSONL records and writes embeddings back to disk.
    */
   async embedUnembedded(): Promise<number> {
     if (!this.embeddingProvider || !this.hnswIdx) return 0;
 
-    const toEmbed: { id: string; text: string; record: StoredRecord }[] = [];
+    const toEmbed: { id: string; text: string; record: StoredRecord; fromDisk: boolean }[] = [];
+
+    // In-memory WAL records
+    const walSeen = new Set<string>();
     for (const [id, record] of this.store.entries()) {
       if (isExpired(record)) continue;
-      if (record[META_EMBEDDING]) continue; // already embedded
+      walSeen.add(id);
+      if (record[META_EMBEDDING]) continue;
       const clean = stripMeta(record);
       const text = extractTextFromRecord(clean);
-      if (text) toEmbed.push({ id, text, record });
+      if (text) toEmbed.push({ id, text, record, fromDisk: false });
+    }
+
+    // Disk records not in WAL (compacted Parquet/JSONL) — use skipCache to avoid LRU thrash
+    if (this._diskStore?.hasParquetData) {
+      for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+        if (walSeen.has(id)) continue; // WAL version already processed
+        if (isExpired(record as StoredRecord)) continue;
+        if ((record as StoredRecord)[META_EMBEDDING]) continue;
+        const clean = stripMeta(record as StoredRecord);
+        const text = extractTextFromRecord(clean);
+        if (text) toEmbed.push({ id, text, record: record as StoredRecord, fromDisk: true });
+      }
     }
 
     if (toEmbed.length === 0) return 0;
@@ -1443,15 +1482,32 @@ export class Collection {
     const texts = toEmbed.map((t) => t.text);
     const vectors = await this.embeddingProvider.embed(texts);
 
-    // Store embeddings and index
-    await this.store.batch(() => {
+    // Store embeddings for WAL records
+    const walItems = toEmbed.filter((t) => !t.fromDisk);
+    if (walItems.length > 0) {
+      await this.store.batch(() => {
+        for (let i = 0; i < toEmbed.length; i++) {
+          if (toEmbed[i].fromDisk) continue;
+          const { id, record } = toEmbed[i];
+          const q = quantize(vectors[i]);
+          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
+          this.store.set(id, updated);
+        }
+      });
+    }
+
+    // Write embeddings for disk records into the LRU cache and mark dirty.
+    // findAllRaw() on close will pick them up via _diskStore.entries() (cache hit),
+    // preserving the embedding in the next compaction without touching the WAL.
+    if (this._diskStore) {
       for (let i = 0; i < toEmbed.length; i++) {
+        if (!toEmbed[i].fromDisk) continue;
         const { id, record } = toEmbed[i];
         const q = quantize(vectors[i]);
         const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
-        this.store.set(id, updated);
+        this._diskStore.cacheWrite(id, updated);
       }
-    });
+    }
 
     // Add to HNSW index
     for (let i = 0; i < toEmbed.length; i++) {

@@ -244,7 +244,10 @@ export class DiskStore {
     const skipCache = opts?.skipCache ?? false;
     for (const jsonlFile of this.getAllJsonlFiles()) {
       const all = await readAllFromJsonl(this.backend, jsonlFile);
-      for (const [id, record] of all) {
+      for (const [id, diskRecord] of all) {
+        // Prefer the LRU-cached version — it may have been updated (e.g. _embedding written via cacheWrite)
+        const cached = this.cache.peek(id);
+        const record = cached ?? diskRecord;
         if (!skipCache) this.cache.set(id, record);
         yield [id, record];
       }
