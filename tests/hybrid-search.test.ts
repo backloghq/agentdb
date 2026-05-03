@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
+import { Collection } from "../src/collection.js";
 import { defineSchema } from "../src/schema.js";
 import { getTools } from "../src/tools/index.js";
 import type { AgentTool } from "../src/tools/index.js";
@@ -702,5 +703,82 @@ describe("db_hybrid_search tool — argument forwarding", () => {
     }
     // scores aligned
     expect(result.scores.length).toBe(result.records.length);
+  });
+});
+
+describe("hybridSearch — candidateLimit no-double-amplification", () => {
+  let dir: string;
+  let db: AgentDB;
+
+  beforeEach(async () => {
+    dir = await makeTmpDir();
+    const fakeVectors = new Map<string, number[]>();
+    for (let i = 0; i < 60; i++) {
+      const vec = new Array<number>(4).fill(0);
+      vec[i % 4] = 1;
+      fakeVectors.set(`doc${i}`, vec);
+    }
+    fakeVectors.set("query", [1, 0, 0, 0]);
+    db = new AgentDB(dir, { embeddings: { provider: new FakeEmbeddingProvider(fakeVectors) } });
+    await db.init();
+  });
+
+  afterEach(async () => {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("candidateLimit is forwarded to bm25Search and semanticSearch without re-amplification", async () => {
+    const schema = defineSchema({
+      name: "nodoubleamp",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+    const col = await db.collection(schema);
+    for (let i = 0; i < 60; i++) {
+      await col.insert({ _id: `d${i}`, title: `doc${i} word` });
+    }
+    await col.embedUnembedded();
+
+    const bm25Spy = vi.spyOn(Collection.prototype, "bm25Search");
+    const semSpy = vi.spyOn(Collection.prototype, "semanticSearch");
+
+    await col.hybridSearch("word", { limit: 10, candidateLimit: 50 });
+
+    // bm25Search should receive candidateLimit=50 explicitly (not 10*4=40 nor 50*4=200)
+    expect(bm25Spy).toHaveBeenCalledOnce();
+    const bm25Call = bm25Spy.mock.calls[0];
+    expect(bm25Call[1]).toMatchObject({ candidateLimit: 50 });
+
+    // semanticSearch should also receive candidateLimit=50
+    expect(semSpy).toHaveBeenCalledOnce();
+    const semCall = semSpy.mock.calls[0];
+    expect(semCall[1]).toMatchObject({ candidateLimit: 50 });
+
+    bm25Spy.mockRestore();
+    semSpy.mockRestore();
+  });
+
+  it("bm25Search receives candidateLimit=5, not 5*4=20 (no re-amplification)", async () => {
+    const schema = defineSchema({
+      name: "capscheck",
+      textSearch: true,
+      fields: { title: { type: "string", searchable: true } },
+    });
+    const col = await db.collection(schema);
+    for (let i = 0; i < 60; i++) {
+      await col.insert({ _id: `c${i}`, title: `doc${i} word` });
+    }
+    await col.embedUnembedded();
+
+    const bm25Spy = vi.spyOn(Collection.prototype, "bm25Search");
+
+    await col.hybridSearch("word", { limit: 10, candidateLimit: 5 });
+
+    expect(bm25Spy).toHaveBeenCalledOnce();
+    // candidateLimit must be passed as 5, not re-amplified to 5*4=20
+    expect(bm25Spy.mock.calls[0][1]).toMatchObject({ limit: 5, candidateLimit: 5 });
+
+    bm25Spy.mockRestore();
   });
 });

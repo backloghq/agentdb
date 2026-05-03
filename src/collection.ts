@@ -1277,7 +1277,7 @@ export class Collection {
     const limit = opts?.limit ?? 10;
     const candidateLimit = opts?.candidateLimit ?? Math.max(limit * 4, 50);
     const k = opts?.k ?? 60;
-    const armOpts = { limit: candidateLimit, filter: opts?.filter, summary: opts?.summary };
+    const armOpts = { limit: candidateLimit, candidateLimit, filter: opts?.filter, summary: opts?.summary };
 
     const empty = (): { records: Record<string, unknown>[]; scores: number[] } => ({ records: [], scores: [] });
     // Run available arms in parallel; catch runtime failures so one arm degrading doesn't reject the whole call
@@ -1381,7 +1381,7 @@ export class Collection {
    */
   async semanticSearch(
     query: string,
-    opts?: { filter?: Filter; limit?: number; summary?: boolean },
+    opts?: { filter?: Filter; limit?: number; summary?: boolean; candidateLimit?: number },
   ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
     if (!this.embeddingProvider || !this.hnswIdx) {
       throw new Error("Semantic search not available. Configure an embedding provider on AgentDB.");
@@ -1395,7 +1395,8 @@ export class Collection {
 
     // Search HNSW
     const limit = opts?.limit ?? 10;
-    const candidates = this.hnswIdx.search(queryVec, Math.max(limit * 4, 50));
+    const candidateLimit = opts?.candidateLimit ?? Math.max(limit * 4, 50);
+    const candidates = this.hnswIdx.search(queryVec, candidateLimit);
 
     return this.materializeCandidates(candidates, { limit, filter: opts?.filter, summary: opts?.summary });
   }
