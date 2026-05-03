@@ -98,4 +98,25 @@ describe("rrf", () => {
     expect(results.map((r) => r.id)).toContain("only");
     expect(results.map((r) => r.id)).toContain("other");
   });
+
+  it(">2 lists: partial overlap — hand-calculated scores and order", () => {
+    // list1: [x, y, z]  list2: [y, x]  list3: [z, w]  k=60
+    // x: 1/61 + 1/62           ≈ 0.032522
+    // y: 1/62 + 1/61           ≈ 0.032522  (tie with x → id order: x < y)
+    // z: 1/63 + 1/61           ≈ 0.032266
+    // w: 1/62 only             ≈ 0.016129
+    const list1 = [{ id: "x" }, { id: "y" }, { id: "z" }];
+    const list2 = [{ id: "y" }, { id: "x" }];
+    const list3 = [{ id: "z" }, { id: "w" }];
+    const results = rrf([list1, list2, list3], { k: 60 });
+    expect(results.map((r) => r.id)).toEqual(["x", "y", "z", "w"]);
+    expect(results[0].score).toBeCloseTo(1/61 + 1/62, 10); // x
+    expect(results[1].score).toBeCloseTo(1/62 + 1/61, 10); // y (same as x)
+    expect(results[2].score).toBeCloseTo(1/63 + 1/61, 10); // z
+    expect(results[3].score).toBeCloseTo(1/62, 10);         // w (list3 only)
+    // x and y tie — broken by id ascending
+    expect(results[0].score).toBeCloseTo(results[1].score, 10);
+    // z scores higher than w despite appearing in two lists at lower ranks vs w's single appearance
+    expect(results[2].score).toBeGreaterThan(results[3].score);
+  });
 });
