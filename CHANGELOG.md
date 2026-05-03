@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **Batched `embedUnembedded` for WAL and disk paths** — `embedUnembedded` now processes records in `batchSize` chunks; continues on provider failure (logs warning, skips failed batch); disk path uses a two-pass scan to identify unembedded records and flushes each batch durably via `appendEmbeddings`.
 - **`tests/disk-embed.test.ts`** — 5 new tests covering batching (3 provider calls for 600 records with `batchSize=256`, partial-batch failure, custom `batchSize=100`) and durability (1000 disk records with `cacheSize=100` embeddings survive close/reopen, partial embed survives mid-run).
 
+### Changed
+- **`diskConcurrency` moved from `SchemaDefinition` to `AgentDBOptions`** — it is now a db-wide default (like `cacheSize`) rather than a per-schema option; `CollectionOptions.diskConcurrency` remains for per-collection overrides. Updated test to pass via `new AgentDB(dir, { diskConcurrency: 3 })`.
+
 ### Fixed
 - **`DiskStore.isLocalFs()` minifier-unsafe** — `constructor.name === "FsBackend"` is broken by minification; replaced with `instanceof FsBackend` (imported from `@backloghq/opslog`).
 - **Embedding-loss on disk-backed collections (N > cacheSize)** — `embedUnembedded` previously wrote embeddings only to the LRU cache; with N > cacheSize, eviction silently dropped embeddings before compaction, causing HNSW rebuild failures on reopen. Fixed by writing each batch durably to disk via `DiskStore.appendEmbeddings` immediately after provider call.

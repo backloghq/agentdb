@@ -964,7 +964,6 @@ describe("materializeCandidates — concurrency cap", () => {
       name: "customcap",
       textSearch: true,
       fields: { title: { type: "string", searchable: true } },
-      diskConcurrency: 3,
     });
 
     const db = new AgentDB(dir, { storageMode: "disk" });
@@ -975,7 +974,7 @@ describe("materializeCandidates — concurrency cap", () => {
     }
     await db.close();
 
-    const db2 = new AgentDB(dir, { storageMode: "disk" });
+    const db2 = new AgentDB(dir, { storageMode: "disk", diskConcurrency: 3 });
     await db2.init();
     const col2 = await db2.collection(schema);
     const ds = col2.getDiskStore()!;

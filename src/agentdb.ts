@@ -64,6 +64,8 @@ export interface AgentDBOptions {
   cacheSize?: number;
   /** Parquet row group size for disk mode (default: 5000). */
   rowGroupSize?: number;
+  /** Max concurrent disk fetches for non-FS backends (e.g. S3). Default: 16. Per-collection override via CollectionOptions.diskConcurrency. */
+  diskConcurrency?: number;
 }
 
 export interface CollectionInfo {
@@ -130,6 +132,7 @@ export class AgentDB {
       diskThreshold: opts?.diskThreshold,
       cacheSize: opts?.cacheSize,
       rowGroupSize: opts?.rowGroupSize,
+      diskConcurrency: opts?.diskConcurrency,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -257,7 +260,11 @@ export class AgentDB {
     await mkdir(colDir, { recursive: true });
 
     const store = new Store<Record<string, unknown>>();
-    const col = new Collection(name, store, this.collectionOpts.get(name));
+    const baseOpts = this.collectionOpts.get(name);
+    const mergedOpts = (this.opts.diskConcurrency !== undefined && baseOpts?.diskConcurrency === undefined)
+      ? { ...baseOpts, diskConcurrency: this.opts.diskConcurrency }
+      : baseOpts;
+    const col = new Collection(name, store, mergedOpts);
     if (this.embeddingProvider) {
       col.setEmbeddingProvider(this.embeddingProvider);
     }
