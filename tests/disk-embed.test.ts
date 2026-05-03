@@ -45,7 +45,6 @@ describe("embedUnembedded — batching (#154)", () => {
     const schema = defineSchema({
       name: "batch600",
       fields: { title: { type: "string" } },
-      embeddingBatchSize: 256,
     });
     const col = await db.collection(schema);
 
@@ -94,7 +93,6 @@ describe("embedUnembedded — batching (#154)", () => {
     const schema = defineSchema({
       name: "flaky600",
       fields: { title: { type: "string" } },
-      embeddingBatchSize: 256,
     });
     const col = await db.collection(schema);
     for (let i = 0; i < 600; i++) {
@@ -116,13 +114,12 @@ describe("embedUnembedded — batching (#154)", () => {
   it("embeddingBatchSize: 100 triggers 6 provider calls for 600 records", async () => {
     const dir = await makeTmpDir();
     const provider = new HashProvider();
-    const db = new AgentDB(dir, { embeddings: { provider } });
+    const db = new AgentDB(dir, { embeddings: { provider }, embeddingBatchSize: 100 });
     await db.init();
 
     const schema = defineSchema({
       name: "batch100",
       fields: { title: { type: "string" } },
-      embeddingBatchSize: 100,
     });
     const col = await db.collection(schema);
     for (let i = 0; i < 600; i++) {
@@ -325,12 +322,6 @@ describe("JSONL file proliferation — compaction threshold (#169)", () => {
     const dir = await makeTmpDir();
     const provider = new HashProvider();
 
-    // Use batchSize=50 so 500 records → 10 JSONL files from appendEmbeddings (> threshold of 8)
-    const schema = defineSchema({
-      name: "jsonlthresh",
-      fields: { title: { type: "string" } },
-      embeddingBatchSize: 50,
-    });
     const schemaPlain = defineSchema({
       name: "jsonlthresh",
       fields: { title: { type: "string" } },
@@ -347,11 +338,11 @@ describe("JSONL file proliferation — compaction threshold (#169)", () => {
       await db.close();
     }
 
-    // Phase 2: embed with small batch size → 10 JSONL files from appendEmbeddings
+    // Phase 2: embed with small batch size (50) → 10 JSONL files from appendEmbeddings (> threshold of 8)
     {
-      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, embeddingBatchSize: 50 });
       await db.init();
-      const col = await db.collection(schema);
+      const col = await db.collection(schemaPlain);
       await col.embedUnembedded();
 
       const ds = col.getDiskStore()!;
@@ -469,7 +460,6 @@ describe("embedUnembedded — single-pass disk scan (#168)", () => {
   it("multi-JSONL last-write-wins: records with _embedding in a later JSONL are skipped", async () => {
     const dir = await makeTmpDir();
     const provider = new HashProvider();
-    const schema = defineSchema({ name: "lww", fields: { title: { type: "string" } }, embeddingBatchSize: 50 });
     const schemaPlain = defineSchema({ name: "lww", fields: { title: { type: "string" } } });
 
     // Phase 1: 100 records, no provider — compact to Parquet without embeddings
@@ -483,11 +473,11 @@ describe("embedUnembedded — single-pass disk scan (#168)", () => {
       await db.close();
     }
 
-    // Phase 2: embed all 100 — writes 2 JSONL files (batchSize=50), then close
+    // Phase 2: embed all 100 with batchSize=50 — writes 2 JSONL files, then close
     {
-      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, embeddingBatchSize: 50 });
       await db.init();
-      const col = await db.collection(schema);
+      const col = await db.collection(schemaPlain);
       const count = await col.embedUnembedded();
       expect(count).toBe(100);
       await db.close();
@@ -532,13 +522,8 @@ describe("config knob unification (#170)", () => {
     expect(provider.calls[0].length).toBe(50);
     expect(provider.calls[2].length).toBe(20);
 
-    // Schema overrides to 100 — should use 100, not 50
-    const schemaOverride = defineSchema({
-      name: "override-batch",
-      fields: { title: { type: "string" } },
-      embeddingBatchSize: 100,
-    });
-    const colOverride = await db.collection(schemaOverride);
+    // CollectionOptions.embeddingBatchSize overrides the db-wide 50 → uses 100
+    const colOverride = await db.collection("override-batch", { embeddingBatchSize: 100 });
     for (let i = 0; i < 120; i++) {
       await colOverride.insert({ _id: `d${i}`, title: `document ${i}` });
     }

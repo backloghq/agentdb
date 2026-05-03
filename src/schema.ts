@@ -88,8 +88,6 @@ export interface SchemaDefinition {
   tagField?: string;
   /** Storage mode override: "memory", "disk", or "auto". */
   storageMode?: "memory" | "disk" | "auto";
-  /** Number of records per embedding provider call in embedUnembedded (default: 256). */
-  embeddingBatchSize?: number;
 }
 
 // --- Compiled schema ---
@@ -165,7 +163,6 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     ...(searchableFields.length > 0 ? { searchableFields } : {}),
     ...(def.bm25?.k1 !== undefined ? { bm25K1: def.bm25.k1 } : {}),
     ...(def.bm25?.b !== undefined ? { bm25B: def.bm25.b } : {}),
-    ...(def.embeddingBatchSize !== undefined ? { embeddingBatchSize: def.embeddingBatchSize } : {}),
   };
 
   return {
