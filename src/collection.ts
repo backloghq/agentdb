@@ -1463,6 +1463,10 @@ export class Collection {
    * Embed all records that don't have embeddings yet.
    * Called lazily on first semantic search.
    * In disk mode, also iterates Parquet/JSONL records and writes embeddings back to disk.
+   *
+   * **Memory:** disk path buffers full record references for all unembedded records before
+   * batching (~1 KB/record; expect ~1 GB at 1M unembedded). For very large lazy-embedding
+   * runs, prefer {@link reembedAll} which streams and flushes mid-run with bounded memory.
    */
   async embedUnembedded(): Promise<number> {
     if (!this.embeddingProvider || !this.hnswIdx) return 0;
