@@ -26,7 +26,7 @@ export function getVectorTools(db: AgentDB): AgentTool[] {
       execute: safe("db_semantic_search", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         return col.semanticSearch(args.query as string, {
-          filter: args.filter as Record<string, unknown> | string | undefined,
+          filter: args.filter as Filter | undefined,
           limit: args.limit as number,
           summary: args.summary as boolean,
         });
@@ -77,7 +77,7 @@ export function getVectorTools(db: AgentDB): AgentTool[] {
       schema: z.object({
         collection: collectionParam,
         vector: z.array(z.number()).meta({ description: "Query vector" }),
-        filter: z.union([z.record(z.string(), z.unknown()), z.string()]).optional().meta({ description: "Optional attribute filter" }),
+        filter: filterParam,
         limit: z.number().optional().meta({ description: "Max results (default: 10)" }),
         summary: z.boolean().optional().meta({ description: "Return summary fields only" }),
       }),
@@ -86,7 +86,7 @@ export function getVectorTools(db: AgentDB): AgentTool[] {
       execute: safe("db_vector_search", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
         return col.searchByVector(args.vector as number[], {
-          filter: args.filter as Record<string, unknown> | string | undefined,
+          filter: args.filter as Filter | undefined,
           limit: args.limit as number | undefined,
           summary: args.summary as boolean | undefined,
         });
