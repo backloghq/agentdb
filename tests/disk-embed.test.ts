@@ -465,8 +465,10 @@ describe("reembedAll (#166)", () => {
     await col.embedUnembedded();
     const callsBefore = provider.calls.length;
 
-    const count = await col.reembedAll();
-    expect(count).toBe(5);
+    const result = await col.reembedAll();
+    expect(result.embedded).toBe(5);
+    expect(result.failed).toBe(0);
+    expect(result.errors).toHaveLength(0);
     expect(provider.calls.length).toBeGreaterThan(callsBefore);
 
     await db.close();
@@ -515,12 +517,14 @@ describe("reembedAll (#166)", () => {
       await db.init();
       const col = await db.collection(schemaPlain);
       provider.calls.length = 0;
-      const count = await col.reembedAll();
-      expect(count).toBe(10);
+      const reembedResult = await col.reembedAll();
+      expect(reembedResult.embedded).toBe(10);
+      expect(reembedResult.failed).toBe(0);
+      expect(reembedResult.errors).toHaveLength(0);
       expect(provider.calls.length).toBeGreaterThan(0);
 
-      const result = await col.semanticSearch("document");
-      expect(result.records.length).toBeGreaterThan(0);
+      const searchResult = await col.semanticSearch("document");
+      expect(searchResult.records.length).toBeGreaterThan(0);
       await db.close();
     }
 
@@ -655,6 +659,38 @@ describe("extractTextFromRecord — meta field exclusion (#173)", () => {
   it("includes non-underscore user fields", () => {
     const result = extractTextFromRecord({ name: "Alice", tags: ["foo", "bar"], count: 1 });
     expect(result).toBe("Alice foo bar");
+  });
+});
+
+describe("extractTextFromRecord — reserved-prefix policy (#183)", () => {
+  it("user fields with _ prefix are included (not reserved)", () => {
+    const result = extractTextFromRecord({ _internal_note: "draft text", title: "hello" });
+    expect(result).toContain("draft text");
+    expect(result).toContain("hello");
+  });
+
+  it("_legacy_id and _draft are included", () => {
+    const result = extractTextFromRecord({ _legacy_id: "old-123", _draft: "work in progress" });
+    expect(result).toContain("old-123");
+    expect(result).toContain("work in progress");
+  });
+
+  it("all META_FIELDS_FOR_EMBED members are still excluded", () => {
+    const result = extractTextFromRecord({
+      _id: "x",
+      _version: 3,
+      _agent: "bot",
+      _reason: "seed",
+      _embedding: [0],
+      _expires: 9999999,
+      _internal_note: "keep this",
+      title: "also keep",
+    });
+    expect(result).not.toContain("x");
+    expect(result).not.toContain("bot");
+    expect(result).not.toContain("seed");
+    expect(result).toContain("keep this");
+    expect(result).toContain("also keep");
   });
 });
 

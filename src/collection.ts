@@ -64,6 +64,16 @@ export interface FindResult {
   estimatedTokens?: number;
 }
 
+/** Structured result returned by {@link Collection.reembedAll}. */
+export interface ReembedResult {
+  /** Number of records successfully re-embedded. */
+  embedded: number;
+  /** Number of records whose embedding failed (provider rejected, etc.). */
+  failed: number;
+  /** Per-batch error details. Empty when `failed === 0`. */
+  errors: Array<{ batchIndex: number; recordIds: string[]; reason: string }>;
+}
+
 /** Options for configuring collection middleware. */
 export interface CollectionOptions {
   /** Validation function — called before every insert/update/upsert. Throw to reject. */
@@ -1554,13 +1564,15 @@ export class Collection {
   }
 
   /**
-   * Force-reembed ALL records using the current embedding logic (which excludes `_id`).
-   * Use this to migrate embeddings computed by v1.3 (which included `_id` in the text).
+   * Force-reembed ALL records using the current embedding logic.
+   * Use this to migrate embeddings from v1.3 (which incorrectly included `_id` in the text).
    * Resets the HNSW index and rewrites every record's embedding.
    * Requires an embedding provider; throws if none is configured.
    * Does NOT auto-run on open — call explicitly after upgrading from v1.3.
+   * Per-batch provider failures are recorded in the returned {@link ReembedResult} rather than
+   * thrown, so the caller can distinguish partial success from total failure.
    */
-  async reembedAll(): Promise<number> {
+  async reembedAll(): Promise<ReembedResult> {
     if (!this.embeddingProvider || !this.hnswIdx) {
       throw new Error("reembedAll requires an embedding provider to be configured");
     }
@@ -1569,6 +1581,8 @@ export class Collection {
     // Reset HNSW so stale vectors don't persist
     this.hnswIdx = new HnswIndex({ dimensions: this.embeddingProvider.dimensions });
     let embedded = 0;
+    let failed = 0;
+    const errors: ReembedResult["errors"] = [];
 
     // --- WAL (in-memory) records ---
     const walSeen = new Set<string>();
@@ -1583,11 +1597,15 @@ export class Collection {
 
     for (let i = 0; i < walToEmbed.length; i += batchSize) {
       const batch = walToEmbed.slice(i, i + batchSize);
+      const batchIndex = Math.floor(i / batchSize);
       let vectors: number[][];
       try {
         vectors = await this.embeddingProvider.embed(batch.map((b) => b.text));
       } catch (err) {
-        console.warn(`agentdb: reembedAll WAL batch ${Math.floor(i / batchSize)} failed: ${err}`);
+        const reason = err instanceof Error ? err.message : String(err);
+        console.warn(`agentdb: reembedAll WAL batch ${batchIndex} failed: ${reason}`);
+        errors.push({ batchIndex, recordIds: batch.map((b) => b.id), reason });
+        failed += batch.length;
         continue;
       }
       await this.store.batch(() => {
@@ -1606,6 +1624,7 @@ export class Collection {
 
     // --- Disk records (compacted Parquet/JSONL) ---
     if (this._diskStore?.hasParquetData) {
+      let diskBatchIndex = Math.ceil(walToEmbed.length / batchSize);
       const diskBatch: { id: string; text: string; record: StoredRecord }[] = [];
 
       const flushDiskBatch = async (): Promise<void> => {
@@ -1614,8 +1633,12 @@ export class Collection {
         try {
           vectors = await this.embeddingProvider!.embed(diskBatch.map((b) => b.text));
         } catch (err) {
-          console.warn(`agentdb: reembedAll disk batch failed: ${err}`);
+          const reason = err instanceof Error ? err.message : String(err);
+          console.warn(`agentdb: reembedAll disk batch ${diskBatchIndex} failed: ${reason}`);
+          errors.push({ batchIndex: diskBatchIndex, recordIds: diskBatch.map((b) => b.id), reason });
+          failed += diskBatch.length;
           diskBatch.length = 0;
+          diskBatchIndex++;
           return;
         }
         const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
@@ -1628,6 +1651,7 @@ export class Collection {
         }
         embedded += diskBatch.length;
         diskBatch.length = 0;
+        diskBatchIndex++;
       };
 
       // Single pass: process every non-expired disk record (skip WAL-shadowed ids)
@@ -1645,7 +1669,7 @@ export class Collection {
       await flushDiskBatch();
     }
 
-    return embedded;
+    return { embedded, failed, errors };
   }
 
   // --- Explicit Vector API ---

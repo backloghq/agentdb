@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Changed
+- **`Collection.reembedAll()` now returns `ReembedResult` instead of `number` (#182)** — structured result with `embedded` (success count), `failed` (failure count), and `errors: Array<{ batchIndex, recordIds, reason }>` (per-batch detail). Per-batch try/catch now records the batch index and failing record IDs so callers can distinguish partial success from total failure. `db_reembed_all` MCP tool returns the same shape and its description updated to mention `failed > 0` check. `ReembedResult` exported from the core package. Existing #166 tests updated to consume the new shape.
+- **`extractTextFromRecord` uses explicit `META_FIELDS_FOR_EMBED` set, not `_` prefix (#183)** — reverts the `key.startsWith("_")` guard from round 4. A new `META_FIELDS_FOR_EMBED` constant (exported from `collection-helpers.ts`) enumerates exactly `_id`, `_version`, `_agent`, `_reason`, `_expires`, `_embedding`. User fields that happen to start with `_` (e.g. `_internal_note`, `_draft`, `_legacy_id`) are now included in embedding text, matching the BM25 `textRecord` path. The original round-4 bug (`_id` in embedding text) remains fixed. 3 new policy tests.
+
 ### Fixed
 - **JSONL filename collision under concurrent appends (#172)** — `writeRecordStore` previously generated filenames as `records-${Date.now()}.jsonl`, which collides when two appends occur within the same millisecond. Replaced with `records-${Date.now()}-${++_fileSeq}.jsonl` using a module-level monotonic counter (`_fileSeq`) that guarantees uniqueness across concurrent calls. 1 updated test (regex now matches the counter suffix) and 1 new test (20 concurrent `Promise.all` calls produce 20 distinct filenames).
 

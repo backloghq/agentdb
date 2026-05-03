@@ -2,12 +2,12 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status: v1.4 — hybrid search (BM25+RRF+vector), disk-backed embeddings, persisted schemas. 1223 tests.**
+**Status: v1.4 — hybrid search (BM25+RRF+vector), disk-backed embeddings, persisted schemas. 1226 tests.**
 
 Major capabilities:
 - **Search:** `bm25Search` (BM25 k1/b tunable, `searchable:true` per field, Unicode tokenizer, 256 MB index cap), `semanticSearch` (HNSW, 6 providers, Int8 quantization), `hybridSearch` (RRF fusion, per-arm failure degrades gracefully), `searchByVector`
 - **Disk mode:** JSONL for point lookups + Parquet for column scans; LRU cache; async `entries()` iterator; `appendEmbeddings` writes embedding batches durably to JSONL (bypasses eviction race); `embedUnembedded` single-pass disk scan (halves S3 I/O); `reembedAll` for v1.3→v1.4 migration (`_id` was incorrectly included in embedding text); `rebuildHnswFromDisk` on reopen
-- **Embeddings:** batched `embedUnembedded` (configurable `embeddingBatchSize`, continue-on-error per batch); `extractTextFromRecord` excludes all `_`-prefixed meta fields; `db_reembed_all` admin tool (DESTRUCTIVE)
+- **Embeddings:** batched `embedUnembedded` (configurable `embeddingBatchSize`, continue-on-error per batch); `extractTextFromRecord` excludes explicit `META_FIELDS_FOR_EMBED` set (`_id`,`_version`,`_agent`,`_reason`,`_expires`,`_embedding`) — user `_`-prefixed fields are included; `reembedAll()` returns `ReembedResult{embedded,failed,errors[]}` for structured partial-failure reporting; `db_reembed_all` admin tool (DESTRUCTIVE)
 - **Config knobs:** `embeddingBatchSize`, `diskConcurrency`, `cacheSize`, `rowGroupSize` — all follow AgentDB (db-wide default) + CollectionOptions (per-collection override) shape
 - **Schemas:** `PersistedSchema` in `meta/{name}.schema.json` (description, instructions, field types); `db_get/set/delete/diff/infer/migrate` lifecycle tools; `validatePersistedSchema` rejects `searchable:true` on non-string types; schema bootstrap from `schemas/*.json` glob
 - **Tools:** 39 core / 41 with HTTP (`db_subscribe`/`db_unsubscribe`); auth (bearer, multi-token, JWT, pluggable `authFn`); rate limiting, CORS, audit logging

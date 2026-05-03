@@ -17,6 +17,7 @@ export type {
   FindResult,
   UpdateOps,
   FieldInfo,
+  ReembedResult,
 } from "./collection.js";
 
 export { RecordCache } from "./record-cache.js";
