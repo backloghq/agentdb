@@ -1275,6 +1275,59 @@ describe("hybridSearch — arm failure modes", () => {
     await db.close();
     await rm(dir, { recursive: true, force: true });
   });
+
+  it("TTL'd record compacted to disk is excluded from materializeCandidates (bm25Search and hybridSearch)", async () => {
+    const dir = await makeTmpDir();
+    const vectors = new Map<string, number[]>([
+      ["typescript", [1, 0, 0, 0]],
+      ["typescript guide permanent", [0.9, 0.1, 0, 0]],
+      ["typescript expired doc", [0.8, 0.2, 0, 0]],
+    ]);
+    const provider = new FakeEmbeddingProvider(vectors);
+
+    const schema = defineSchema({
+      name: "ttldisk",
+      textSearch: true,
+      storageMode: "disk",
+      fields: { title: { type: "string", searchable: true } },
+    });
+
+    // Session 1: insert, embed, close (compacts both records to disk including _expires)
+    {
+      const db = new AgentDB(dir, {
+        storageMode: "disk",
+        embeddings: { provider },
+      });
+      await db.init();
+      const col = await db.collection(schema);
+      await col.insert({ _id: "permanent", title: "typescript guide permanent" });
+      await col.insert({ _id: "expired", title: "typescript expired doc" }, { ttl: 0.001 });
+      await col.embedUnembedded();
+      await db.close();
+    }
+
+    // Wait for TTL to elapse (record is now expired on disk)
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Session 2: reopen — expired record is on disk, not in LRU cache
+    const db2 = new AgentDB(dir, {
+      storageMode: "disk",
+      embeddings: { provider },
+    });
+    await db2.init();
+    const col2 = await db2.collection(schema);
+
+    const bm25Result = await col2.bm25Search("typescript", { limit: 10 });
+    expect(bm25Result.records.map((r) => r._id)).not.toContain("expired");
+    expect(bm25Result.records.map((r) => r._id)).toContain("permanent");
+
+    const hybridResult = await col2.hybridSearch("typescript", { limit: 10 });
+    expect(hybridResult.records.map((r) => r._id)).not.toContain("expired");
+    expect(hybridResult.records.map((r) => r._id)).toContain("permanent");
+
+    await db2.close();
+    await rm(dir, { recursive: true, force: true });
+  });
 });
 
 // Hash-based embedding provider (deterministic, no exact-key lookup)
