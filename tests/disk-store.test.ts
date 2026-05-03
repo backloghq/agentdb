@@ -175,4 +175,25 @@ describe("DiskStore", () => {
       expect(record?.title).toBe("Record 42");
     });
   });
+
+  describe("appendEmbeddings — precondition (#171)", () => {
+    it("throws when compactionMeta is null (hasParquetData is false)", async () => {
+      const store = new DiskStore(backend, { rowGroupSize: 100 });
+      await store.load();
+      expect(store.hasParquetData).toBe(false);
+      await expect(
+        store.appendEmbeddings([["id-0", { _id: "id-0", _embedding: "x" }]]),
+      ).rejects.toThrow("compactionMeta");
+    });
+
+    it("succeeds after compaction (hasParquetData is true)", async () => {
+      const store = new DiskStore(backend, { rowGroupSize: 100 });
+      await store.load();
+      await store.compact(makeRecords(5), null);
+      expect(store.hasParquetData).toBe(true);
+      await expect(
+        store.appendEmbeddings([["id-0", { _id: "id-0", _embedding: "x" }]]),
+      ).resolves.toBeUndefined();
+    });
+  });
 });

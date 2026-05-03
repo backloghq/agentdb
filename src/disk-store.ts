@@ -298,9 +298,16 @@ export class DiskStore {
    * Durably append embedding updates to a new JSONL file and register it.
    * Used by embedUnembedded to persist embeddings without cache eviction risk.
    * Does NOT write a Parquet file — the next compact() will merge.
+   *
+   * **Precondition:** `hasParquetData` must be true (i.e. `compact()` has been called
+   * at least once). `compactionMeta` must be non-null; calling this on a store that
+   * has never been compacted will throw.
    */
   async appendEmbeddings(records: Array<[string, Record<string, unknown>]>): Promise<void> {
     if (records.length === 0) return;
+    if (!this.compactionMeta) {
+      throw new Error("appendEmbeddings requires compactionMeta to be initialized (hasParquetData must be true)");
+    }
     const { path: jsonlPath, offsetIndex: newRecordOffsets } = await writeRecordStore(this.backend, records);
 
     for (const [id, entry] of newRecordOffsets) this.recordOffsetIndex.set(id, entry);
@@ -309,10 +316,10 @@ export class DiskStore {
     // Update LRU cache so entries() returns the embedded version on next iteration
     for (const [id, record] of records) this.cache.set(id, record);
 
-    const jsonlFiles = [...(this.compactionMeta?.jsonlFiles ?? []), jsonlPath];
+    const jsonlFiles = [...(this.compactionMeta.jsonlFiles ?? []), jsonlPath];
 
     this.compactionMeta = {
-      ...(this.compactionMeta!),
+      ...this.compactionMeta,
       lastTimestamp: new Date().toISOString(),
       jsonlFiles,
       rowCount: this._recordCount,
