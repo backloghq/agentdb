@@ -268,6 +268,77 @@ describe("embedUnembedded — durable disk embedding (N > cacheSize) (#153 + #16
 
     await rm(dir, { recursive: true, force: true });
   });
+
+  it("disk-path mid-batch failure: batch 1 and 3 persist, batch 2 skipped (#178)", async () => {
+    const dir = await makeTmpDir();
+    const BATCH = 10;
+    const N = BATCH * 3; // 30 records → 3 batches
+
+    const schema = defineSchema({
+      name: "midbatch178",
+      fields: { title: { type: "string" } },
+    });
+
+    // Phase 1: insert without provider so records compact to disk with no _embedding
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", cacheSize: N });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < N; i++) {
+        await col.insert({ _id: `m${i}`, title: `item ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reopen with flaky provider — batch 2 throws; succeeding batches use HashProvider vectors
+    let diskCallCount = 0;
+    const baseProvider = new HashProvider();
+    const flakyProvider: EmbeddingProvider = {
+      dimensions: baseProvider.dimensions,
+      async embed(texts: string[]): Promise<number[][]> {
+        diskCallCount++;
+        if (diskCallCount === 2) throw new Error("rate limit");
+        return baseProvider.embed(texts);
+      },
+    };
+
+    {
+      const db = new AgentDB(dir, {
+        storageMode: "disk",
+        cacheSize: 100,
+        embeddingBatchSize: BATCH,
+        embeddings: { provider: flakyProvider },
+      });
+      await db.init();
+      const col = await db.collection(schema);
+      const count = await col.embedUnembedded();
+      // Batches 1 and 3 succeed (BATCH each); batch 2 is skipped
+      expect(count).toBe(BATCH * 2);
+      await db.close();
+    }
+
+    // Phase 3: reopen with working provider — only the BATCH skipped records need embedding
+    const provider2 = new HashProvider();
+    {
+      const db = new AgentDB(dir, {
+        storageMode: "disk",
+        cacheSize: 100,
+        embeddingBatchSize: BATCH,
+        embeddings: { provider: provider2 },
+      });
+      await db.init();
+      const col = await db.collection(defineSchema({ name: "midbatch178", fields: { title: { type: "string" } } }));
+      const remaining = await col.embedUnembedded();
+      // Only batch 2 records (BATCH of them) still lack embeddings
+      expect(remaining).toBe(BATCH);
+      // Now all are embedded — third call is idempotent
+      const zero = await col.embedUnembedded();
+      expect(zero).toBe(0);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
 });
 
 describe("appendEmbeddings — _dirty flag (#165)", () => {
