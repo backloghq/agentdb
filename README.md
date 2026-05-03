@@ -671,6 +671,24 @@ const results = col.searchByVector([0.1, 0.2, ...], { limit: 10, filter: { statu
 
 MCP tools: `db_vector_upsert`, `db_vector_search`, `db_semantic_search`, `db_embed`.
 
+**What text gets embedded?**
+
+When AgentDB embeds a record automatically (via `embedUnembedded` or on insert), it concatenates the string values of all user-defined fields. Internal metadata fields — `_id`, `_version`, `_agent`, `_reason`, `_expires`, `_embedding` — are excluded.
+
+This matters if you compute query embeddings client-side: embed only the user-field content, not any `_`-prefixed keys. Using the same field set for both indexing and querying is what makes retrieval work correctly.
+
+```typescript
+// Correct: embed only user fields
+const queryText = `${record.title} ${record.body}`;
+const [queryVec] = await provider.embed([queryText]);
+const results = await col.searchByVector(queryVec, { limit: 10 });
+
+// Wrong: including _id shifts the embedding away from query embeddings
+const queryText = `${record._id} ${record.title} ${record.body}`; // don't do this
+```
+
+**v1.3 → v1.4 migration:** v1.3 incorrectly included `_id` in the embedding text. If you have a disk-mode collection indexed by v1.3, call `col.reembedAll()` once after upgrading to fix the stored embeddings. The `db_reembed_all` MCP tool does the same thing (requires admin permission).
+
 ### Hybrid search (BM25 + semantic)
 
 Combines BM25 lexical scoring with vector similarity, fused via Reciprocal Rank Fusion. Catches exact-term matches that semantic search misses, and semantic matches that keyword search misses.
