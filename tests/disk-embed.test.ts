@@ -464,3 +464,49 @@ describe("reembedAll (#166)", () => {
     await rm(dir, { recursive: true, force: true });
   });
 });
+
+describe("embedUnembedded — single-pass disk scan (#168)", () => {
+  it("multi-JSONL last-write-wins: records with _embedding in a later JSONL are skipped", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const schema = defineSchema({ name: "lww", fields: { title: { type: "string" } }, embeddingBatchSize: 50 });
+    const schemaPlain = defineSchema({ name: "lww", fields: { title: { type: "string" } } });
+
+    // Phase 1: 100 records, no provider — compact to Parquet without embeddings
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      for (let i = 0; i < 100; i++) {
+        await col.insert({ _id: `d${i}`, title: `document ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: embed all 100 — writes 2 JSONL files (batchSize=50), then close
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+      const count = await col.embedUnembedded();
+      expect(count).toBe(100);
+      await db.close();
+    }
+
+    // Phase 3: reopen — single-pass must see _embedding on all 100 and embed 0
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      provider.calls.length = 0;
+      const count = await col.embedUnembedded();
+      // All records already have embeddings from the appended JSONL files;
+      // single-pass pending.delete() must catch them all — nothing to embed.
+      expect(count).toBe(0);
+      expect(provider.calls.length).toBe(0);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});

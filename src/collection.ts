@@ -1493,11 +1493,29 @@ export class Collection {
 
     // --- Disk records (compacted Parquet/JSONL) ---
     if (this._diskStore?.hasParquetData) {
+      // Single-pass: stream entries oldest→newest. Later file entry wins.
+      // pending tracks records needing embedding; a subsequent entry with _embedding
+      // means a prior embedUnembedded already handled it — remove from pending.
+      const pending = new Map<string, { text: string; record: StoredRecord }>();
+
+      for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+        if (walSeen.has(id)) continue;
+        if ((record as StoredRecord)[META_EMBEDDING]) {
+          // This id already has an embedding (appended by a prior embedUnembedded call)
+          pending.delete(id);
+        } else {
+          if (isExpired(record as StoredRecord)) continue;
+          const clean = stripMeta(record as StoredRecord);
+          const text = extractTextFromRecord(clean);
+          if (text) {
+            pending.set(id, { text, record: record as StoredRecord });
+          } else {
+            pending.delete(id);
+          }
+        }
+      }
+
       const diskBatch: { id: string; text: string; record: StoredRecord }[] = [];
-      // Deduplicate across JSONL files: a record may appear in base file (no embedding)
-      // AND in an appended file (has embedding from a previous embedUnembedded call).
-      // Track the latest embedding-state per ID to avoid re-embedding.
-      const diskSeen = new Map<string, boolean>(); // id → hasEmbedding
 
       const flushDiskBatch = async (): Promise<void> => {
         if (diskBatch.length === 0) return;
@@ -1521,33 +1539,11 @@ export class Collection {
         diskBatch.length = 0;
       };
 
-      for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
-        if (walSeen.has(id)) continue;
-        const hasEmbed = !!(record as StoredRecord)[META_EMBEDDING];
-        // Update the seen map: later file entry (e.g. appended embedding) wins
-        diskSeen.set(id, hasEmbed);
+      for (const [id, entry] of pending) {
+        diskBatch.push({ id, ...entry });
+        if (diskBatch.length >= batchSize) await flushDiskBatch();
       }
-
-      // Second pass: collect records needing embedding
-      const needsEmbed = new Set<string>();
-      for (const [id, hasEmbed] of diskSeen) {
-        if (!hasEmbed) needsEmbed.add(id);
-      }
-
-      if (needsEmbed.size > 0) {
-        // Re-stream to get the actual records for unembedded IDs
-        for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
-          if (!needsEmbed.has(id)) continue;
-          needsEmbed.delete(id); // process each id only once
-          if (isExpired(record as StoredRecord)) continue;
-          const clean = stripMeta(record as StoredRecord);
-          const text = extractTextFromRecord(clean);
-          if (!text) continue;
-          diskBatch.push({ id, text, record: record as StoredRecord });
-          if (diskBatch.length >= batchSize) await flushDiskBatch();
-        }
-        await flushDiskBatch();
-      }
+      await flushDiskBatch();
     }
 
     return embedded;
