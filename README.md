@@ -500,6 +500,7 @@ const { persisted, warnings } = mergeSchemas(codeSchema, persistedSchema);
 | `db_embed` | Manually trigger embedding |
 | `db_vector_upsert` | Store a pre-computed vector with metadata |
 | `db_vector_search` | Search by raw vector (no embedding provider needed) |
+| `db_hybrid_search` | Hybrid BM25 + semantic search fused via RRF (degrades gracefully) |
 | `db_blob_write` | Attach a file (base64) to a record |
 | `db_blob_read` | Read an attached file |
 | `db_blob_list` | List files attached to a record |
@@ -669,6 +670,56 @@ const results = col.searchByVector([0.1, 0.2, ...], { limit: 10, filter: { statu
 
 MCP tools: `db_vector_upsert`, `db_vector_search`, `db_semantic_search`, `db_embed`.
 
+### Hybrid search (BM25 + semantic)
+
+Combines BM25 lexical scoring with vector similarity, fused via Reciprocal Rank Fusion. Catches exact-term matches that semantic search misses, and semantic matches that keyword search misses.
+
+**Schema — mark fields as searchable:**
+
+```typescript
+const notes = await db.collection(defineSchema({
+  name: "notes",
+  textSearch: true,
+  fields: {
+    title: { type: "string", searchable: true },  // BM25-indexed
+    body:  { type: "string", searchable: true },  // BM25-indexed
+    tags:  { type: "string[]" },                  // not indexed for BM25
+  },
+}));
+```
+
+`searchable: true` is opt-in. Collections without any `searchable` fields fall back to indexing all string fields (v1.3 behaviour preserved).
+
+**Library API:**
+
+```typescript
+// BM25-only (no embedding provider needed)
+const { records, scores } = await notes.bm25Search("typescript generics", {
+  limit: 10,
+  filter: { status: "published" },
+});
+
+// Hybrid: BM25 + semantic, fused via RRF
+const { records, scores } = await notes.hybridSearch("typescript generics", {
+  limit: 10,
+  k: 60,          // RRF k parameter — higher = less rank-position sensitive
+  filter: { status: "published" },
+});
+```
+
+**Degraded modes** — hybrid degrades gracefully:
+- No embedding provider configured → BM25-only ranking
+- No `textSearch: true` → vector-only ranking
+- Neither available → throws
+
+**MCP tool:**
+
+```json
+{ "name": "db_hybrid_search", "arguments": { "collection": "notes", "query": "typescript generics", "limit": 10 } }
+```
+
+**BM25 defaults:** `k1=1.2`, `b=0.75` (Okapi BM25 standard). Configurable via `Collection` constructor options. **RRF default:** `k=60` (Cormack et al. 2009).
+
 ### Rate limiting and CORS
 
 ```bash
@@ -735,7 +786,7 @@ col.find({ filter: { status: "active" }, summary: true });
 See [examples/](./examples/) for runnable demos powered by Ollama:
 
 - **[Multi-Agent Task Board](./examples/multi-agent/)** — Agents collaborate on a shared task board. Event-driven via NOTIFY/LISTEN.
-- **[RAG Knowledge Base](./examples/rag-knowledge-base/)** — Ingest docs, embed with Ollama, answer questions via semantic search.
+- **[RAG Knowledge Base](./examples/rag-knowledge-base/)** — Ingest docs, embed with Ollama, answer questions via hybrid search (BM25 + semantic, fused via RRF). Updated for v1.4.
 - **[Research Pipeline](./examples/research-pipeline/)** — 3-stage AI pipeline: Researcher → Analyst → Writer. Each stage triggers the next.
 - **[Multi-Model Code Review](./examples/code-review/)** — Gemini generates code, Ollama reviews locally, Gemini writes tests. Multi-provider orchestration. Updated for v1.3: shows schema lifecycle (`defineSchema` with description/instructions/field descriptions, auto-persistence, `db_get_schema` discovery).
 - **[Live Dashboard](./examples/live-dashboard/)** — Real-time CLI view of any running demo's collections.

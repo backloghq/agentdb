@@ -18,9 +18,9 @@ cd multi-agent && ./run.sh
 
 ### [rag-knowledge-base/](./rag-knowledge-base/) — RAG Knowledge Base
 
-Ingest documents, embed with Ollama, answer questions using semantic search. CLI tool for building a local knowledge base.
+Ingest documents, embed with Ollama, answer questions using **hybrid search** (BM25 + semantic RRF). CLI tool for building a local knowledge base. Updated for v1.4.
 
-**Shows:** vector API (`insertVector`/`searchByVector`), Ollama embeddings, chunking, source attribution
+**Shows:** hybrid search (`hybridSearch`), `searchable: true` schema fields, `embedUnembedded()`, Ollama embeddings, chunking, source attribution
 
 ```bash
 cd rag-knowledge-base
