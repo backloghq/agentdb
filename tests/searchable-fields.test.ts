@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { AgentDB } from "../src/agentdb.js";
 import { defineSchema } from "../src/schema.js";
 import { loadSchemaFromJSON, extractPersistedSchema, validatePersistedSchema, mergeSchemas, mergePersistedSchemas } from "../src/schema.js";
@@ -70,29 +70,17 @@ describe("searchable fields — schema definition", () => {
     }
   });
 
-  it("non-string field with searchable:true is ignored with a warning", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const dir = makeTmpDir();
-    const db = new AgentDB(dir);
-    await db.init();
-    try {
-      const schema = defineSchema({
+  it("non-string field with searchable:true throws at schema definition time", () => {
+    expect(() =>
+      defineSchema({
         name: "things",
         textSearch: true,
         fields: {
           title: { type: "string", searchable: true },
           count: { type: "number", searchable: true },
         },
-      });
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining("count"));
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining("number"));
-      const col = await db.collection(schema);
-      expect(col.searchableFields()).toEqual(["title"]);
-    } finally {
-      await db.close();
-      rmSync(dir, { recursive: true });
-      warn.mockRestore();
-    }
+      })
+    ).toThrow(/count.*number|number.*count/);
   });
 });
 
@@ -309,7 +297,7 @@ describe("bm25 schema option — Collection plumbing", () => {
   });
 });
 
-describe("searchable fields — non-string FieldDef types warn and are excluded", () => {
+describe("searchable fields — non-string FieldDef types throw", () => {
   const offendingTypes: Array<{ label: string; fieldDef: Record<string, unknown> }> = [
     { label: "boolean", fieldDef: { type: "boolean", searchable: true } },
     { label: "number",  fieldDef: { type: "number",  searchable: true } },
@@ -319,43 +307,29 @@ describe("searchable fields — non-string FieldDef types warn and are excluded"
   ];
 
   for (const { label, fieldDef } of offendingTypes) {
-    it(`searchable:true on '${label}' field warns and excludes it from searchableFields()`, () => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      try {
-        const schema = defineSchema({
+    it(`searchable:true on '${label}' field throws at defineSchema time`, () => {
+      expect(() =>
+        defineSchema({
           name: "things",
           textSearch: true,
           fields: {
             title: { type: "string", searchable: true },
             bad:   fieldDef as Parameters<typeof defineSchema>[0]["fields"][string],
           },
-        });
-        // At least one warning about the offending field
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining("bad"));
-        // Only string field survives
-        const { collectionOptions } = schema;
-        expect(collectionOptions?.searchableFields).toEqual(["title"]);
-      } finally {
-        warn.mockRestore();
-      }
+        })
+      ).toThrow(/bad/);
     });
   }
 
-  it("string[] field with searchable:true is accepted without warning", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const schema = defineSchema({
-        name: "things2",
-        textSearch: true,
-        fields: {
-          tags: { type: "string[]", searchable: true },
-        },
-      });
-      expect(warn).not.toHaveBeenCalled();
-      expect(schema.collectionOptions?.searchableFields).toEqual(["tags"]);
-    } finally {
-      warn.mockRestore();
-    }
+  it("string[] field with searchable:true is accepted without throwing", () => {
+    const schema = defineSchema({
+      name: "things2",
+      textSearch: true,
+      fields: {
+        tags: { type: "string[]", searchable: true },
+      },
+    });
+    expect(schema.collectionOptions?.searchableFields).toEqual(["tags"]);
   });
 });
 

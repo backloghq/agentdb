@@ -143,14 +143,13 @@ export function defineSchema(def: SchemaDefinition): CollectionSchema {
     if (fieldValidator) fieldValidator(record);
   };
 
-  // Compute searchable fields — warn and skip non-string/string[] types
+  // Compute searchable fields — throw on non-string/string[] types
   const searchableFields: string[] = [];
   if (def.fields) {
     for (const [name, field] of Object.entries(def.fields)) {
       if (!field.searchable) continue;
       if (field.type !== "string" && field.type !== "string[]") {
-        console.warn(`[agentdb] schema '${def.name}': field '${name}' has searchable:true but type '${field.type}' is not string or string[] — ignored`);
-        continue;
+        throw new Error(`schema '${def.name}': field '${name}' has searchable:true but type '${field.type}' is not string or string[]`);
       }
       searchableFields.push(name);
     }
