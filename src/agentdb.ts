@@ -211,6 +211,15 @@ export class AgentDB {
   /**
    * Get or create a named collection.
    * Accepts a name + options, or a CollectionSchema from defineSchema().
+   *
+   * @param nameOrSchema  Collection name (string) or a defineSchema() result.
+   * @param colOpts       Per-collection options. **Warning:** when `nameOrSchema`
+   *   is a schema (from `defineSchema()`), the schema's internal `collectionOptions`
+   *   **completely replace** this argument — any `colOpts` passed here are silently
+   *   discarded. Schema values always win. To set per-collection knobs
+   *   (`embeddingBatchSize`, `diskConcurrency`, `cacheSize`, `rowGroupSize`) for a
+   *   schema-defined collection, either include them in the `defineSchema(...)` call
+   *   or set them on `AgentDBOptions` as db-wide defaults.
    */
   async collection(nameOrSchema: string | CollectionSchema, colOpts?: CollectionOptions): Promise<Collection> {
     this.ensureOpen();
