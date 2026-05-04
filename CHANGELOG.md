@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [1.4.0] - 2026-05-04
 
 ### Changed
 - **`Collection.reembedAll()` now returns `ReembedResult` instead of `number` (#182)** — structured result with `embedded` (success count), `failed` (failure count), and `errors: Array<{ batchIndex, recordIds, reason }>` (per-batch detail). Per-batch try/catch now records the batch index and failing record IDs so callers can distinguish partial success from total failure. `db_reembed_all` MCP tool returns the same shape and its description updated to mention `failed > 0` check. `ReembedResult` exported from the core package. Existing #166 tests updated to consume the new shape.
@@ -109,9 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`hybridSearch` per-arm error isolation** — a runtime failure in one arm (e.g. embedding provider throws) no longer rejects the entire call; the failing arm is treated as empty and the other arm's results are returned via RRF as usual.
 - **Oversized text-index now throws instead of silently degrading** — `DiskStore._doLoadIndexes` previously warned and skipped the text-index file when it exceeded `MAX_INDEX_FILE_SIZE` (256 MB, ~25–30K docs), causing `bm25Search` to silently return empty results and `hybridSearch` to silently degrade to vector-only. Now throws `IndexFileTooLargeError` (exported from core) so callers see an actionable error. B-tree/array indexes retain the warn+skip behaviour. README "Limits" subsection added under Hybrid Search.
 
-## [1.4.0] - 2026-05-02
-
-### Added
+### Added (initial v1.4 work)
 - **BM25 scoring on `TextIndex`** — `searchScored(query, opts?)` returns OR-semantics BM25-ranked results; `k1`/`b` configurable via constructor; `toJSON` bumped to v2 (per-doc TF map + length); `fromJSON` accepts v1 (lazy upgrade) and v2.
 - **RRF fusion utility** — `rrf(lists, opts?)` in `src/rrf.ts`, exported from the core library; fuses N ranked lists via Reciprocal Rank Fusion (Cormack et al. 2009); `k` configurable (default 60); deduplicates within a list using first-occurrence rank.
 - **Schema-declared BM25 fields** — `searchable?: boolean` on `FieldDef` and `PersistedFieldDef`; Collection projects records to marked fields before text indexing; zero-flag fallback preserves full-record indexing for backwards compat; `Collection.searchableFields()` getter for introspection; non-string/string[] fields with `searchable:true` warn and are ignored.
