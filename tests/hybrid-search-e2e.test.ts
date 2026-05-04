@@ -386,3 +386,69 @@ describe("Scenario 6: tokenizer Unicode end-to-end — CJK whole-run token behav
     await rm(dir, { recursive: true, force: true });
   });
 });
+
+// ── Scenario 7: HNSW auto-detect dimensions (dimensions=0 provider) ──────────
+
+describe("Scenario 7: HNSW dimensions=0 provider auto-detect — embedUnembedded and reembedAll (#201)", () => {
+  it("embedUnembedded succeeds and sets correct HNSW dims when provider.dimensions=0", async () => {
+    const dir = await makeTmpDir();
+
+    // Simulates Ollama / any auto-detect provider: dimensions=0 at construction,
+    // actual dim revealed only when embed() is first called.
+    const autoDimProvider: EmbeddingProvider = {
+      dimensions: 0,
+      async embed(texts: string[]) {
+        // Returns 12-dim vectors (simulating auto-detected size)
+        return texts.map(() => Array.from({ length: 12 }, (_, i) => (i + 1) / 12));
+      },
+    };
+
+    const schema = defineSchema({ name: "autodim", fields: { title: { type: "string" } } });
+    const db = new AgentDB(dir, { embeddings: { provider: autoDimProvider } });
+    await db.init();
+    const col = await db.collection(schema);
+
+    await col.insert({ _id: "a", title: "hello world" });
+    await col.insert({ _id: "b", title: "goodbye world" });
+
+    // Pre-#201 this threw: "Vector dimension mismatch: expected 0, got 12"
+    const count = await col.embedUnembedded();
+    expect(count).toBe(2);
+
+    // HNSW index must now hold 2 entries and have the real dimensionality
+    const result = await col.semanticSearch("hello world", { limit: 5 });
+    expect(result.records.length).toBeGreaterThan(0);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("reembedAll succeeds when provider.dimensions=0", async () => {
+    const dir = await makeTmpDir();
+
+    const autoDimProvider: EmbeddingProvider = {
+      dimensions: 0,
+      async embed(texts: string[]) {
+        return texts.map(() => Array.from({ length: 12 }, (_, i) => (i + 1) / 12));
+      },
+    };
+
+    const schema = defineSchema({ name: "reembed_autodim", fields: { title: { type: "string" } } });
+    const db = new AgentDB(dir, { embeddings: { provider: autoDimProvider } });
+    await db.init();
+    const col = await db.collection(schema);
+
+    for (let i = 0; i < 5; i++) {
+      await col.insert({ _id: `r${i}`, title: `reembed test record ${i}` });
+    }
+
+    // Pre-#201 this threw on the first hnsw.add call
+    const result = await col.reembedAll();
+    expect(result.embedded).toBe(5);
+    expect(result.failed).toBe(0);
+    expect(result.errors).toHaveLength(0);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});

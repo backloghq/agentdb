@@ -374,6 +374,14 @@ export class Collection {
     this.hnswIdx = new HnswIndex({ dimensions: provider.dimensions });
   }
 
+  /** Lazily initialize HNSW to the real vector size on the first embed call.
+   * Needed when the provider has dimensions=0 at construction (e.g. Ollama auto-detect). */
+  private ensureHnswDims(vec: number[]): void {
+    if (this.hnswIdx && this.hnswIdx.dims === 0) {
+      this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+    }
+  }
+
   /** Open the underlying opslog store at the given directory. */
   async open(dir: string, options?: { checkpointThreshold?: number; checkpointOnClose?: boolean; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean; skipLoad?: boolean }): Promise<void> {
     await this.store.open(dir, options);
@@ -1533,6 +1541,7 @@ export class Collection {
           this.store.set(id, updated);
         }
       });
+      if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
       for (let j = 0; j < batch.length; j++) {
         this.hnswIdx.add(batch[j].id, vectors[j]);
       }
@@ -1581,6 +1590,7 @@ export class Collection {
           return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(q) }];
         });
         await this._diskStore!.appendEmbeddings(updates);
+        if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
         for (let j = 0; j < diskBatch.length; j++) {
           this.hnswIdx!.add(diskBatch[j].id, vectors[j]);
         }
@@ -1651,6 +1661,7 @@ export class Collection {
           this.store.set(id, updated);
         }
       });
+      if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
       for (let j = 0; j < batch.length; j++) {
         this.hnswIdx!.add(batch[j].id, vectors[j]);
       }
@@ -1686,6 +1697,7 @@ export class Collection {
         if (this._diskStore!.shouldCompact()) {
           await this._diskStore!.compactInPlace();
         }
+        if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
         for (let j = 0; j < diskBatch.length; j++) {
           this.hnswIdx!.add(diskBatch[j].id, vectors[j]);
         }
