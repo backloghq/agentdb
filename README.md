@@ -500,6 +500,8 @@ const { persisted, warnings } = mergeSchemas(codeSchema, persistedSchema);
 | `db_embed` | Manually trigger embedding |
 | `db_vector_upsert` | Store a pre-computed vector with metadata |
 | `db_vector_search` | Search by raw vector (no embedding provider needed) |
+| `db_bm25_search` | Pure BM25 lexical search (no embedding provider needed) |
+| `db_hybrid_search` | Hybrid BM25 + semantic search fused via RRF (degrades gracefully) |
 | `db_blob_write` | Attach a file (base64) to a record |
 | `db_blob_read` | Read an attached file |
 | `db_blob_list` | List files attached to a record |
@@ -663,11 +665,124 @@ const col = await db.collection("docs");
 await col.insertVector("doc1", [0.1, 0.2, ...], { title: "My Document" });
 
 // Search by vector
-const results = col.searchByVector([0.1, 0.2, ...], { limit: 10, filter: { status: "active" } });
+const results = await col.searchByVector([0.1, 0.2, ...], { limit: 10, filter: { status: "active" } });
 // → { records: [...], scores: [0.98, 0.91, ...] }
 ```
 
 MCP tools: `db_vector_upsert`, `db_vector_search`, `db_semantic_search`, `db_embed`.
+
+**What text gets embedded?**
+
+When AgentDB embeds a record automatically (via `embedUnembedded` or on insert), it concatenates the string values of all user-defined fields. Internal metadata fields — `_id`, `_version`, `_agent`, `_reason`, `_expires`, `_embedding` — are excluded.
+
+This matters if you compute query embeddings client-side: embed only the user-field content, not any `_`-prefixed keys. Using the same field set for both indexing and querying is what makes retrieval work correctly.
+
+```typescript
+// Correct: embed only user fields
+const queryText = `${record.title} ${record.body}`;
+const [queryVec] = await provider.embed([queryText]);
+const results = await col.searchByVector(queryVec, { limit: 10 });
+
+// Wrong: including _id shifts the embedding away from query embeddings
+const queryText = `${record._id} ${record.title} ${record.body}`; // don't do this
+```
+
+**v1.3 → v1.4 migration:** v1.3 incorrectly included `_id` in the embedding text. If you have a disk-mode collection indexed by v1.3, call `col.reembedAll()` once after upgrading to fix the stored embeddings. The `db_reembed_all` MCP tool does the same thing (requires admin permission).
+
+**Memory note:** `embedUnembedded` (lazy path) holds all unembedded record references in memory before batching — roughly 1 KB/record, so ~1 GB at 1M unembedded. For large collections, call `col.reembedAll()` instead: it streams and flushes mid-run with bounded memory. `reembedAll` triggers an internal `compactInPlace()` every 8 batches, which itself fully materializes the on-disk dataset (~1 KB/record peak per compaction); cost is amortized across the run.
+
+### Hybrid search (BM25 + semantic)
+
+Combines BM25 lexical scoring with vector similarity, fused via Reciprocal Rank Fusion. Catches exact-term matches that semantic search misses, and semantic matches that keyword search misses.
+
+**Schema — mark fields as searchable:**
+
+```typescript
+const notes = await db.collection(defineSchema({
+  name: "notes",
+  textSearch: true,
+  fields: {
+    title: { type: "string", searchable: true },  // BM25-indexed
+    body:  { type: "string", searchable: true },  // BM25-indexed
+    tags:  { type: "string[]" },                  // not indexed for BM25
+  },
+}));
+```
+
+`searchable: true` is opt-in. Collections without any `searchable` fields fall back to indexing all string fields (v1.3 behaviour preserved).
+
+**Library API:**
+
+```typescript
+// BM25-only (no embedding provider needed)
+const { records, scores } = await notes.bm25Search("typescript generics", {
+  limit: 10,
+  filter: { status: "published" },
+});
+
+// Hybrid: BM25 + semantic, fused via RRF
+const { records, scores } = await notes.hybridSearch("typescript generics", {
+  limit: 10,
+  k: 60,          // RRF k parameter — higher = less rank-position sensitive
+  filter: { status: "published" },
+});
+```
+
+**Degraded modes** — hybrid degrades gracefully:
+- No embedding provider configured → BM25-only ranking
+- No `textSearch: true` → vector-only ranking
+- Neither available → throws
+
+**MCP tool:**
+
+```json
+{ "name": "db_hybrid_search", "arguments": { "collection": "notes", "query": "typescript generics", "limit": 10 } }
+```
+
+**BM25 defaults:** `k1=1.2`, `b=0.75` (Okapi BM25 standard). Configurable via `Collection` constructor options. **RRF default:** `k=60` (Cormack et al. 2009).
+
+**Upgrading from v1.3:** collections indexed before v1.4 use a v1 text-index format with no TF data. These docs are excluded from BM25 results until re-indexed. To upgrade a collection in-place, iterate its records and reinsert them (or call `bm25Search` after any mutation — each write upgrades that doc automatically).
+
+**Unicode normalisation:** AgentDB does not normalise Unicode before tokenizing. Precomposed (`é`, U+00E9) and decomposed (`e` + U+0301) forms of the same character are treated as distinct tokens. Ensure your application uses consistent Unicode normalisation (e.g. NFC) on both indexed text and queries; otherwise the same word in different normal forms will not match.
+
+#### Limits
+
+The BM25 text index is stored as a single JSON blob on disk. At ~10 KB per document the `256 MB` safety cap (`DiskStore.MAX_INDEX_FILE_SIZE`) is reached at roughly **25–30K documents**. When this limit is exceeded on reopen, AgentDB throws `IndexFileTooLargeError` instead of silently returning empty BM25 results.
+
+Recovery options:
+- Disable text search on the collection (`textSearch: false`) and use semantic search only.
+- Reduce corpus size (archive or delete old records before reopening).
+- Use a separate collection per corpus shard and merge results in application code.
+
+A sharded/streamed v3 text-index format that removes this ceiling is planned for a future release.
+
+### Embedding and disk performance knobs
+
+Two options control embedding throughput and disk-mode concurrency. Both follow the same placement rule: set a db-wide default in `AgentDBOptions`; override per-collection in `CollectionOptions`.
+
+**`embeddingBatchSize`** — number of records sent to the embedding provider in a single `embed()` call during `embedUnembedded`. Default: `256`.
+
+```typescript
+// db-wide default
+const db = new AgentDB("./data", { embeddingBatchSize: 128 });
+
+// per-collection override (wins over db-wide)
+const col = await db.collection("articles", { embeddingBatchSize: 64 });
+```
+
+Smaller batches reduce peak memory and provider timeout risk; larger batches reduce round-trips. Most hosted providers cap at 512–2048 texts per call — stay below their limit.
+
+**`diskConcurrency`** — maximum number of concurrent `DiskStore.get()` calls when materializing BM25/vector candidates in disk mode. Default: `16` for non-local-filesystem backends (e.g. S3); local filesystem is unbounded.
+
+```typescript
+// db-wide default (applied to every disk-mode collection)
+const db = new AgentDB("./data", { diskConcurrency: 32 });
+
+// per-collection override
+const col = await db.collection("embeddings", { diskConcurrency: 8 });
+```
+
+S3 sizing guidance: the default of `16` prevents per-prefix request throttling at typical QPS. If you are running at very high query concurrency (dozens of simultaneous `hybridSearch` calls) and observe `SlowDown` errors, raise to `32`. If you share an S3 prefix with other workloads, lower to `8` to leave headroom.
 
 ### Rate limiting and CORS
 
@@ -735,7 +850,7 @@ col.find({ filter: { status: "active" }, summary: true });
 See [examples/](./examples/) for runnable demos powered by Ollama:
 
 - **[Multi-Agent Task Board](./examples/multi-agent/)** — Agents collaborate on a shared task board. Event-driven via NOTIFY/LISTEN.
-- **[RAG Knowledge Base](./examples/rag-knowledge-base/)** — Ingest docs, embed with Ollama, answer questions via semantic search.
+- **[RAG Knowledge Base](./examples/rag-knowledge-base/)** — Ingest docs, embed with Ollama, answer questions via hybrid search (BM25 + semantic, fused via RRF). Updated for v1.4.
 - **[Research Pipeline](./examples/research-pipeline/)** — 3-stage AI pipeline: Researcher → Analyst → Writer. Each stage triggers the next.
 - **[Multi-Model Code Review](./examples/code-review/)** — Gemini generates code, Ollama reviews locally, Gemini writes tests. Multi-provider orchestration. Updated for v1.3: shows schema lifecycle (`defineSchema` with description/instructions/field descriptions, auto-persistence, `db_get_schema` discovery).
 - **[Live Dashboard](./examples/live-dashboard/)** — Real-time CLI view of any running demo's collections.

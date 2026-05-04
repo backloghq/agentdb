@@ -19,6 +19,7 @@ import {
   readRecordByOffset,
   readRecordsByOffsets,
   readAllFromJsonl,
+  readJsonlStream,
   writeRecordOffsetIndex,
   readRecordOffsetIndex,
   cleanupOldJsonlFiles,
@@ -29,7 +30,19 @@ import {
 } from "./disk-io.js";
 import type { IndexManager } from "./collection-indexes.js";
 import type { TextIndex } from "./text-index.js";
+import { FsBackend } from "@backloghq/opslog";
 import type { StorageBackend } from "@backloghq/opslog";
+
+export class IndexFileTooLargeError extends Error {
+  constructor(filename: string, actual: number, limit: number) {
+    super(
+      `Text index file ${filename} exceeds MAX_INDEX_FILE_SIZE (${actual} > ${limit} bytes). ` +
+      `Disable text search on the collection or re-index with a smaller corpus. ` +
+      `See https://github.com/backloghq/agentdb#bm25-index-size-limits for recovery options.`,
+    );
+    this.name = "IndexFileTooLargeError";
+  }
+}
 
 export interface DiskStoreOptions {
   /** Max records in LRU cache (default: 1000). */
@@ -113,6 +126,11 @@ export class DiskStore {
   /** Get the LRU cache for stats access. */
   get cacheStats() {
     return this.cache.stats();
+  }
+
+  /** True when the backend is a local filesystem (FsBackend). Used to decide concurrency caps. */
+  isLocalFs(): boolean {
+    return this.backend instanceof FsBackend;
   }
 
   /** Get or lazily load the cached Parquet file buffer. */
@@ -223,13 +241,25 @@ export class DiskStore {
     return allIds;
   }
 
-  /** Iterate all records from all JSONL files. */
-  async *entries(): AsyncGenerator<[string, Record<string, unknown>]> {
+  /** Iterate all records from all JSONL files. Pass skipCache:true to bypass LRU population (e.g. during HNSW rebuild). */
+  async *entries(opts?: { skipCache?: boolean }): AsyncGenerator<[string, Record<string, unknown>]> {
+    const skipCache = opts?.skipCache ?? false;
     for (const jsonlFile of this.getAllJsonlFiles()) {
-      const all = await readAllFromJsonl(this.backend, jsonlFile);
-      for (const [id, record] of all) {
-        this.cache.set(id, record);
-        yield [id, record];
+      if (skipCache) {
+        // Stream one record at a time — avoids building a full Map in memory
+        for await (const [id, diskRecord] of readJsonlStream(this.backend, jsonlFile)) {
+          // Prefer the LRU-cached version — it may have been updated (e.g. _embedding written via cacheWrite)
+          const cached = this.cache.peek(id);
+          yield [id, cached ?? diskRecord];
+        }
+      } else {
+        const all = await readAllFromJsonl(this.backend, jsonlFile);
+        for (const [id, diskRecord] of all) {
+          const cached = this.cache.peek(id);
+          const record = cached ?? diskRecord;
+          this.cache.set(id, record);
+          yield [id, record];
+        }
       }
     }
   }
@@ -264,10 +294,77 @@ export class DiskStore {
     this.cache.clear();
   }
 
-  /** Max incremental files before triggering a full merge. */
+  /**
+   * Durably append embedding updates to a new JSONL file and register it.
+   * Used by embedUnembedded to persist embeddings without cache eviction risk.
+   * Does NOT write a Parquet file — the next compact() will merge.
+   *
+   * **Precondition:** `hasParquetData` must be true (i.e. `compact()` has been called
+   * at least once). `compactionMeta` must be non-null; calling this on a store that
+   * has never been compacted will throw.
+   */
+  async appendEmbeddings(records: Array<[string, Record<string, unknown>]>): Promise<void> {
+    if (records.length === 0) return;
+    if (!this.compactionMeta) {
+      throw new Error("appendEmbeddings requires compactionMeta to be initialized (hasParquetData must be true)");
+    }
+    const { path: jsonlPath, offsetIndex: newRecordOffsets } = await writeRecordStore(this.backend, records);
+
+    for (const [id, entry] of newRecordOffsets) this.recordOffsetIndex.set(id, entry);
+    this._recordCount = this.recordOffsetIndex.size;
+
+    // Update LRU cache so entries() returns the embedded version on next iteration
+    for (const [id, record] of records) this.cache.set(id, record);
+
+    const jsonlFiles = [...(this.compactionMeta.jsonlFiles ?? []), jsonlPath];
+
+    this.compactionMeta = {
+      ...this.compactionMeta,
+      lastTimestamp: new Date().toISOString(),
+      jsonlFiles,
+      rowCount: this._recordCount,
+    };
+
+    await writeRecordOffsetIndex(this.backend, this.recordOffsetIndex);
+    await writeCompactionMeta(this.backend, this.compactionMeta);
+
+    this._cachedJsonlFiles = null;
+    // Mark dirty so close() compacts: the new JSONL file(s) should be merged
+    // into Parquet to avoid unbounded file proliferation.  The previous code
+    // set _dirty=false here, which incorrectly suppressed compaction.
+    this._dirty = true;
+  }
+
+  /** Max incremental Parquet files before triggering a full merge. */
   private static readonly MERGE_THRESHOLD = 10;
+  /**
+   * Max incremental JSONL files before triggering a full merge.
+   * Set to 8 (≈ MERGE_THRESHOLD=10) — both sit at ~10× the default batch size, giving
+   * smooth S3 write amplification: compact often enough to bound index rewrite cost,
+   * infrequently enough to amortize the per-compact Parquet write.
+   */
+  private static readonly MERGE_JSONL_THRESHOLD = 8;
 
   // --- Compaction ---
+
+  /** True when accumulated JSONL files exceed the merge threshold. */
+  shouldCompact(): boolean {
+    const jsonlFileCount = (this.compactionMeta?.jsonlFiles?.length ?? 0) + 1;
+    return jsonlFileCount >= DiskStore.MERGE_JSONL_THRESHOLD;
+  }
+
+  /**
+   * Full compaction using only the store's own on-disk data.
+   * Used by reembedAll to periodically compact accumulated embedding JSONL files
+   * without needing external record lists (WAL records remain in WAL, replayed on open).
+   *
+   * **Memory:** fully materializes all on-disk records during the merge
+   * (~1 KB/record; expect ~1 GB at 1M records). Called at most once per
+   * `MERGE_JSONL_THRESHOLD` batches, so total cost is amortized across the run.
+   */
+  async compactInPlace(): Promise<void> {
+    await this._compactFull(this.entries({ skipCache: true }));
+  }
 
   /**
    * Compact: incremental if possible, full if first time or merge threshold reached.
@@ -278,8 +375,9 @@ export class DiskStore {
     allRecords: AsyncIterable<[string, Record<string, unknown>]> | Iterable<[string, Record<string, unknown>]>,
     newRecords?: Array<[string, Record<string, unknown>]>,
   ): Promise<void> {
-    const fileCount = (this.compactionMeta?.parquetFiles?.length ?? 0) + 1;
-    const shouldMerge = !this.compactionMeta || fileCount >= DiskStore.MERGE_THRESHOLD || !newRecords;
+    const parquetFileCount = (this.compactionMeta?.parquetFiles?.length ?? 0) + 1;
+    const jsonlFileCount = (this.compactionMeta?.jsonlFiles?.length ?? 0) + 1;
+    const shouldMerge = !this.compactionMeta || parquetFileCount >= DiskStore.MERGE_THRESHOLD || jsonlFileCount >= DiskStore.MERGE_JSONL_THRESHOLD || !newRecords;
 
     if (shouldMerge) {
       await this._compactFull(allRecords);
@@ -386,8 +484,8 @@ export class DiskStore {
 
   // --- Index persistence ---
 
-  /** Max index file size to load (256MB). */
-  private static readonly MAX_INDEX_FILE_SIZE = 256 * 1024 * 1024;
+  /** Max index file size to load (256MB). Exposed for test overrides. */
+  static MAX_INDEX_FILE_SIZE = 256 * 1024 * 1024;
 
   /** Save index data to disk. Also updates cardinality for all indexed fields. */
   async saveIndexes(indexManager: IndexManager, textIndex?: TextIndex | null): Promise<void> {
@@ -467,6 +565,9 @@ export class DiskStore {
         continue;
       }
       if (content.length > DiskStore.MAX_INDEX_FILE_SIZE) {
+        if (key === "text") {
+          throw new IndexFileTooLargeError(filename, content.length, DiskStore.MAX_INDEX_FILE_SIZE);
+        }
         console.warn(`agentdb: skipping oversized index file ${filename} (${content.length} bytes)`);
         continue;
       }

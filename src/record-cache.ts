@@ -60,6 +60,11 @@ export class RecordCache<T = Record<string, unknown>> {
     return this.map.has(id);
   }
 
+  /** Get a record without promoting it to most-recently-used (does not update LRU order). */
+  peek(id: string): T | undefined {
+    return this.map.get(id);
+  }
+
   /** Clear all entries and reset stats. */
   clear(): void {
     this.map.clear();

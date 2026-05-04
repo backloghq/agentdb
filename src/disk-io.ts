@@ -14,6 +14,10 @@ import { parquetReadObjects, parquetMetadata } from "hyparquet";
 import type { FileMetaData } from "hyparquet";
 import type { StorageBackend } from "@backloghq/opslog";
 
+// Monotonic counter appended to filenames to prevent collision when two writes
+// happen within the same millisecond (e.g. rapid appendEmbeddings calls).
+let _fileSeq = 0;
+
 // --- Types ---
 
 export interface CompactionOptions {
@@ -356,7 +360,7 @@ export async function writeRecordStore(
   backend: StorageBackend,
   records: Iterable<[string, Record<string, unknown>]> | AsyncIterable<[string, Record<string, unknown>]>,
 ): Promise<{ path: string; offsetIndex: Map<string, RecordOffsetEntry> }> {
-  const filename = `records-${Date.now()}.jsonl`;
+  const filename = `records-${Date.now()}-${++_fileSeq}.jsonl`;
   const relativePath = `data/${filename}`;
 
   const offsetIndex = new Map<string, RecordOffsetEntry>();
@@ -422,34 +426,46 @@ export async function readRecordsByOffsets(
 }
 
 /**
- * Read all records from JSONL file sequentially.
- * Parses line-by-line from Buffer without converting the entire file to a string
- * (avoids V8 string limit at ~500MB).
+ * Stream records from a JSONL file one at a time.
+ * Parses the same way as readAllFromJsonl but yields each record instead of
+ * accumulating into a Map — working set is O(buffer) not O(buffer + Map).
+ */
+export async function* readJsonlStream(
+  backend: StorageBackend,
+  jsonlPath: string,
+): AsyncGenerator<[string, Record<string, unknown>]> {
+  const buf = await backend.readBlob(jsonlPath);
+  let start = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x0a) {
+      if (i > start) {
+        const line = buf.subarray(start, i).toString("utf-8");
+        const record = JSON.parse(line) as Record<string, unknown>;
+        yield [record._id as string, record];
+      }
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) {
+    const line = buf.subarray(start).toString("utf-8");
+    if (line.trim()) {
+      const record = JSON.parse(line) as Record<string, unknown>;
+      yield [record._id as string, record];
+    }
+  }
+}
+
+/**
+ * Read all records from a JSONL file into a Map.
+ * Delegates parsing to readJsonlStream; last write wins for duplicate IDs.
  */
 export async function readAllFromJsonl(
   backend: StorageBackend,
   jsonlPath: string,
 ): Promise<Map<string, Record<string, unknown>>> {
-  const buf = await backend.readBlob(jsonlPath);
   const records = new Map<string, Record<string, unknown>>();
-  let start = 0;
-  for (let i = 0; i < buf.length; i++) {
-    if (buf[i] === 0x0a) { // newline
-      if (i > start) {
-        const line = buf.subarray(start, i).toString("utf-8");
-        const record = JSON.parse(line) as Record<string, unknown>;
-        records.set(record._id as string, record);
-      }
-      start = i + 1;
-    }
-  }
-  // Handle last line without trailing newline
-  if (start < buf.length) {
-    const line = buf.subarray(start).toString("utf-8");
-    if (line.trim()) {
-      const record = JSON.parse(line) as Record<string, unknown>;
-      records.set(record._id as string, record);
-    }
+  for await (const [id, record] of readJsonlStream(backend, jsonlPath)) {
+    records.set(id, record);
   }
   return records;
 }

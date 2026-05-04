@@ -227,4 +227,44 @@ describe("mergePersistedSchemas", () => {
     // mergePersistedSchemas returns PersistedSchema, not MergeResult — no warnings property
     expect((result as Record<string, unknown>).warnings).toBeUndefined();
   });
+
+  it("bm25: overlay wins over base in mergePersistedSchemas", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", bm25: { k1: 1.5, b: 0.5 } },
+      { name: "t", bm25: { k1: 2.0 } },
+    );
+    // overlay bm25 fully replaces base bm25 (overlay object wins)
+    expect(result.bm25).toEqual({ k1: 2.0 });
+  });
+
+  it("bm25: base preserved when overlay has no bm25", () => {
+    const result = mergePersistedSchemas(
+      { name: "t", bm25: { k1: 1.5, b: 0.5 } },
+      { name: "t" },
+    );
+    expect(result.bm25).toEqual({ k1: 1.5, b: 0.5 });
+  });
+});
+
+describe("mergeSchemas — bm25 precedence", () => {
+  it("code bm25 wins over persisted bm25", () => {
+    const { persisted } = mergeSchemas(
+      { name: "t", bm25: { k1: 2.0, b: 0.9 } },
+      { name: "t", bm25: { k1: 1.2, b: 0.75 } },
+    );
+    expect(persisted.bm25).toEqual({ k1: 2.0, b: 0.9 });
+  });
+
+  it("persisted bm25 used as fallback when code has none", () => {
+    const { persisted } = mergeSchemas(
+      { name: "t" },
+      { name: "t", bm25: { k1: 1.5, b: 0.6 } },
+    );
+    expect(persisted.bm25).toEqual({ k1: 1.5, b: 0.6 });
+  });
+
+  it("bm25 absent from merged when neither side sets it", () => {
+    const { persisted } = mergeSchemas({ name: "t" }, { name: "t" });
+    expect(persisted.bm25).toBeUndefined();
+  });
 });

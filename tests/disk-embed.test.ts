@@ -1,0 +1,1037 @@
+import { describe, it, expect, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AgentDB } from "../src/agentdb.js";
+import { defineSchema } from "../src/schema.js";
+import type { EmbeddingProvider } from "../src/embeddings/types.js";
+import { extractTextFromRecord } from "../src/collection-helpers.js";
+
+async function makeTmpDir(): Promise<string> {
+  return mkdtemp(join(tmpdir(), "agentdb-diskembed-"));
+}
+
+// Deterministic hash-based provider — 32 dimensions, xorshift PRNG per text for well-separated vectors
+class HashProvider implements EmbeddingProvider {
+  readonly dimensions = 32;
+  readonly calls: string[][] = [];
+
+  async embed(texts: string[]): Promise<number[][]> {
+    this.calls.push(texts);
+    return texts.map((t) => {
+      // djb2 hash
+      let h = 5381;
+      for (let i = 0; i < t.length; i++) h = (Math.imul(h, 33) ^ t.charCodeAt(i)) >>> 0;
+      // Seed xorshift32 with h, generate independent dimensions
+      let s = h || 1;
+      const vec = Array.from({ length: this.dimensions }, () => {
+        s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+        return (s >>> 0) / 0x100000000 * 2 - 1;
+      });
+      const norm = Math.sqrt(vec.reduce((a, v) => a + v * v, 0)) || 1;
+      return vec.map((v) => v / norm);
+    });
+  }
+}
+
+describe("embedUnembedded — batching (#154)", () => {
+  it("600 records with batchSize 256 triggers exactly 3 provider calls", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const db = new AgentDB(dir, {
+      embeddings: { provider },
+    });
+    await db.init();
+
+    const schema = defineSchema({
+      name: "batch600",
+      fields: { title: { type: "string" } },
+    });
+    const col = await db.collection(schema);
+
+    for (let i = 0; i < 600; i++) {
+      await col.insert({ _id: `d${i}`, title: `document number ${i}` });
+    }
+
+    provider.calls.length = 0;
+    const count = await col.embedUnembedded();
+    expect(count).toBe(600);
+    // 256 + 256 + 88 = 3 batches
+    expect(provider.calls.length).toBe(3);
+    expect(provider.calls[0].length).toBe(256);
+    expect(provider.calls[1].length).toBe(256);
+    expect(provider.calls[2].length).toBe(88);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("second batch throws — first and third batches succeed, total embedded = 344", async () => {
+    const dir = await makeTmpDir();
+    let callCount = 0;
+    const flakyProvider: EmbeddingProvider = {
+      dimensions: 32,
+      async embed(texts: string[]): Promise<number[][]> {
+        callCount++;
+        if (callCount === 2) throw new Error("rate limit");
+        return texts.map((t) => {
+          let h = 5381;
+          for (let i = 0; i < t.length; i++) h = (Math.imul(h, 33) ^ t.charCodeAt(i)) >>> 0;
+          let s = h || 1;
+          const vec = Array.from({ length: 32 }, () => {
+            s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+            return (s >>> 0) / 0x100000000 * 2 - 1;
+          });
+          const norm = Math.sqrt(vec.reduce((a, v) => a + v * v, 0)) || 1;
+          return vec.map((v) => v / norm);
+        });
+      },
+    };
+
+    const db = new AgentDB(dir, { embeddings: { provider: flakyProvider } });
+    await db.init();
+
+    const schema = defineSchema({
+      name: "flaky600",
+      fields: { title: { type: "string" } },
+    });
+    const col = await db.collection(schema);
+    for (let i = 0; i < 600; i++) {
+      await col.insert({ _id: `d${i}`, title: `document number ${i}` });
+    }
+
+    // Second batch (256..511) throws; first (0..255) and third (512..599) succeed
+    const count = await col.embedUnembedded();
+    expect(count).toBe(344); // 256 + 88
+
+    // HNSW has 344 entries (first + third batches)
+    const result = await col.semanticSearch("document number 0", { limit: 5 });
+    expect(result.records.length).toBeGreaterThan(0);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("embeddingBatchSize: 100 triggers 6 provider calls for 600 records", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const db = new AgentDB(dir, { embeddings: { provider }, embeddingBatchSize: 100 });
+    await db.init();
+
+    const schema = defineSchema({
+      name: "batch100",
+      fields: { title: { type: "string" } },
+    });
+    const col = await db.collection(schema);
+    for (let i = 0; i < 600; i++) {
+      await col.insert({ _id: `d${i}`, title: `record ${i}` });
+    }
+
+    provider.calls.length = 0;
+    const count = await col.embedUnembedded();
+    expect(count).toBe(600);
+    expect(provider.calls.length).toBe(6);
+    for (const call of provider.calls) {
+      expect(call.length).toBe(100);
+    }
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("embedUnembedded — durable disk embedding (N > cacheSize) (#153 + #160)", () => {
+  it("1000 disk records with cacheSize=100 — all embeddings survive close/reopen", async () => {
+    const dir = await makeTmpDir();
+    const N = 1000;
+
+    const schema = defineSchema({
+      name: "durable",
+      fields: { title: { type: "string" } },
+    });
+
+    // Phase 1: insert without provider — compacts to disk without _embedding
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", cacheSize: N });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < N; i++) {
+        await col.insert({ _id: `d${i}`, title: `topic number ${i} unique content here` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reopen with provider + small cache (forces eviction)
+    const provider = new HashProvider();
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", cacheSize: 100, embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+
+      const count = await col.embedUnembedded();
+      expect(count).toBe(N);
+
+      // Idempotency: second call must find nothing to embed
+      const count2 = await col.embedUnembedded();
+      expect(count2).toBe(0);
+
+      await db.close();
+    }
+
+    // Phase 3: reopen — HNSW rebuilt from disk embeddings; semantic search must find records
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", cacheSize: 100, embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+
+      // Run 50 distinct queries — each targets a specific record title
+      let hits = 0;
+      const QUERIES = 50;
+      for (let i = 0; i < QUERIES; i++) {
+        const targetId = `d${i * 20}`; // spread evenly across 1000
+        const title = `topic number ${i * 20} unique content here`;
+        const result = await col.semanticSearch(title, { limit: 5 });
+        if (result.records.some((r) => r._id === targetId)) hits++;
+      }
+
+      // ≥95% of queries must return the expected record (HNSW recall)
+      expect(hits).toBeGreaterThanOrEqual(Math.floor(QUERIES * 0.95));
+
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("partial embed survives mid-run (durable per batch)", async () => {
+    const dir = await makeTmpDir();
+    const N = 300;
+
+    const schema = defineSchema({
+      name: "partial",
+      fields: { title: { type: "string" } },
+    });
+
+    // Insert without provider
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", cacheSize: N });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < N; i++) {
+        await col.insert({ _id: `p${i}`, title: `doc ${i}` });
+      }
+      await db.close();
+    }
+
+    // Embed with a provider that throws on batches > 1 (simulates abort after first batch)
+    let batchesDone = 0;
+    const partialProvider: EmbeddingProvider = {
+      dimensions: 32,
+      async embed(texts: string[]): Promise<number[][]> {
+        batchesDone++;
+        if (batchesDone > 1) throw new Error("abort");
+        return texts.map((t) => {
+          let h = 5381;
+          for (let i = 0; i < t.length; i++) h = (Math.imul(h, 33) ^ t.charCodeAt(i)) >>> 0;
+          let s = h || 1;
+          const vec = Array.from({ length: 32 }, () => {
+            s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+            return (s >>> 0) / 0x100000000 * 2 - 1;
+          });
+          const norm = Math.sqrt(vec.reduce((a, v) => a + v * v, 0)) || 1;
+          return vec.map((v) => v / norm);
+        });
+      },
+    };
+
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", cacheSize: 100, embeddings: { provider: partialProvider } });
+      await db.init();
+      const col = await db.collection(schema);
+      // embeddingBatchSize defaults to 256 — with 300 records: first batch (256) succeeds, second throws
+      const count = await col.embedUnembedded();
+      expect(count).toBe(256); // only first batch completed
+      await db.close();
+    }
+
+    // Reopen — 256 records have durable embeddings, 44 do not
+    const provider2 = new HashProvider();
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", cacheSize: 100, embeddings: { provider: provider2 } });
+      await db.init();
+      const col = await db.collection(defineSchema({ name: "partial", fields: { title: { type: "string" } } }));
+      // Second embedUnembedded: only the remaining 44 need embedding
+      const remaining = await col.embedUnembedded();
+      expect(remaining).toBe(44);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("disk-path mid-batch failure: batch 1 and 3 persist, batch 2 skipped (#178)", async () => {
+    const dir = await makeTmpDir();
+    const BATCH = 10;
+    const N = BATCH * 3; // 30 records → 3 batches
+
+    const schema = defineSchema({
+      name: "midbatch178",
+      fields: { title: { type: "string" } },
+    });
+
+    // Phase 1: insert without provider so records compact to disk with no _embedding
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", cacheSize: N });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < N; i++) {
+        await col.insert({ _id: `m${i}`, title: `item ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reopen with flaky provider — batch 2 throws; succeeding batches use HashProvider vectors
+    let diskCallCount = 0;
+    const baseProvider = new HashProvider();
+    const flakyProvider: EmbeddingProvider = {
+      dimensions: baseProvider.dimensions,
+      async embed(texts: string[]): Promise<number[][]> {
+        diskCallCount++;
+        if (diskCallCount === 2) throw new Error("rate limit");
+        return baseProvider.embed(texts);
+      },
+    };
+
+    {
+      const db = new AgentDB(dir, {
+        storageMode: "disk",
+        cacheSize: 100,
+        embeddingBatchSize: BATCH,
+        embeddings: { provider: flakyProvider },
+      });
+      await db.init();
+      const col = await db.collection(schema);
+      const count = await col.embedUnembedded();
+      // Batches 1 and 3 succeed (BATCH each); batch 2 is skipped
+      expect(count).toBe(BATCH * 2);
+      await db.close();
+    }
+
+    // Phase 3: reopen with working provider — only the BATCH skipped records need embedding
+    const provider2 = new HashProvider();
+    {
+      const db = new AgentDB(dir, {
+        storageMode: "disk",
+        cacheSize: 100,
+        embeddingBatchSize: BATCH,
+        embeddings: { provider: provider2 },
+      });
+      await db.init();
+      const col = await db.collection(defineSchema({ name: "midbatch178", fields: { title: { type: "string" } } }));
+      const remaining = await col.embedUnembedded();
+      // Only batch 2 records (BATCH of them) still lack embeddings
+      expect(remaining).toBe(BATCH);
+      // Now all are embedded — third call is idempotent
+      const zero = await col.embedUnembedded();
+      expect(zero).toBe(0);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("appendEmbeddings — _dirty flag (#165)", () => {
+  it("_dirty stays true after embedUnembedded so close() still compacts", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const schema = defineSchema({
+      name: "dirtycheck",
+      fields: { title: { type: "string" } },
+    });
+
+    // Phase 1: insert without provider — compacts to disk (dirty=false after compact)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 100; i++) {
+        await col.insert({ _id: `d${i}`, title: `title ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reopen, insert more (dirty=true), then embedUnembedded
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+
+      // Insert additional records — marks the store dirty
+      for (let i = 100; i < 120; i++) {
+        await col.insert({ _id: `d${i}`, title: `title ${i}` });
+      }
+
+      const ds = col.getDiskStore()!;
+      expect(ds.isDirty).toBe(true);
+
+      // embedUnembedded calls appendEmbeddings — must NOT clear _dirty
+      await col.embedUnembedded();
+      expect(ds.isDirty).toBe(true);
+
+      // close() sees dirty=true → compaction runs
+      const compactSpy = vi.spyOn(ds, "compact");
+      await db.close();
+      expect(compactSpy.mock.calls.length).toBeGreaterThan(0);
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("JSONL file proliferation — compaction threshold (#169)", () => {
+  it("JSONL files >= MERGE_JSONL_THRESHOLD triggers full merge on next compact()", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+
+    const schemaPlain = defineSchema({
+      name: "jsonlthresh",
+      fields: { title: { type: "string" } },
+    });
+
+    // Phase 1: insert without provider
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      for (let i = 0; i < 500; i++) {
+        await col.insert({ _id: `d${i}`, title: `doc ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: embed with small batch size (50) → 10 JSONL files from appendEmbeddings (> threshold of 8)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, embeddingBatchSize: 50 });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      await col.embedUnembedded();
+
+      const ds = col.getDiskStore()!;
+      // Confirm threshold crossed before close (10 files > MERGE_JSONL_THRESHOLD=8)
+      const meta = (ds as unknown as { compactionMeta: { jsonlFiles?: string[] } }).compactionMeta;
+      expect((meta?.jsonlFiles?.length ?? 0)).toBeGreaterThanOrEqual(8);
+
+      await db.close(); // dirty + JSONL threshold → full merge on compact
+    }
+
+    // Phase 3: reopen — full merge produced a single base JSONL (jsonlFiles list is empty)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      const ds = col.getDiskStore()!;
+      const meta = (ds as unknown as { compactionMeta: { jsonlFiles?: string[] } }).compactionMeta;
+      expect((meta?.jsonlFiles?.length ?? 0)).toBe(0);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("reembedAll (#166)", () => {
+  it("throws when no embedding provider is configured", async () => {
+    const dir = await makeTmpDir();
+    const db = new AgentDB(dir);
+    await db.init();
+    const col = await db.collection(defineSchema({ name: "noprov", fields: { title: { type: "string" } } }));
+    await expect(col.reembedAll()).rejects.toThrow("embedding provider");
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("re-embeds all WAL records including already-embedded ones", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const db = new AgentDB(dir, { embeddings: { provider } });
+    await db.init();
+    const schema = defineSchema({ name: "wal", fields: { title: { type: "string" } } });
+    const col = await db.collection(schema);
+
+    for (let i = 0; i < 5; i++) {
+      await col.insert({ _id: `d${i}`, title: `document ${i}` });
+    }
+    await col.embedUnembedded();
+    const callsBefore = provider.calls.length;
+
+    const result = await col.reembedAll();
+    expect(result.embedded).toBe(5);
+    expect(result.failed).toBe(0);
+    expect(result.errors).toHaveLength(0);
+    expect(provider.calls.length).toBeGreaterThan(callsBefore);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("semantic search works after reembedAll (HNSW rebuilt)", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const db = new AgentDB(dir, { embeddings: { provider } });
+    await db.init();
+    const schema = defineSchema({ name: "sem", fields: { title: { type: "string" } } });
+    const col = await db.collection(schema);
+
+    await col.insert({ _id: "alpha", title: "apples oranges" });
+    await col.insert({ _id: "beta", title: "clouds sky rain" });
+
+    await col.reembedAll();
+
+    const result = await col.semanticSearch("apples oranges");
+    expect(result.records.map((r) => r._id)).toContain("alpha");
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("re-embeds disk records (compacted Parquet) on reembedAll", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const schemaPlain = defineSchema({ name: "diskre", fields: { title: { type: "string" } } });
+    const schema = defineSchema({ name: "diskre", fields: { title: { type: "string" } } });
+
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 10; i++) {
+        await col.insert({ _id: `d${i}`, title: `document ${i}` });
+      }
+      await col.embedUnembedded();
+      await db.close();
+    }
+
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      provider.calls.length = 0;
+      const reembedResult = await col.reembedAll();
+      expect(reembedResult.embedded).toBe(10);
+      expect(reembedResult.failed).toBe(0);
+      expect(reembedResult.errors).toHaveLength(0);
+      expect(provider.calls.length).toBeGreaterThan(0);
+
+      const searchResult = await col.semanticSearch("document");
+      expect(searchResult.records.length).toBeGreaterThan(0);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("embedUnembedded — single-pass disk scan (#168)", () => {
+  it("multi-JSONL last-write-wins: records with _embedding in a later JSONL are skipped", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    const schemaPlain = defineSchema({ name: "lww", fields: { title: { type: "string" } } });
+
+    // Phase 1: 100 records, no provider — compact to Parquet without embeddings
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      for (let i = 0; i < 100; i++) {
+        await col.insert({ _id: `d${i}`, title: `document ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: embed all 100 with batchSize=50 — writes 2 JSONL files, then close
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, embeddingBatchSize: 50 });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      const count = await col.embedUnembedded();
+      expect(count).toBe(100);
+      await db.close();
+    }
+
+    // Phase 3: reopen — single-pass must see _embedding on all 100 and embed 0
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider } });
+      await db.init();
+      const col = await db.collection(schemaPlain);
+      provider.calls.length = 0;
+      const count = await col.embedUnembedded();
+      // All records already have embeddings from the appended JSONL files;
+      // single-pass pending.delete() must catch them all — nothing to embed.
+      expect(count).toBe(0);
+      expect(provider.calls.length).toBe(0);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("config knob unification (#170)", () => {
+  it("AgentDBOptions.embeddingBatchSize flows as db-wide default; CollectionOptions overrides it", async () => {
+    const dir = await makeTmpDir();
+    const provider = new HashProvider();
+    // db-wide default: 50 records per provider call
+    const db = new AgentDB(dir, { embeddings: { provider }, embeddingBatchSize: 50 });
+    await db.init();
+
+    // No schema embeddingBatchSize — should inherit db-wide 50
+    const schemaDefault = defineSchema({ name: "default-batch", fields: { title: { type: "string" } } });
+    const colDefault = await db.collection(schemaDefault);
+    for (let i = 0; i < 120; i++) {
+      await colDefault.insert({ _id: `d${i}`, title: `document ${i}` });
+    }
+    provider.calls.length = 0;
+    await colDefault.embedUnembedded();
+    // 120 records / 50 per call = 3 calls (50 + 50 + 20)
+    expect(provider.calls.length).toBe(3);
+    expect(provider.calls[0].length).toBe(50);
+    expect(provider.calls[2].length).toBe(20);
+
+    // CollectionOptions.embeddingBatchSize overrides the db-wide 50 → uses 100
+    const colOverride = await db.collection("override-batch", { embeddingBatchSize: 100 });
+    for (let i = 0; i < 120; i++) {
+      await colOverride.insert({ _id: `d${i}`, title: `document ${i}` });
+    }
+    provider.calls.length = 0;
+    await colOverride.embedUnembedded();
+    // 120 records / 100 per call = 2 calls (100 + 20)
+    expect(provider.calls.length).toBe(2);
+    expect(provider.calls[0].length).toBe(100);
+    expect(provider.calls[1].length).toBe(20);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("extractTextFromRecord — meta field exclusion (#173)", () => {
+  it("excludes _id from embedding text", () => {
+    const result = extractTextFromRecord({ _id: "abc-123", title: "hello" });
+    expect(result).toBe("hello");
+    expect(result).not.toContain("abc-123");
+  });
+
+  it("excludes _version from embedding text", () => {
+    const result = extractTextFromRecord({ _version: 5, title: "hello" });
+    expect(result).toBe("hello");
+  });
+
+  it("excludes _agent from embedding text", () => {
+    const result = extractTextFromRecord({ _agent: "agent-007", title: "hello" });
+    expect(result).toBe("hello");
+  });
+
+  it("excludes _reason from embedding text", () => {
+    const result = extractTextFromRecord({ _reason: "migration", title: "hello" });
+    expect(result).toBe("hello");
+  });
+
+  it("excludes _embedding from embedding text", () => {
+    const result = extractTextFromRecord({ _embedding: [0.1, 0.2], title: "hello" });
+    expect(result).toBe("hello");
+  });
+
+  it("excludes all meta fields simultaneously", () => {
+    const result = extractTextFromRecord({
+      _id: "x",
+      _version: 3,
+      _agent: "bot",
+      _reason: "seed",
+      _embedding: [0],
+      _expires: 9999999,
+      title: "world",
+      body: "content",
+    });
+    expect(result).toBe("world content");
+  });
+
+  it("includes non-underscore user fields", () => {
+    const result = extractTextFromRecord({ name: "Alice", tags: ["foo", "bar"], count: 1 });
+    expect(result).toBe("Alice foo bar");
+  });
+});
+
+describe("extractTextFromRecord — reserved-prefix policy (#183)", () => {
+  it("user fields with _ prefix are included (not reserved)", () => {
+    const result = extractTextFromRecord({ _internal_note: "draft text", title: "hello" });
+    expect(result).toContain("draft text");
+    expect(result).toContain("hello");
+  });
+
+  it("_legacy_id and _draft are included", () => {
+    const result = extractTextFromRecord({ _legacy_id: "old-123", _draft: "work in progress" });
+    expect(result).toContain("old-123");
+    expect(result).toContain("work in progress");
+  });
+
+  it("all META_FIELDS_FOR_EMBED members are still excluded", () => {
+    const result = extractTextFromRecord({
+      _id: "x",
+      _version: 3,
+      _agent: "bot",
+      _reason: "seed",
+      _embedding: [0],
+      _expires: 9999999,
+      _internal_note: "keep this",
+      title: "also keep",
+    });
+    expect(result).not.toContain("x");
+    expect(result).not.toContain("bot");
+    expect(result).not.toContain("seed");
+    expect(result).toContain("keep this");
+    expect(result).toContain("also keep");
+  });
+});
+
+describe("_id exclusion regression catcher (#174)", () => {
+  it("embedUnembedded and semanticSearch pass identical text for the same record content", async () => {
+    const dir = await makeTmpDir();
+    const allCalls: string[][] = [];
+
+    const recordingProvider: EmbeddingProvider = {
+      dimensions: 4,
+      async embed(texts: string[]): Promise<number[][]> {
+        allCalls.push([...texts]);
+        return texts.map(() => [1, 0, 0, 0]);
+      },
+    };
+
+    const db = new AgentDB(dir, { embeddings: { provider: recordingProvider } });
+    await db.init();
+
+    const schema = defineSchema({
+      name: "reg174",
+      fields: { title: { type: "string" }, body: { type: "string" } },
+    });
+    const col = await db.collection(schema);
+
+    // Insert with agent/reason so _agent/_reason are stored on the record
+    await col.insert(
+      { _id: "r1", title: "unique phrase", body: "some content" },
+      { agent: "test-agent", reason: "seeding" },
+    );
+
+    // Call 0: embedUnembedded embeds the record
+    await col.embedUnembedded();
+    expect(allCalls.length).toBe(1);
+    const [embeddedText] = allCalls[0];
+
+    // No meta fields must leak into the embedded text
+    expect(embeddedText).not.toContain("r1");
+    expect(embeddedText).not.toContain("test-agent");
+    expect(embeddedText).not.toContain("seeding");
+
+    // Call 1: semanticSearch embeds the raw query string
+    const queryText = "unique phrase some content";
+    await col.semanticSearch(queryText);
+    expect(allCalls.length).toBe(2);
+    const [searchText] = allCalls[1];
+
+    // The text used during embedUnembedded must match what you'd query with
+    expect(embeddedText).toBe(searchText);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("reembedAll — mid-flight failure semantics (#188)", () => {
+  it("successful batches are persisted; failed batch records are tracked in errors; unembedded remain retrievable", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "reembed188", fields: { title: { type: "string" } } });
+
+    // Phase 1: insert 30 records, compact to disk
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 30; i++) {
+        await col.insert({ _id: `d${i}`, title: `document ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reembedAll with batch=10; provider throws on batch index 1 (second batch)
+    const baseProvider = new HashProvider();
+    let callCount = 0;
+    const flakyProvider: EmbeddingProvider = {
+      dimensions: 32,
+      async embed(texts: string[]): Promise<number[][]> {
+        callCount++;
+        if (callCount === 2) throw new Error("provider timeout");
+        return baseProvider.embed(texts);
+      },
+    };
+
+    {
+      const db = new AgentDB(dir, {
+        storageMode: "disk",
+        embeddings: { provider: flakyProvider },
+        embeddingBatchSize: 10,
+      });
+      await db.init();
+      const col = await db.collection(schema);
+      const result = await col.reembedAll();
+
+      // 30 records / 10 per batch = 3 batches; batch 2 fails
+      expect(result.embedded).toBe(20);
+      expect(result.failed).toBe(10);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].recordIds).toHaveLength(10);
+      expect(result.errors[0].reason).toContain("provider timeout");
+
+      await db.close();
+    }
+
+    // Phase 3: reopen with working provider — only the 10 failed records need reembedding
+    {
+      const db = new AgentDB(dir, {
+        storageMode: "disk",
+        embeddings: { provider: baseProvider },
+        embeddingBatchSize: 10,
+      });
+      await db.init();
+      const col = await db.collection(schema);
+      const result2 = await col.reembedAll();
+      // reembedAll always re-embeds everything (force path)
+      expect(result2.embedded).toBe(30);
+      expect(result2.failed).toBe(0);
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("reembedAll — 3+ JSONL mixed states (#191)", () => {
+  it("same id across 3+ JSONL files: no-embed → with-embed → no-embed uses last-write-wins", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "reembed191", fields: { title: { type: "string" } } });
+    const provider = new HashProvider();
+
+    // Phase 1: insert 5 records, compact to disk (no embeddings)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 5; i++) {
+        await col.insert({ _id: `d${i}`, title: `doc ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: embed all → writes embedding JSONL (records now have _embedding)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, embeddingBatchSize: 5 });
+      await db.init();
+      const col = await db.collection(schema);
+      const count = await col.embedUnembedded();
+      expect(count).toBe(5);
+      await db.close();
+    }
+
+    // Phase 3: update all records via insert (stores without _embedding in WAL),
+    // then close — compaction merges WAL (no _embedding) with disk; latest wins.
+    // Reopen and check reembedAll re-embeds 5 records.
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, embeddingBatchSize: 5 });
+      await db.init();
+      const col = await db.collection(schema);
+
+      // Upsert with updated title — these WAL records have no _embedding
+      for (let i = 0; i < 5; i++) {
+        await col.upsert(`d${i}`, { title: `updated doc ${i}` });
+      }
+
+      provider.calls.length = 0;
+      const reembedResult = await col.reembedAll();
+      // reembedAll force-reembeds WAL records (no _embedding check, all re-done)
+      expect(reembedResult.embedded).toBe(5);
+      expect(reembedResult.failed).toBe(0);
+      expect(provider.calls.length).toBeGreaterThan(0);
+
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("extractTextFromRecord — user _-prefixed field policy (#190)", () => {
+  it("user fields starting with _ are included (not treated as reserved)", () => {
+    const result = extractTextFromRecord({ _custom_field: "custom value", title: "normal" });
+    expect(result).toContain("custom value");
+    expect(result).toContain("normal");
+  });
+
+  it("only the 6 explicit META_FIELDS_FOR_EMBED members are excluded", () => {
+    const result = extractTextFromRecord({
+      _id: "excluded",
+      _version: 1,
+      _agent: "excluded-agent",
+      _reason: "excluded-reason",
+      _expires: 999,
+      _embedding: [0],
+      _user_tag: "included",
+      _internal_ref: "also-included",
+    });
+    expect(result).not.toContain("excluded");
+    expect(result).not.toContain("excluded-agent");
+    expect(result).not.toContain("excluded-reason");
+    expect(result).toContain("included");
+    expect(result).toContain("also-included");
+  });
+});
+
+describe("shouldCompact + compactInPlace — reembedAll integration spy (#193)", () => {
+  it("reembedAll calls compactInPlace when JSONL file count crosses threshold", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "spy193", fields: { title: { type: "string" } } });
+    const provider = new HashProvider();
+
+    // Phase 1: insert 80 records, compact to disk (no embeddings)
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 80; i++) {
+        await col.insert({ _id: `d${i}`, title: `document ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reembedAll with batchSize=10 → 8 flushes → at least one compactInPlace
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider }, embeddingBatchSize: 10 });
+      await db.init();
+      const col = await db.collection(schema);
+      const ds = col.getDiskStore()!;
+      const spyCompact = vi.spyOn(ds, "compactInPlace");
+
+      const result = await col.reembedAll();
+      expect(result.embedded).toBe(80);
+      expect(result.failed).toBe(0);
+      // 8 batches of 10 → MERGE_JSONL_THRESHOLD=8, so compactInPlace must fire at least once
+      expect(spyCompact.mock.calls.length).toBeGreaterThanOrEqual(1);
+
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("reembedAll — batchIndex and WAL-path failure (#194)", () => {
+  it("error.batchIndex is correct and non-zero for disk batch failures", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "batchidx194", fields: { title: { type: "string" } } });
+
+    // Phase 1: insert 30 disk records
+    {
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 30; i++) {
+        await col.insert({ _id: `d${i}`, title: `doc ${i}` });
+      }
+      await db.close();
+    }
+
+    // Phase 2: reembedAll — provider fails on call 2 (disk batch index 1)
+    const base = new HashProvider();
+    let calls = 0;
+    const flaky: EmbeddingProvider = {
+      dimensions: 32,
+      async embed(texts: string[]): Promise<number[][]> {
+        calls++;
+        if (calls === 2) throw new Error("timeout");
+        return base.embed(texts);
+      },
+    };
+
+    {
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider: flaky }, embeddingBatchSize: 10 });
+      await db.init();
+      const col = await db.collection(schema);
+      const result = await col.reembedAll();
+
+      expect(result.errors).toHaveLength(1);
+      // Disk batches start after WAL batches; 0 WAL records → WAL contributes 0 batches
+      // First disk batch is index 0, second (failed) is index 1
+      expect(result.errors[0].batchIndex).toBe(1);
+      expect(result.errors[0].recordIds).toHaveLength(10);
+      expect(result.errors[0].reason).toBe("timeout");
+
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("WAL-batch failure produces batchIndex 0 and disk batches continue with offset", async () => {
+    const dir = await makeTmpDir();
+    const schema = defineSchema({ name: "walbatch194", fields: { title: { type: "string" } } });
+    const base = new HashProvider();
+
+    // Insert 20 WAL records (no disk compaction) and 20 disk records
+    {
+      // Disk records first
+      const db = new AgentDB(dir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 20; i++) {
+        await col.insert({ _id: `disk${i}`, title: `disk doc ${i}` });
+      }
+      await db.close();
+    }
+
+    {
+      // Reopen and add WAL records (not yet compacted to disk) — these go into in-memory store
+      // WAL records will be processed first in reembedAll; fail on call 1 (first WAL batch)
+      let calls = 0;
+      const flaky: EmbeddingProvider = {
+        dimensions: 32,
+        async embed(texts: string[]): Promise<number[][]> {
+          calls++;
+          if (calls === 1) throw new Error("wal-fail");
+          return base.embed(texts);
+        },
+      };
+
+      const db = new AgentDB(dir, { storageMode: "disk", embeddings: { provider: flaky }, embeddingBatchSize: 20 });
+      await db.init();
+      const col = await db.collection(schema);
+
+      // Insert WAL records (not yet flushed to disk)
+      for (let i = 0; i < 20; i++) {
+        await col.insert({ _id: `wal${i}`, title: `wal doc ${i}` });
+      }
+
+      const result = await col.reembedAll();
+
+      // WAL batch 0 fails; disk batch 0 succeeds (batchIndex = ceil(20/20) = 1)
+      expect(result.failed).toBe(20);
+      expect(result.embedded).toBe(20);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].batchIndex).toBe(0);
+      expect(result.errors[0].reason).toBe("wal-fail");
+      // WAL record IDs in the failed batch
+      expect(result.errors[0].recordIds.every((id: string) => id.startsWith("wal"))).toBe(true);
+
+      await db.close();
+    }
+
+    await rm(dir, { recursive: true, force: true });
+  });
+});

@@ -5,6 +5,7 @@ import type { DiskStore } from "./disk-store.js";
 import { getNestedValue } from "./filter.js";
 // parseCompactFilter used by IndexManager (imported there directly)
 import { TextIndex } from "./text-index.js";
+import { rrf } from "./rrf.js";
 import { ViewManager } from "./view.js";
 import type { ViewDefinition } from "./view.js";
 import { EventEmitter } from "node:events";
@@ -63,6 +64,16 @@ export interface FindResult {
   estimatedTokens?: number;
 }
 
+/** Structured result returned by {@link Collection.reembedAll}. */
+export interface ReembedResult {
+  /** Number of records successfully re-embedded. */
+  embedded: number;
+  /** Number of records whose embedding failed (provider rejected, etc.). */
+  failed: number;
+  /** Per-batch error details. Empty when `failed === 0`. */
+  errors: Array<{ batchIndex: number; recordIds: string[]; reason: string }>;
+}
+
 /** Options for configuring collection middleware. */
 export interface CollectionOptions {
   /** Validation function — called before every insert/update/upsert. Throw to reject. */
@@ -77,6 +88,20 @@ export interface CollectionOptions {
   tagField?: string;
   /** Storage mode override for this collection. */
   storageMode?: "memory" | "disk" | "auto";
+  /** Field names to restrict BM25/text indexing to. When empty, all string fields are indexed (fallback). */
+  searchableFields?: string[];
+  /** BM25 k1 saturation parameter (default: 1.2). */
+  bm25K1?: number;
+  /** BM25 b length normalization parameter (default: 0.75). */
+  bm25B?: number;
+  /** Max concurrent disk fetches in materializeCandidates for non-FS backends (default: 16). Has no effect on local FS. */
+  diskConcurrency?: number;
+  /** Number of records per embedding provider call in embedUnembedded (default: 256). */
+  embeddingBatchSize?: number;
+  /** LRU cache size for disk mode (max records, default: 1000). Overrides AgentDBOptions.cacheSize for this collection. */
+  cacheSize?: number;
+  /** Parquet row group size for disk mode (default: 5000). Overrides AgentDBOptions.rowGroupSize for this collection. */
+  rowGroupSize?: number;
 }
 
 /** Change event emitted after mutations. */
@@ -107,9 +132,50 @@ export class Collection {
   private indexes = new IndexManager();
   private _hasTTL = false; // Tracks if any record has been inserted with TTL
   private _diskStore: DiskStore | null = null;
+  // True once ensureIndexesLoaded has run and the WAL store has been replayed into textIdx.
+  // Prevents ensureIndexesLoaded from overwriting current-session inserts.
+  private _textIdxLoaded = false;
 
   /** Set disk store for disk-backed mode. Called by AgentDB during open. */
   setDiskStore(ds: DiskStore): void { this._diskStore = ds; }
+
+  /**
+   * Ensure disk indexes are loaded, then replay any current-session WAL entries into
+   * the text index. This handles the case where the user inserted records before the
+   * first search call triggers lazy index loading — without replay, loadFromJSON would
+   * overwrite those in-memory inserts.
+   */
+  private async ensureDiskIndexesLoaded(): Promise<void> {
+    if (!this._diskStore) return;
+    if (this._textIdxLoaded) return;
+    await this._diskStore.ensureIndexesLoaded();
+    // Replay in-memory (WAL) entries into text index — these may predate this load call
+    if (this.textIdx) {
+      for (const [id, record] of this.store.entries()) {
+        if (!isExpired(record)) {
+          const clean = stripMeta(record);
+          this.textIdx.add(id, this.textRecord(clean));
+        }
+      }
+    }
+    this._textIdxLoaded = true;
+  }
+
+  /** Rebuild the HNSW index from all embeddings stored in the disk store. Called by AgentDB after setDiskStore when an embedding provider is configured. */
+  async rebuildHnswFromDisk(): Promise<void> {
+    if (!this._diskStore || !this.hnswIdx) return;
+    for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+      if (isExpired(record as StoredRecord)) continue;
+      const stored = (record as StoredRecord)[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
+      if (!stored) continue;
+      const q = deserializeQuantized(stored);
+      const vec = Array.from(q.data).map((v) => v / q.scale);
+      if (this.hnswIdx.dims === 0) {
+        this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+      }
+      this.hnswIdx.add(id, vec);
+    }
+  }
 
   /** Get disk store (if in disk mode). */
   getDiskStore(): DiskStore | null { return this._diskStore; }
@@ -119,6 +185,9 @@ export class Collection {
 
   /** Get the text index (for persistence). */
   getTextIndex(): TextIndex | null { return this.textIdx; }
+
+  /** Field names restricted to BM25/text indexing. Empty means all-strings fallback. */
+  searchableFields(): string[] { return this.opts.searchableFields ?? []; }
 
   /** Get the storage backend (for DiskStore I/O). */
   getBackend(): import("@backloghq/opslog").StorageBackend { return this.backend; }
@@ -130,7 +199,7 @@ export class Collection {
     this.name = name;
     this.store = store;
     this.opts = opts ?? {};
-    if (this.opts.textSearch) this.textIdx = new TextIndex();
+    if (this.opts.textSearch) this.textIdx = new TextIndex({ k1: this.opts.bm25K1, b: this.opts.bm25B });
   }
 
   /** Check optimistic lock and throw on version mismatch. */
@@ -182,12 +251,30 @@ export class Collection {
     this.indexes.updateIndexes(id, oldRecord, newRecord);
   }
 
+  /** Project a clean record to only searchable fields, or all non-meta fields when fallback is active. */
+  private textRecord(record: Record<string, unknown>): Record<string, unknown> {
+    const fields = this.opts.searchableFields;
+    if (!fields || fields.length === 0) {
+      // Fallback: index all fields except _id and _version to avoid UUIDs and counters in BM25
+      const result: Record<string, unknown> = {};
+      for (const key of Object.keys(record)) {
+        if (key !== "_id" && key !== "_version") result[key] = record[key];
+      }
+      return result;
+    }
+    const projected: Record<string, unknown> = {};
+    for (const f of fields) {
+      if (f in record) projected[f] = record[f];
+    }
+    return projected;
+  }
+
   /** Rebuild the full text index from current store contents. */
   private rebuildTextIndex(): void {
     if (!this.textIdx) return;
     this.textIdx.clear();
     for (const [id, record] of this.store.entries()) {
-      this.textIdx.add(id, stripMeta(record));
+      this.textIdx.add(id, this.textRecord(stripMeta(record)));
     }
   }
 
@@ -205,7 +292,7 @@ export class Collection {
     const cleanRecords = this.indexes.incrementalUpdate(affectedIds, (id) => this.store.get(id));
     if (this.textIdx) {
       for (const [id, clean] of cleanRecords) {
-        if (clean) this.textIdx.add(id, clean);
+        if (clean) this.textIdx.add(id, this.textRecord(clean));
         else this.textIdx.remove(id);
       }
     }
@@ -287,6 +374,14 @@ export class Collection {
     this.hnswIdx = new HnswIndex({ dimensions: provider.dimensions });
   }
 
+  /** Lazily initialize HNSW to the real vector size on the first embed call.
+   * Needed when the provider has dimensions=0 at construction (e.g. Ollama auto-detect). */
+  private ensureHnswDims(vec: number[]): void {
+    if (this.hnswIdx && this.hnswIdx.dims === 0) {
+      this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+    }
+  }
+
   /** Open the underlying opslog store at the given directory. */
   async open(dir: string, options?: { checkpointThreshold?: number; checkpointOnClose?: boolean; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean; skipLoad?: boolean }): Promise<void> {
     await this.store.open(dir, options);
@@ -304,7 +399,7 @@ export class Collection {
     // Single pass: detect TTL, build text index, load HNSW embeddings
     for (const [id, record] of this.store.entries()) {
       if (record[META_EXPIRES]) this._hasTTL = true;
-      if (this.textIdx) this.textIdx.add(id, stripMeta(record));
+      if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(record)));
       if (!isExpired(record)) {
         const stored = record[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
         if (stored) {
@@ -339,7 +434,7 @@ export class Collection {
     this.stampVersion(stored, id);
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
-    if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("insert", [id], opts?.agent);
     return id;
@@ -370,7 +465,7 @@ export class Collection {
     });
     if (this.textIdx) {
       for (const { id, stored } of prepared) {
-        this.textIdx.add(id, stripMeta(stored));
+        this.textIdx.add(id, this.textRecord(stripMeta(stored)));
       }
     }
     for (const { id, stored } of prepared) {
@@ -418,6 +513,28 @@ export class Collection {
     const result: Record<string, unknown>[] = [];
     for (const [, record] of this.store.entries()) {
       if (!isExpired(record)) result.push(stripMeta(record));
+    }
+    return result;
+  }
+
+  /** @internal Return all non-expired records preserving internal meta fields (e.g. _embedding). Intended for compaction only — do not call from user-facing code. */
+  async findAllForCompaction(): Promise<[string, StoredRecord][]> {
+    if (this._diskStore?.hasParquetData) {
+      const seen = new Set<string>();
+      const result: [string, StoredRecord][] = [];
+      for (const [id, record] of this.store.entries()) {
+        if (!isExpired(record)) { result.push([id, record]); seen.add(id); }
+      }
+      // Do NOT use skipCache:true here — LRU cache may have updated embeddings that haven't been
+      // flushed to JSONL yet (written via cacheWrite in embedUnembedded for disk-origin records)
+      for await (const [id, record] of this._diskStore.entries()) {
+        if (!seen.has(id) && !isExpired(record as StoredRecord)) result.push([id, record as StoredRecord]);
+      }
+      return result;
+    }
+    const result: [string, StoredRecord][] = [];
+    for (const [id, record] of this.store.entries()) {
+      if (!isExpired(record)) result.push([id, record]);
     }
     return result;
   }
@@ -772,7 +889,7 @@ export class Collection {
     // Incremental re-index for text and B-tree (only affected records)
     if (this.textIdx) {
       for (const { id, updated } of updates) {
-        this.textIdx.add(id, stripMeta(updated));
+        this.textIdx.add(id, this.textRecord(stripMeta(updated)));
       }
     }
     for (const { id, old, updated } of updates) {
@@ -819,7 +936,7 @@ export class Collection {
     this.validateRecord(stored);
     this.stampVersion(stored, id);
     await this.store.set(id, stored);
-    if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("upsert", [id], opts?.agent);
     return { id, action: existing ? "updated" : "inserted" };
@@ -857,7 +974,7 @@ export class Collection {
     });
 
     for (const { id, stored, oldRecord, existing } of prepared) {
-      if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+      if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
       this.updateBTreeIndexes(id, oldRecord, stored);
       results.push({ id, action: existing ? "updated" : "inserted" });
     }
@@ -1096,7 +1213,7 @@ export class Collection {
     if (!this.textIdx) {
       throw new Error("Full-text search not enabled. Set textSearch: true in collection options.");
     }
-    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
+    await this.ensureDiskIndexesLoaded();
     const matchIds = this.textIdx.search(query);
     const allAccessor = this.allCleanRecords();
     const limit = opts?.limit ?? 50;
@@ -1129,6 +1246,175 @@ export class Collection {
       total,
       truncated: total > offset + limit,
     };
+  }
+
+  /**
+   * Hydrate a scored candidate list into clean records.
+   * Disk-mode aware: fetches from _diskStore in parallel, falls back to in-memory store.
+   * Applies expiry, attribute filter, computed fields, and optional summary projection.
+   */
+  private async materializeCandidates(
+    candidates: Array<{ id: string; score: number }>,
+    opts: { limit: number; filter?: Filter; summary?: boolean },
+  ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
+    const predicate = opts.filter ? this.resolve(opts.filter) : null;
+    const allAccessor = this.allCleanRecords();
+
+    let hydrated: Array<StoredRecord | undefined>;
+    if (this._diskStore) {
+      const ds = this._diskStore;
+      // WAL fallback: records inserted in the current session live in this.store (not yet
+      // compacted to disk). Disk-first preserves read-your-writes semantics for updated records.
+      const walFallback = (id: string) => this.store.get(id);
+      if (ds.isLocalFs()) {
+        hydrated = await Promise.all(
+          candidates.map(async (c) => ((await ds.get(c.id)) ?? walFallback(c.id)) as StoredRecord | undefined),
+        );
+      } else {
+        const cap = this.opts.diskConcurrency ?? 16;
+        hydrated = new Array(candidates.length);
+        let next = 0;
+        const workers = Array.from({ length: Math.min(cap, candidates.length) }, async () => {
+          while (next < candidates.length) {
+            const i = next++;
+            (hydrated as Array<StoredRecord | undefined>)[i] = ((await ds.get(candidates[i].id)) ?? walFallback(candidates[i].id)) as StoredRecord | undefined;
+          }
+        });
+        await Promise.all(workers);
+      }
+    } else {
+      hydrated = candidates.map((c) => this.store.get(c.id));
+    }
+
+    const records: Record<string, unknown>[] = [];
+    const scores: number[] = [];
+    for (let i = 0; i < candidates.length; i++) {
+      if (records.length >= opts.limit) break;
+      const record = hydrated[i];
+      if (!record || isExpired(record)) continue;
+      const clean = stripMeta(record);
+      if (predicate && !predicate(clean)) continue;
+      const withComputed = this.applyComputed(clean, allAccessor);
+      records.push(opts.summary ? summarize(withComputed) : withComputed);
+      scores.push(candidates[i].score);
+    }
+
+    return { records, scores };
+  }
+
+  /**
+   * BM25-ranked full-text search. Returns records sorted by BM25 score descending.
+   *
+   * Indexing is restricted to schema-declared `searchable` fields when the collection
+   * was opened with a schema; falls back to all string fields otherwise.
+   *
+   * `candidateLimit` controls how many BM25 candidates are fetched before filter pruning.
+   * When a `filter` is selective, the final result set may be smaller than `limit` — the
+   * method does not retry beyond `candidateLimit`. Hybrid search callers should compensate.
+   *
+   * Requires textSearch: true in collection options.
+   */
+  async bm25Search(
+    query: string,
+    opts?: {
+      limit?: number;
+      filter?: Filter;
+      summary?: boolean;
+      candidateLimit?: number;
+    },
+  ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
+    if (!this.textIdx) {
+      throw new Error("BM25 search not enabled. Set textSearch: true in collection options.");
+    }
+    await this.ensureDiskIndexesLoaded();
+
+    if (!query || !query.trim()) return { records: [], scores: [] };
+
+    const limit = opts?.limit ?? 10;
+    const candidateLimit = opts?.candidateLimit ?? Math.max(limit * 4, 50);
+
+    const candidates = this.textIdx.searchScored(query, { limit: candidateLimit });
+    if (candidates.length === 0) return { records: [], scores: [] };
+
+    return this.materializeCandidates(candidates, { limit, filter: opts?.filter, summary: opts?.summary });
+  }
+
+  /**
+   * Hybrid search: fuses BM25 lexical and semantic vector results via RRF.
+   *
+   * Runs both arms in parallel and merges with Reciprocal Rank Fusion. Degrades
+   * gracefully: if the embedding provider is not configured only BM25 is used;
+   * if text search is not enabled only semantic is used. Throws when both are
+   * unavailable.
+   *
+   * Returned scores are RRF scores (not raw BM25 or cosine values).
+   */
+  async hybridSearch(
+    query: string,
+    opts?: {
+      limit?: number;
+      filter?: Filter;
+      k?: number;
+      summary?: boolean;
+      candidateLimit?: number;
+    },
+  ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
+    if (!query || !query.trim()) return { records: [], scores: [] };
+
+    const hasBm25 = !!this.textIdx;
+    const hasSemantic = !!(this.embeddingProvider && this.hnswIdx);
+
+    if (!hasBm25 && !hasSemantic) {
+      throw new Error("hybridSearch requires either an embedding provider or a text index");
+    }
+
+    const limit = opts?.limit ?? 10;
+    const candidateLimit = opts?.candidateLimit ?? Math.max(limit * 4, 50);
+    const k = opts?.k ?? 60;
+    const armOpts = { limit: candidateLimit, candidateLimit, filter: opts?.filter, summary: opts?.summary };
+
+    const empty = (): { records: Record<string, unknown>[]; scores: number[] } => ({ records: [], scores: [] });
+    // Run available arms in parallel; catch runtime failures so one arm degrading doesn't reject the whole call
+    const [bm25Result, semResult] = await Promise.all([
+      hasBm25 ? this.bm25Search(query, armOpts).catch(empty) : Promise.resolve(empty()),
+      hasSemantic ? this.semanticSearch(query, armOpts).catch(empty) : Promise.resolve(empty()),
+    ]);
+
+    // Build id lists preserving arm order; build record map from both arms
+    const recordMap = new Map<string, Record<string, unknown>>();
+    const lexList: Array<{ id: string }> = [];
+    const semList: Array<{ id: string }> = [];
+
+    for (const rec of bm25Result.records) {
+      const id = rec._id as string;
+      lexList.push({ id });
+      recordMap.set(id, rec);
+    }
+    for (const rec of semResult.records) {
+      const id = rec._id as string;
+      semList.push({ id });
+      if (!recordMap.has(id)) recordMap.set(id, rec);
+    }
+
+    // Build the lists to fuse — skip empty arms so RRF isn't padded with zero-length lists
+    const listsToFuse: Array<Array<{ id: string }>> = [];
+    if (lexList.length > 0) listsToFuse.push(lexList);
+    if (semList.length > 0) listsToFuse.push(semList);
+
+    if (listsToFuse.length === 0) return { records: [], scores: [] };
+
+    const fused = rrf(listsToFuse, { k, limit });
+
+    const records: Record<string, unknown>[] = [];
+    const scores: number[] = [];
+    for (const { id, score } of fused) {
+      const rec = recordMap.get(id);
+      if (!rec) continue;
+      records.push(rec);
+      scores.push(score);
+    }
+
+    return { records, scores };
   }
 
   // --- Named views ---
@@ -1189,8 +1475,10 @@ export class Collection {
    */
   async semanticSearch(
     query: string,
-    opts?: { filter?: Filter; limit?: number; summary?: boolean },
+    opts?: { filter?: Filter; limit?: number; summary?: boolean; candidateLimit?: number },
   ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
+    if (!query || !query.trim()) return { records: [], scores: [] };
+
     if (!this.embeddingProvider || !this.hnswIdx) {
       throw new Error("Semantic search not available. Configure an embedding provider on AgentDB.");
     }
@@ -1203,66 +1491,237 @@ export class Collection {
 
     // Search HNSW
     const limit = opts?.limit ?? 10;
-    const candidates = this.hnswIdx.search(queryVec, limit * 3); // over-fetch for post-filter
+    const candidateLimit = opts?.candidateLimit ?? Math.max(limit * 4, 50);
+    const candidates = this.hnswIdx.search(queryVec, candidateLimit);
 
-    // Apply attribute filter if provided
-    const predicate = opts?.filter ? this.resolve(opts.filter) : () => true;
-    const allAccessor = this.allCleanRecords();
-
-    const records: Record<string, unknown>[] = [];
-    const scores: number[] = [];
-    for (const { id, score } of candidates) {
-      if (records.length >= limit) break;
-      const record = this.store.get(id);
-      if (!record || isExpired(record)) continue;
-      const clean = stripMeta(record);
-      if (!predicate(clean)) continue;
-      const withComputed = this.applyComputed(clean, allAccessor);
-      records.push(opts?.summary ? summarize(withComputed) : withComputed);
-      scores.push(score);
-    }
-
-    return { records, scores };
+    return this.materializeCandidates(candidates, { limit, filter: opts?.filter, summary: opts?.summary });
   }
 
   /**
    * Embed all records that don't have embeddings yet.
    * Called lazily on first semantic search.
+   * In disk mode, also iterates Parquet/JSONL records and writes embeddings back to disk.
+   *
+   * **Memory:** disk path buffers full record references for all unembedded records before
+   * batching (~1 KB/record; expect ~1 GB at 1M unembedded). For very large lazy-embedding
+   * runs, prefer {@link reembedAll} which streams and flushes mid-run with bounded memory.
    */
   async embedUnembedded(): Promise<number> {
     if (!this.embeddingProvider || !this.hnswIdx) return 0;
 
-    const toEmbed: { id: string; text: string; record: StoredRecord }[] = [];
+    const batchSize = this.opts.embeddingBatchSize ?? 256;
+    let embedded = 0;
+
+    // --- WAL (in-memory) records ---
+    const walSeen = new Set<string>();
+    const walToEmbed: { id: string; text: string; record: StoredRecord }[] = [];
     for (const [id, record] of this.store.entries()) {
       if (isExpired(record)) continue;
-      if (record[META_EMBEDDING]) continue; // already embedded
+      walSeen.add(id);
+      if (record[META_EMBEDDING]) continue;
       const clean = stripMeta(record);
       const text = extractTextFromRecord(clean);
-      if (text) toEmbed.push({ id, text, record });
+      if (text) walToEmbed.push({ id, text, record });
     }
 
-    if (toEmbed.length === 0) return 0;
-
-    // Batch embed
-    const texts = toEmbed.map((t) => t.text);
-    const vectors = await this.embeddingProvider.embed(texts);
-
-    // Store embeddings and index
-    await this.store.batch(() => {
-      for (let i = 0; i < toEmbed.length; i++) {
-        const { id, record } = toEmbed[i];
-        const q = quantize(vectors[i]);
-        const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
-        this.store.set(id, updated);
+    for (let i = 0; i < walToEmbed.length; i += batchSize) {
+      const batch = walToEmbed.slice(i, i + batchSize);
+      let vectors: number[][];
+      try {
+        vectors = await this.embeddingProvider.embed(batch.map((b) => b.text));
+      } catch (err) {
+        console.warn(`agentdb: embedUnembedded WAL batch ${Math.floor(i / batchSize)} failed: ${err}`);
+        continue;
       }
-    });
-
-    // Add to HNSW index
-    for (let i = 0; i < toEmbed.length; i++) {
-      this.hnswIdx.add(toEmbed[i].id, vectors[i]);
+      await this.store.batch(() => {
+        for (let j = 0; j < batch.length; j++) {
+          const { id, record } = batch[j];
+          const q = quantize(vectors[j]);
+          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
+          this.store.set(id, updated);
+        }
+      });
+      if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
+      for (let j = 0; j < batch.length; j++) {
+        this.hnswIdx.add(batch[j].id, vectors[j]);
+      }
+      embedded += batch.length;
     }
 
-    return toEmbed.length;
+    // --- Disk records (compacted Parquet/JSONL) ---
+    if (this._diskStore?.hasParquetData) {
+      // Single-pass: stream entries oldest→newest (last file wins for each id).
+      // pending accumulates the final decision for each id; a later entry with _embedding
+      // (written by a prior embedUnembedded) removes the id so we don't re-embed it.
+      // Memory is bounded by unique-id count, not record size — each entry stores only
+      // the stripped text + record needed for the embedding call.
+      const pending = new Map<string, { text: string; record: StoredRecord }>();
+
+      for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+        if (walSeen.has(id)) continue;
+        if ((record as StoredRecord)[META_EMBEDDING]) {
+          pending.delete(id);
+        } else {
+          if (isExpired(record as StoredRecord)) continue;
+          const clean = stripMeta(record as StoredRecord);
+          const text = extractTextFromRecord(clean);
+          if (text) {
+            pending.set(id, { text, record: record as StoredRecord });
+          } else {
+            pending.delete(id);
+          }
+        }
+      }
+
+      const diskBatch: { id: string; text: string; record: StoredRecord }[] = [];
+
+      const flushDiskBatch = async (): Promise<void> => {
+        if (diskBatch.length === 0) return;
+        let vectors: number[][];
+        try {
+          vectors = await this.embeddingProvider!.embed(diskBatch.map((b) => b.text));
+        } catch (err) {
+          console.warn(`agentdb: embedUnembedded disk batch failed: ${err}`);
+          diskBatch.length = 0;
+          return;
+        }
+        const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
+          const q = quantize(vectors[j]);
+          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(q) }];
+        });
+        await this._diskStore!.appendEmbeddings(updates);
+        if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
+        for (let j = 0; j < diskBatch.length; j++) {
+          this.hnswIdx!.add(diskBatch[j].id, vectors[j]);
+        }
+        embedded += diskBatch.length;
+        diskBatch.length = 0;
+      };
+
+      for (const [id, entry] of pending) {
+        diskBatch.push({ id, ...entry });
+        if (diskBatch.length >= batchSize) await flushDiskBatch();
+      }
+      await flushDiskBatch();
+    }
+
+    return embedded;
+  }
+
+  /**
+   * Force-reembed ALL records using the current embedding logic.
+   * Use this to migrate embeddings from v1.3 (which incorrectly included `_id` in the text).
+   * Resets the HNSW index and rewrites every record's embedding.
+   * Requires an embedding provider; throws if none is configured.
+   * Does NOT auto-run on open — call explicitly after upgrading from v1.3.
+   * Per-batch provider failures are recorded in the returned {@link ReembedResult} rather than
+   * thrown, so the caller can distinguish partial success from total failure.
+   */
+  async reembedAll(): Promise<ReembedResult> {
+    if (!this.embeddingProvider || !this.hnswIdx) {
+      throw new Error("reembedAll requires an embedding provider to be configured");
+    }
+
+    const batchSize = this.opts.embeddingBatchSize ?? 256;
+    // Reset HNSW so stale vectors don't persist
+    this.hnswIdx = new HnswIndex({ dimensions: this.embeddingProvider.dimensions });
+    let embedded = 0;
+    let failed = 0;
+    const errors: ReembedResult["errors"] = [];
+
+    // --- WAL (in-memory) records ---
+    const walSeen = new Set<string>();
+    const walToEmbed: { id: string; text: string; record: StoredRecord }[] = [];
+    for (const [id, record] of this.store.entries()) {
+      if (isExpired(record)) continue;
+      walSeen.add(id);
+      const clean = stripMeta(record);
+      const text = extractTextFromRecord(clean);
+      if (text) walToEmbed.push({ id, text, record });
+    }
+
+    for (let i = 0; i < walToEmbed.length; i += batchSize) {
+      const batch = walToEmbed.slice(i, i + batchSize);
+      const batchIndex = Math.floor(i / batchSize);
+      let vectors: number[][];
+      try {
+        vectors = await this.embeddingProvider.embed(batch.map((b) => b.text));
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.warn(`agentdb: reembedAll WAL batch ${batchIndex} failed: ${reason}`);
+        errors.push({ batchIndex, recordIds: batch.map((b) => b.id), reason });
+        failed += batch.length;
+        continue;
+      }
+      await this.store.batch(() => {
+        for (let j = 0; j < batch.length; j++) {
+          const { id, record } = batch[j];
+          const q = quantize(vectors[j]);
+          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
+          this.store.set(id, updated);
+        }
+      });
+      if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
+      for (let j = 0; j < batch.length; j++) {
+        this.hnswIdx!.add(batch[j].id, vectors[j]);
+      }
+      embedded += batch.length;
+    }
+
+    // --- Disk records (compacted Parquet/JSONL) ---
+    if (this._diskStore?.hasParquetData) {
+      let diskBatchIndex = Math.ceil(walToEmbed.length / batchSize);
+      const diskBatch: { id: string; text: string; record: StoredRecord }[] = [];
+
+      const flushDiskBatch = async (): Promise<void> => {
+        if (diskBatch.length === 0) return;
+        let vectors: number[][];
+        try {
+          vectors = await this.embeddingProvider!.embed(diskBatch.map((b) => b.text));
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          console.warn(`agentdb: reembedAll disk batch ${diskBatchIndex} failed: ${reason}`);
+          errors.push({ batchIndex: diskBatchIndex, recordIds: diskBatch.map((b) => b.id), reason });
+          failed += diskBatch.length;
+          diskBatch.length = 0;
+          diskBatchIndex++;
+          return;
+        }
+        const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
+          const q = quantize(vectors[j]);
+          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(q) }];
+        });
+        await this._diskStore!.appendEmbeddings(updates);
+        // Mid-flight compaction: merge accumulated JSONL files when threshold hit,
+        // bounding file count and index rewrite cost for large reembed runs.
+        if (this._diskStore!.shouldCompact()) {
+          await this._diskStore!.compactInPlace();
+        }
+        if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
+        for (let j = 0; j < diskBatch.length; j++) {
+          this.hnswIdx!.add(diskBatch[j].id, vectors[j]);
+        }
+        embedded += diskBatch.length;
+        diskBatch.length = 0;
+        diskBatchIndex++;
+      };
+
+      // Single pass: process every non-expired disk record (skip WAL-shadowed ids)
+      const diskSeen = new Set<string>();
+      for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+        if (walSeen.has(id) || diskSeen.has(id)) continue;
+        diskSeen.add(id);
+        if (isExpired(record as StoredRecord)) continue;
+        const clean = stripMeta(record as StoredRecord);
+        const text = extractTextFromRecord(clean);
+        if (!text) continue;
+        diskBatch.push({ id, text, record: record as StoredRecord });
+        if (diskBatch.length >= batchSize) await flushDiskBatch();
+      }
+      await flushDiskBatch();
+    }
+
+    return { embedded, failed, errors };
   }
 
   // --- Explicit Vector API ---
@@ -1291,7 +1750,7 @@ export class Collection {
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
     this.updateBTreeIndexes(id, oldRecord, stored);
-    if (this.textIdx) this.textIdx.add(id, stripMeta(stored));
+    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
     // Update HNSW (remove old if exists, add new)
     if (this.hnswIdx.size > 0) {
       try { this.hnswIdx.remove(id); } catch { /* not in index yet */ }
@@ -1304,10 +1763,10 @@ export class Collection {
    * Search the HNSW index by a raw vector. No embedding provider required.
    * Returns records sorted by similarity with scores.
    */
-  searchByVector(
+  async searchByVector(
     vector: number[],
     opts?: { filter?: Filter; limit?: number; summary?: boolean },
-  ): { records: Record<string, unknown>[]; scores: number[] } {
+  ): Promise<{ records: Record<string, unknown>[]; scores: number[] }> {
     if (!this.hnswIdx) {
       throw new Error("Vector search not available. Call insertVector first or configure an embedding provider.");
     }
@@ -1315,24 +1774,9 @@ export class Collection {
       throw new Error(`Vector dimension mismatch: index has ${this.hnswIdx.dims} dimensions, query has ${vector.length}`);
     }
     const limit = opts?.limit ?? 10;
-    const candidates = this.hnswIdx.search(vector, limit * 3);
-    const predicate = opts?.filter ? this.resolve(opts.filter) : () => true;
-    const allAccessor = this.opts.computed ? this.allCleanRecords() : () => [];
+    const candidates = this.hnswIdx.search(vector, Math.max(limit * 4, 50));
 
-    const records: Record<string, unknown>[] = [];
-    const scores: number[] = [];
-    for (const { id, score } of candidates) {
-      if (records.length >= limit) break;
-      const record = this.store.get(id);
-      if (!record || isExpired(record)) continue;
-      const clean = stripMeta(record);
-      if (!predicate(clean)) continue;
-      const withComputed = this.opts.computed ? this.applyComputed(clean, allAccessor) : clean;
-      records.push(opts?.summary ? summarize(withComputed) : withComputed);
-      scores.push(score);
-    }
-
-    return { records, scores };
+    return this.materializeCandidates(candidates, { limit, filter: opts?.filter, summary: opts?.summary });
   }
 
   // --- Blob storage ---
@@ -1391,9 +1835,9 @@ export class Collection {
   }
 
   /** Get collection stats. */
-  stats(): { activeRecords: number; opsCount: number } {
+  stats(): { activeRecords: number; opsCount: number; textIndexBytes: number } {
     const s = this.store.stats();
-    return { activeRecords: s.activeRecords, opsCount: s.opsCount };
+    return { activeRecords: s.activeRecords, opsCount: s.opsCount, textIndexBytes: this.textIdx?.estimatedBytes() ?? 0 };
   }
 
   /**

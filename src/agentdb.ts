@@ -64,6 +64,10 @@ export interface AgentDBOptions {
   cacheSize?: number;
   /** Parquet row group size for disk mode (default: 5000). */
   rowGroupSize?: number;
+  /** Max concurrent disk fetches for non-FS backends (e.g. S3). Default: 16. Per-collection override via CollectionOptions.diskConcurrency. */
+  diskConcurrency?: number;
+  /** Number of records per embedding provider call in embedUnembedded (default: 256). Per-collection override via CollectionOptions.embeddingBatchSize. */
+  embeddingBatchSize?: number;
 }
 
 export interface CollectionInfo {
@@ -130,6 +134,8 @@ export class AgentDB {
       diskThreshold: opts?.diskThreshold,
       cacheSize: opts?.cacheSize,
       rowGroupSize: opts?.rowGroupSize,
+      diskConcurrency: opts?.diskConcurrency,
+      embeddingBatchSize: opts?.embeddingBatchSize,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -152,7 +158,9 @@ export class AgentDB {
   private trackMemory(name: string, col: Collection): void {
     const stats = col.stats();
     // ~500 bytes per record average avoids full scan on every mutation
-    this.memoryMonitor.updateEstimate(name, stats.activeRecords, stats.activeRecords * 500);
+    const recordBytes = stats.activeRecords * 500;
+    const textIndexBytes = col.getTextIndex()?.estimatedBytes() ?? 0;
+    this.memoryMonitor.updateEstimate(name, stats.activeRecords, recordBytes + textIndexBytes);
   }
 
   /** Get the configured embedding provider, or null if none. */
@@ -203,6 +211,15 @@ export class AgentDB {
   /**
    * Get or create a named collection.
    * Accepts a name + options, or a CollectionSchema from defineSchema().
+   *
+   * @param nameOrSchema  Collection name (string) or a defineSchema() result.
+   * @param colOpts       Per-collection options. **Warning:** when `nameOrSchema`
+   *   is a schema (from `defineSchema()`), the schema's internal `collectionOptions`
+   *   **completely replace** this argument — any `colOpts` passed here are silently
+   *   discarded. Schema values always win. To set per-collection knobs
+   *   (`embeddingBatchSize`, `diskConcurrency`, `cacheSize`, `rowGroupSize`) for a
+   *   schema-defined collection, either include them in the `defineSchema(...)` call
+   *   or set them on `AgentDBOptions` as db-wide defaults.
    */
   async collection(nameOrSchema: string | CollectionSchema, colOpts?: CollectionOptions): Promise<Collection> {
     this.ensureOpen();
@@ -255,7 +272,21 @@ export class AgentDB {
     await mkdir(colDir, { recursive: true });
 
     const store = new Store<Record<string, unknown>>();
-    const col = new Collection(name, store, this.collectionOpts.get(name));
+    const baseOpts = this.collectionOpts.get(name);
+    // Apply db-wide defaults for knobs that also have per-collection overrides.
+    // Per-collection value wins; db default fills in only when the collection didn't specify one.
+    const mergedOpts: typeof baseOpts = {
+      ...baseOpts,
+      ...(this.opts.diskConcurrency !== undefined && baseOpts?.diskConcurrency === undefined
+        ? { diskConcurrency: this.opts.diskConcurrency } : {}),
+      ...(this.opts.embeddingBatchSize !== undefined && baseOpts?.embeddingBatchSize === undefined
+        ? { embeddingBatchSize: this.opts.embeddingBatchSize } : {}),
+      ...(this.opts.cacheSize !== undefined && baseOpts?.cacheSize === undefined
+        ? { cacheSize: this.opts.cacheSize } : {}),
+      ...(this.opts.rowGroupSize !== undefined && baseOpts?.rowGroupSize === undefined
+        ? { rowGroupSize: this.opts.rowGroupSize } : {}),
+    };
+    const col = new Collection(name, store, mergedOpts);
     if (this.embeddingProvider) {
       col.setEmbeddingProvider(this.embeddingProvider);
     }
@@ -283,8 +314,8 @@ export class AgentDB {
       });
 
       const diskStore = new DiskStore(col.getBackend(), {
-        cacheSize: this.opts.cacheSize ?? 1_000,
-        rowGroupSize: this.opts.rowGroupSize ?? 5000,
+        cacheSize: mergedOpts?.cacheSize ?? 1_000,
+        rowGroupSize: mergedOpts?.rowGroupSize ?? 5000,
         extractColumns: schema?.indexes ?? [],
       });
       await diskStore.load();
@@ -331,6 +362,10 @@ export class AgentDB {
       await diskStore.loadIndexes(col.getIndexManager(), col.getTextIndex());
 
       col.setDiskStore(diskStore);
+      // Rebuild HNSW from disk embeddings if an embedding provider is configured.
+      // In disk mode, open() is called with skipLoad=true so the WAL pass never
+      // runs — HNSW must be reconstructed from Parquet/JSONL entries instead.
+      await col.rebuildHnswFromDisk();
     } else {
       // Memory mode: normal open (load all records into Map)
       await col.open(colDir, {
@@ -684,14 +719,16 @@ export class AgentDB {
   }
 
   /** Database-level stats. */
-  async stats(): Promise<{ collections: number; totalRecords: number }> {
+  async stats(): Promise<{ collections: number; totalRecords: number; textIndexBytes: number }> {
     this.ensureOpen();
     let totalRecords = 0;
+    let textIndexBytes = 0;
     for (const name of this.meta.collections) {
       const col = await this.collection(name);
       totalRecords += await col.count();
+      textIndexBytes += col.getTextIndex()?.estimatedBytes() ?? 0;
     }
-    return { collections: this.meta.collections.length, totalRecords };
+    return { collections: this.meta.collections.length, totalRecords, textIndexBytes };
   }
 
   // --- Export / Import ---
@@ -745,12 +782,13 @@ export class AgentDB {
       const ds = col.getDiskStore();
       if (ds) {
         if (ds.isDirty) {
-          // Incremental: pass session writes (from Map) as newRecords
-          const mapRecords = col.getStore().entries().map(([id, r]) => [id, r] as [string, Record<string, unknown>]);
-          const allRecords = await col.findAll();
+          // Use raw records (preserves _embedding) for compaction so embeddings survive close/reopen
+          const rawRecords = await col.findAllForCompaction();
+          const mapIds = new Set(col.getStore().entries().map(([id]) => id));
+          const newRecords = rawRecords.filter(([id]) => mapIds.has(id));
           await ds.compact(
-            allRecords.map((r) => [r._id as string, r]),
-            mapRecords.length > 0 ? mapRecords : undefined,
+            rawRecords,
+            newRecords.length > 0 ? newRecords : undefined,
           );
         }
         await ds.saveIndexes(col.getIndexManager(), col.getTextIndex());

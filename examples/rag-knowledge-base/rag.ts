@@ -2,6 +2,11 @@
 /**
  * RAG Knowledge Base — ingest documents, embed with Ollama, answer questions.
  *
+ * Uses hybrid search (BM25 + semantic RRF) for retrieval. Hybrid beats either
+ * arm alone: BM25 catches exact-term matches (e.g. API names, error codes) that
+ * semantic search misses, while the vector arm finds paraphrases and synonyms
+ * that keyword search misses.
+ *
  * Usage:
  *   npx tsx rag.ts ingest <file-or-directory>   Ingest text files
  *   npx tsx rag.ts ask "your question"           Ask a question
@@ -10,7 +15,8 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { AgentDB } from "../../src/agentdb.js";
-import { askOllama, embed } from "./ollama.js";
+import { defineSchema } from "../../src/schema.js";
+import { askOllama } from "./ollama.js";
 
 const DATA_DIR = "./rag-data";
 
@@ -19,7 +25,16 @@ const db = new AgentDB(DATA_DIR, {
 });
 await db.init();
 
-const docs = await db.collection("documents", { textSearch: true });
+const docs = await db.collection(defineSchema({
+  name: "documents",
+  textSearch: true,
+  fields: {
+    source: { type: "string" },
+    chunk:  { type: "number" },
+    text:   { type: "string", searchable: true },  // BM25-indexed
+  },
+}));
+
 const command = process.argv[2];
 
 if (command === "ingest") {
@@ -48,18 +63,18 @@ if (command === "ingest") {
     console.log(`  ${name}: ${chunks.length} chunks`);
 
     for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const vec = await embed(chunk);
-
-      await docs.insertVector(`${name}:${i}`, vec, {
+      await docs.insert({
+        _id: `${name}:${i}`,
         source: name,
         chunk: i,
-        text: chunk,
+        text: chunks[i],
       });
     }
   }
 
-  console.log(`\nDone. ${(await db.stats()).totalRecords} total chunks indexed.`);
+  // Embed all un-embedded records (Ollama nomic-embed-text)
+  const embedded = await docs.embedUnembedded();
+  console.log(`\nEmbedded ${embedded} chunks. ${(await db.stats()).totalRecords} total indexed.`);
 
 } else if (command === "ask") {
   const question = process.argv.slice(3).join(" ");
@@ -67,20 +82,19 @@ if (command === "ingest") {
 
   console.log(`Question: ${question}\n`);
 
-  // Embed the question and search
-  const queryVec = await embed(question);
-  const results = docs.searchByVector(queryVec, { limit: 5 });
+  // Hybrid search: BM25 catches exact terms; vector arm catches paraphrases
+  const results = await docs.hybridSearch(question, { limit: 5 });
 
   if (results.records.length === 0) {
     console.log("No relevant documents found. Ingest some files first.");
     process.exit(0);
   }
 
-  console.log(`Found ${results.records.length} relevant chunks (scores: ${results.scores.map(s => s.toFixed(3)).join(", ")})\n`);
+  console.log(`Found ${results.records.length} relevant chunks (RRF scores: ${results.scores.map((s: number) => s.toFixed(4)).join(", ")})\n`);
 
   // Build context from top results
   const context = results.records
-    .map((r, i) => `[Source: ${r.source}, chunk ${r.chunk}, relevance: ${results.scores[i].toFixed(3)}]\n${r.text}`)
+    .map((r, i) => `[Source: ${r.source}, chunk ${r.chunk}, score: ${results.scores[i].toFixed(4)}]\n${r.text}`)
     .join("\n\n---\n\n");
 
   // Ask Ollama with context
@@ -92,7 +106,7 @@ if (command === "ingest") {
   console.log("Answer:", answer);
 
 } else if (command === "list") {
-  const result = docs.find({ limit: 1000 });
+  const result = await docs.find({ limit: 1000 });
   const sources = new Map<string, number>();
   for (const r of result.records) {
     const src = r.source as string;
@@ -107,7 +121,7 @@ if (command === "ingest") {
   console.log("RAG Knowledge Base — powered by AgentDB + Ollama\n");
   console.log("Commands:");
   console.log("  npx tsx rag.ts ingest <file-or-dir>   Ingest text/markdown files");
-  console.log("  npx tsx rag.ts ask \"your question\"     Ask a question");
+  console.log("  npx tsx rag.ts ask \"your question\"     Ask a question (hybrid search)");
   console.log("  npx tsx rag.ts list                    List indexed documents");
 }
 

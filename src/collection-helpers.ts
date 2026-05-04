@@ -23,6 +23,9 @@ export const META_VERSION = "_version";
 /** Fields that cannot be modified via $set/$unset/$inc/$push. */
 export const PROTECTED_FIELDS = new Set([META_AGENT, META_REASON, META_EXPIRES, META_EMBEDDING, META_VERSION, "_id", "__proto__", "constructor", "prototype"]);
 
+/** Internal metadata fields excluded from embedding text. Explicit set — user fields with a _ prefix are NOT excluded. */
+export const META_FIELDS_FOR_EMBED = new Set<string>([META_AGENT, META_REASON, META_EXPIRES, META_EMBEDDING, META_VERSION, "_id"]);
+
 // --- Filter types ---
 
 /** Filter can be a JSON object or a compact string. */
@@ -243,10 +246,17 @@ export function compositeIndexKey(fields: string[]): string {
   return fields.join(COMPOSITE_SEP);
 }
 
-/** Extract all text from a record for embedding (concatenate string fields). */
+/**
+ * Extract all text from a record for embedding (concatenate string fields).
+ * Excludes the explicit set of internal metadata fields: _id, _version, _agent, _reason,
+ * _expires, _embedding. User fields that happen to start with "_" (e.g. _internal_note)
+ * are included — the "_" prefix is NOT reserved.
+ * @precondition Callers should pass a stripMeta-ed record; this filter is defense-in-depth.
+ */
 export function extractTextFromRecord(record: Record<string, unknown>): string {
   const parts: string[] = [];
-  for (const value of Object.values(record)) {
+  for (const [key, value] of Object.entries(record)) {
+    if (META_FIELDS_FOR_EMBED.has(key)) continue;
     if (typeof value === "string" && value.length > 0) {
       parts.push(value);
     } else if (Array.isArray(value)) {

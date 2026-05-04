@@ -416,3 +416,57 @@ describe("AgentDB", () => {
     });
   });
 });
+
+// Pinning test: schema collectionOptions win over the colOpts argument (#202)
+describe("AgentDB.collection — schema-vs-opts precedence (#202)", () => {
+  it("schema collectionOptions replace the colOpts argument — schema textSearch wins over absent caller opts", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agentdb-prec-"));
+    try {
+      // Schema declares textSearch:true — this ends up in schema.collectionOptions.textSearch
+      const schema = defineSchema({
+        name: "prec",
+        textSearch: true,
+        fields: { title: { type: "string", searchable: true } },
+      });
+
+      const db = new AgentDB(dir);
+      await db.init();
+
+      // Caller passes colOpts without textSearch (colOpts would disable BM25 if it won).
+      // schema.collectionOptions replaces colOpts entirely per line 226 of agentdb.ts,
+      // so textSearch:true from the schema governs — bm25Search must succeed.
+      const col = await db.collection(schema, { tagField: "categories" });
+
+      await col.insert({ _id: "a", title: "hello world typescript" });
+
+      // If schema won: bm25Search enabled → result returned.
+      // If caller's opts won (no textSearch): bm25Search throws "not enabled".
+      const result = await col.bm25Search("typescript");
+      expect(result.records.length).toBeGreaterThan(0);
+      expect(result.records[0]._id).toBe("a");
+
+      await db.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("plain string name: colOpts argument is used as-is", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agentdb-prec2-"));
+    try {
+      const db = new AgentDB(dir);
+      await db.init();
+
+      // No schema — colOpts with textSearch:true governs
+      const col = await db.collection("plain", { textSearch: true });
+      await col.insert({ _id: "b", title: "hello world" });
+
+      const result = await col.bm25Search("hello");
+      expect(result.records.length).toBeGreaterThan(0);
+
+      await db.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

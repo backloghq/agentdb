@@ -121,6 +121,20 @@ describe("extractPersistedSchema", () => {
     persisted.indexes!.push("extra");
     expect(indexes).toEqual(["status"]);
   });
+
+  it("bm25 round-trips through extractPersistedSchema", () => {
+    const def: SchemaDefinition = { name: "t", textSearch: true, bm25: { k1: 2.0, b: 0.9 } };
+    const persisted = extractPersistedSchema(def);
+    expect(persisted.bm25).toEqual({ k1: 2.0, b: 0.9 });
+    // Shallow copy — mutations don't affect original
+    persisted.bm25!.k1 = 99;
+    expect(def.bm25!.k1).toBe(2.0);
+  });
+
+  it("bm25 absent from persisted when not set", () => {
+    const persisted = extractPersistedSchema({ name: "t", textSearch: true });
+    expect(persisted.bm25).toBeUndefined();
+  });
 });
 
 describe("validatePersistedSchema", () => {
@@ -227,5 +241,44 @@ describe("validatePersistedSchema", () => {
       },
     })).not.toThrow();
   });
-});
 
+  it("bm25: valid k1 and b pass validation", () => {
+    expect(() => validatePersistedSchema({ name: "t", bm25: { k1: 2.0, b: 0.5 } })).not.toThrow();
+    expect(() => validatePersistedSchema({ name: "t", bm25: { k1: 0.5 } })).not.toThrow();
+    expect(() => validatePersistedSchema({ name: "t", bm25: { b: 0.0 } })).not.toThrow();
+    expect(() => validatePersistedSchema({ name: "t", bm25: { b: 1.0 } })).not.toThrow();
+  });
+
+  it("bm25: invalid k1 (≤0) throws", () => {
+    expect(() => validatePersistedSchema({ name: "t", bm25: { k1: 0 } })).toThrow("bm25.k1");
+    expect(() => validatePersistedSchema({ name: "t", bm25: { k1: -1 } })).toThrow("bm25.k1");
+  });
+
+  it("bm25: b out of [0,1] throws", () => {
+    expect(() => validatePersistedSchema({ name: "t", bm25: { b: -0.1 } })).toThrow("bm25.b");
+    expect(() => validatePersistedSchema({ name: "t", bm25: { b: 1.1 } })).toThrow("bm25.b");
+  });
+
+  it("bm25: non-object throws", () => {
+    expect(() => validatePersistedSchema({ name: "t", bm25: "bad" })).toThrow("bm25");
+  });
+
+  it("searchable:true on non-string field type throws (#167)", () => {
+    expect(() => validatePersistedSchema({
+      name: "s",
+      fields: { score: { type: "number", searchable: true } },
+    })).toThrow(/searchable:true.*not string/i);
+    expect(() => validatePersistedSchema({
+      name: "s",
+      fields: { flag: { type: "boolean", searchable: true } },
+    })).toThrow(/searchable:true.*not string/i);
+    expect(() => validatePersistedSchema({
+      name: "s",
+      fields: { title: { type: "string", searchable: true } },
+    })).not.toThrow();
+    expect(() => validatePersistedSchema({
+      name: "s",
+      fields: { tags: { type: "string[]", searchable: true } },
+    })).not.toThrow();
+  });
+});

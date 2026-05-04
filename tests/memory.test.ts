@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { estimateBytes, MemoryMonitor } from "../src/memory.js";
+import { TextIndex } from "../src/text-index.js";
+import { AgentDB } from "../src/agentdb.js";
+import { defineSchema } from "../src/schema.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 describe("estimateBytes", () => {
   it("estimates null/undefined", () => {
@@ -88,5 +94,96 @@ describe("MemoryMonitor", () => {
     monitor.remove("users");
     expect(monitor.stats().collections.users).toBeUndefined();
     expect(monitor.stats().totalBytes).toBe(0);
+  });
+});
+
+describe("TextIndex.estimatedBytes()", () => {
+  it("returns 0-ish for empty index", () => {
+    const idx = new TextIndex();
+    expect(idx.estimatedBytes()).toBeGreaterThanOrEqual(0);
+    expect(idx.estimatedBytes()).toBeLessThan(256); // just overhead
+  });
+
+  it("grows monotonically as docs are added", () => {
+    const idx = new TextIndex();
+    let prev = idx.estimatedBytes();
+    for (let i = 0; i < 20; i++) {
+      idx.add(`doc${i}`, { text: `unique term alpha${i} beta${i} gamma${i}` });
+      const cur = idx.estimatedBytes();
+      expect(cur).toBeGreaterThan(prev);
+      prev = cur;
+    }
+  });
+
+  it("decreases when docs are removed", () => {
+    const idx = new TextIndex();
+    for (let i = 0; i < 10; i++) {
+      idx.add(`doc${i}`, { text: `word${i} common` });
+    }
+    const full = idx.estimatedBytes();
+    for (let i = 0; i < 10; i++) idx.remove(`doc${i}`);
+    const empty = idx.estimatedBytes();
+    expect(empty).toBeLessThan(full);
+  });
+
+  it("returns near-zero after clear()", () => {
+    const idx = new TextIndex();
+    for (let i = 0; i < 50; i++) idx.add(`doc${i}`, { text: `content word${i}` });
+    idx.clear();
+    expect(idx.estimatedBytes()).toBeLessThan(256);
+  });
+});
+
+describe("TextIndex memory monitor integration", () => {
+  async function makeTmpDir() {
+    return mkdtemp(join(tmpdir(), "agentdb-mem-"));
+  }
+
+  it("AgentDB memory monitor includes textIndexBytes when text search is enabled", async () => {
+    const dir = await makeTmpDir();
+    try {
+      const db = new AgentDB(dir, { memoryBudget: 0 });
+      await db.init();
+      const s = defineSchema({ name: "articles", textSearch: true,
+        fields: { title: { type: "string", searchable: true } } });
+      const col = await db.collection(s);
+
+      // Empty — baseline
+      const before = db.memoryStats().totalBytes;
+
+      for (let i = 0; i < 30; i++) {
+        await col.insert({ title: `word${i} common prefix text` });
+      }
+
+      // After inserting, textIndexBytes should be non-zero
+      const afterStats = db.memoryStats();
+      expect(afterStats.totalBytes).toBeGreaterThan(before);
+
+      // db_stats includes textIndexBytes
+      const dbStats = await db.stats();
+      expect(dbStats.textIndexBytes).toBeGreaterThan(0);
+
+      await db.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("memory budget is tripped when textIndex bytes exceed the limit", async () => {
+    const dir = await makeTmpDir();
+    try {
+      // Very small budget so even a tiny textIndex trips it
+      const db = new AgentDB(dir, { memoryBudget: 1 });
+      await db.init();
+      const s = defineSchema({ name: "docs", textSearch: true,
+        fields: { body: { type: "string", searchable: true } } });
+      const col = await db.collection(s);
+      await col.insert({ body: "hello world typescript search" });
+      // After insert, memory monitor should be over budget
+      expect(db.memoryStats().overBudget).toBe(true);
+      await db.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

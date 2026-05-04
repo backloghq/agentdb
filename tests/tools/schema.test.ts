@@ -151,6 +151,18 @@ describe("Tool Definitions — schema", () => {
       expect(result.schema.fields.title.required).toBe(true);
       expect(result.schema.fields.title.description).toBe("The title field");
     });
+
+    it("returns isError when searchable:true is set on a non-string field (#167)", async () => {
+      const t = tool("db_set_schema");
+      const result = await t.execute({
+        collection: "bad-searchable",
+        schema: {
+          fields: { score: { type: "number", searchable: true } },
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/searchable:true.*not string/i);
+    });
   });
 
   describe("db_delete_schema", () => {

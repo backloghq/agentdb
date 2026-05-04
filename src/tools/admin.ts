@@ -89,9 +89,9 @@ export function getAdminTools(db: AgentDB): AgentTool[] {
     {
       name: "db_stats",
       title: "Database Stats",
-      description: "Get database-level statistics: total collections and total records across all collections. Lightweight — does not scan individual records." + API_NOTE,
+      description: "Get database-level statistics: total collections, total records, and estimated TextIndex memory across all collections. Lightweight — does not scan individual records." + API_NOTE,
       schema: z.object({}),
-      outputSchema: z.object({ collections: z.number(), totalRecords: z.number() }),
+      outputSchema: z.object({ collections: z.number(), totalRecords: z.number(), textIndexBytes: z.number() }),
       annotations: READ,
       execute: safe("db_stats", READ)(async () => {
         return db.stats();
