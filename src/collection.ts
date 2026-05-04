@@ -132,9 +132,34 @@ export class Collection {
   private indexes = new IndexManager();
   private _hasTTL = false; // Tracks if any record has been inserted with TTL
   private _diskStore: DiskStore | null = null;
+  // True once ensureIndexesLoaded has run and the WAL store has been replayed into textIdx.
+  // Prevents ensureIndexesLoaded from overwriting current-session inserts.
+  private _textIdxLoaded = false;
 
   /** Set disk store for disk-backed mode. Called by AgentDB during open. */
   setDiskStore(ds: DiskStore): void { this._diskStore = ds; }
+
+  /**
+   * Ensure disk indexes are loaded, then replay any current-session WAL entries into
+   * the text index. This handles the case where the user inserted records before the
+   * first search call triggers lazy index loading — without replay, loadFromJSON would
+   * overwrite those in-memory inserts.
+   */
+  private async ensureDiskIndexesLoaded(): Promise<void> {
+    if (!this._diskStore) return;
+    if (this._textIdxLoaded) return;
+    await this._diskStore.ensureIndexesLoaded();
+    // Replay in-memory (WAL) entries into text index — these may predate this load call
+    if (this.textIdx) {
+      for (const [id, record] of this.store.entries()) {
+        if (!isExpired(record)) {
+          const clean = stripMeta(record);
+          this.textIdx.add(id, this.textRecord(clean));
+        }
+      }
+    }
+    this._textIdxLoaded = true;
+  }
 
   /** Rebuild the HNSW index from all embeddings stored in the disk store. Called by AgentDB after setDiskStore when an embedding provider is configured. */
   async rebuildHnswFromDisk(): Promise<void> {
@@ -1180,7 +1205,7 @@ export class Collection {
     if (!this.textIdx) {
       throw new Error("Full-text search not enabled. Set textSearch: true in collection options.");
     }
-    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
+    await this.ensureDiskIndexesLoaded();
     const matchIds = this.textIdx.search(query);
     const allAccessor = this.allCleanRecords();
     const limit = opts?.limit ?? 50;
@@ -1230,8 +1255,13 @@ export class Collection {
     let hydrated: Array<StoredRecord | undefined>;
     if (this._diskStore) {
       const ds = this._diskStore;
+      // WAL fallback: records inserted in the current session live in this.store (not yet
+      // compacted to disk). Disk-first preserves read-your-writes semantics for updated records.
+      const walFallback = (id: string) => this.store.get(id);
       if (ds.isLocalFs()) {
-        hydrated = (await Promise.all(candidates.map((c) => ds.get(c.id)))) as Array<StoredRecord | undefined>;
+        hydrated = await Promise.all(
+          candidates.map(async (c) => ((await ds.get(c.id)) ?? walFallback(c.id)) as StoredRecord | undefined),
+        );
       } else {
         const cap = this.opts.diskConcurrency ?? 16;
         hydrated = new Array(candidates.length);
@@ -1239,7 +1269,7 @@ export class Collection {
         const workers = Array.from({ length: Math.min(cap, candidates.length) }, async () => {
           while (next < candidates.length) {
             const i = next++;
-            (hydrated as Array<StoredRecord | undefined>)[i] = (await ds.get(candidates[i].id)) as StoredRecord | undefined;
+            (hydrated as Array<StoredRecord | undefined>)[i] = ((await ds.get(candidates[i].id)) ?? walFallback(candidates[i].id)) as StoredRecord | undefined;
           }
         });
         await Promise.all(workers);
@@ -1288,7 +1318,7 @@ export class Collection {
     if (!this.textIdx) {
       throw new Error("BM25 search not enabled. Set textSearch: true in collection options.");
     }
-    if (this._diskStore) await this._diskStore.ensureIndexesLoaded();
+    await this.ensureDiskIndexesLoaded();
 
     if (!query || !query.trim()) return { records: [], scores: [] };
 

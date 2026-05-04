@@ -14,7 +14,8 @@
  */
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
-import { AgentDB, defineSchema } from "../../src/agentdb.js";
+import { AgentDB } from "../../src/agentdb.js";
+import { defineSchema } from "../../src/schema.js";
 import { askOllama } from "./ollama.js";
 
 const DATA_DIR = "./rag-data";

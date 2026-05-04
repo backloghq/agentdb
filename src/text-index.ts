@@ -14,7 +14,8 @@
 
 /** Tokenize a string into lowercase terms (with repeated occurrences).
  *  Uses Unicode property classes so CJK, diacritics, and accented text
- *  are retained. Single-character tokens are kept so CJK chars survive. */
+ *  are retained. CJK is supported as whole-run tokens; substring search
+ *  is not segmented (no word boundary between adjacent CJK characters). */
 function tokenize(text: string): string[] {
   return text
     .toLowerCase()
