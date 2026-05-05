@@ -291,8 +291,10 @@ describe("Config env var coercion", () => {
 
   describe("JWT env vars", () => {
     it("AGENTDB_HTTP_JWT_SECRET populates http.jwt.secret", () => {
-      const cfg = fromEnv({ AGENTDB_HTTP_JWT_SECRET: "super-secret" });
-      expect(cfg.http?.jwt?.secret).toBe("super-secret");
+      // Must be ≥32 chars (RFC 7518 §3.2 for HS256).
+      const secret = "super-secret-that-is-long-enough1"; // 33 chars
+      const cfg = fromEnv({ AGENTDB_HTTP_JWT_SECRET: secret });
+      expect(cfg.http?.jwt?.secret).toBe(secret);
     });
   });
 });
@@ -461,6 +463,46 @@ describe("Config file loading", () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // R7/2: JWT secret minimum length (RFC 7518 §3.2 — HS256 requires ≥32 bytes)
+  // -------------------------------------------------------------------------
+
+  it("R7/2: short JWT secret in config file throws ConfigValidationError with min length message", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "short-secret.json");
+    writeFileSync(cfgPath, JSON.stringify({ http: { jwt: { secret: "hunter2" } } }));
+
+    try {
+      loadAgentDBConfig({ configPath: cfgPath, env: {} });
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigValidationError);
+      // Error message must mention 32 so operators know the minimum length requirement.
+      expect((e as ConfigValidationError).message).toContain("32");
+      expect((e as ConfigValidationError).source).toBe("file");
+      return;
+    }
+    throw new Error("Expected ConfigValidationError not thrown");
+  });
+
+  it("R7/2: short JWT secret via env var throws ConfigValidationError", () => {
+    // The merged-config validation runs ConfigFileSchema.safeParse() after all three layers
+    // are merged, so a short AGENTDB_HTTP_JWT_SECRET also gets rejected.
+    try {
+      loadAgentDBConfig({ configPath: "/nonexistent/no-file.json", env: { AGENTDB_HTTP_JWT_SECRET: "tooshort" } });
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigValidationError);
+      expect((e as ConfigValidationError).message).toContain("32");
+      return;
+    }
+    throw new Error("Expected ConfigValidationError not thrown");
+  });
+
+  it("R7/2: JWT secret of exactly 32 characters is accepted", () => {
+    const secret32 = "a".repeat(32); // exactly 32 bytes
+    const cfg = loadAgentDBConfig({ configPath: "/nonexistent/no-file.json", env: { AGENTDB_HTTP_JWT_SECRET: secret32 } });
+    expect(cfg.http?.jwt?.secret).toBe(secret32);
   });
 });
 

@@ -87,7 +87,9 @@ const HttpConfigSchema = z.object({
   auth: z.string().optional(),
   multiToken: z.array(z.string()).optional(),
   jwt: z.object({
-    secret: z.string().optional(),
+    // RFC 7518 §3.2: HS256 requires a key of at least 256 bits (32 bytes).
+    // Reject shorter secrets at config-load time — a weak key is a hard error, not a warn.
+    secret: z.string().min(32, "JWT secret must be at least 32 characters (256 bits for HS256 — use `openssl rand -hex 32`)").optional(),
     audience: z.string().optional(),
     issuer: z.string().optional(),
   }).optional(),

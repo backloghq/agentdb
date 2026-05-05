@@ -117,7 +117,7 @@ describe.skipIf(!existsSync(CLI))("R5/1 auth wiring integration", () => {
   it("JWT: unauthenticated request returns 401", async () => {
     const port = 39300 + Math.floor(Math.random() * 100);
     const dataDir = join(tmp, "jwt-data-1");
-    const secret = "test-jwt-secret-r51";
+    const secret = "test-jwt-secret-r51-xxxxxxxxxxxxxxx"; // ≥32 chars
 
     const srv = await startServer(["--http", "--port", String(port), "--path", dataDir], {
       env: { AGENTDB_HTTP_JWT_SECRET: secret },
@@ -133,7 +133,7 @@ describe.skipIf(!existsSync(CLI))("R5/1 auth wiring integration", () => {
   it("JWT: request with valid token returns 200 (not 401/403)", async () => {
     const port = 39400 + Math.floor(Math.random() * 100);
     const dataDir = join(tmp, "jwt-data-2");
-    const secret = "test-jwt-secret-r51-valid";
+    const secret = "test-jwt-secret-r51-valid-xxxxxxxxx";
 
     const srv = await startServer(["--http", "--port", String(port), "--path", dataDir], {
       env: { AGENTDB_HTTP_JWT_SECRET: secret },
@@ -151,7 +151,7 @@ describe.skipIf(!existsSync(CLI))("R5/1 auth wiring integration", () => {
   it("JWT: startup log confirms JWT auth is active", async () => {
     const port = 39500 + Math.floor(Math.random() * 100);
     const dataDir = join(tmp, "jwt-data-3");
-    const secret = "test-jwt-secret-r51-log";
+    const secret = "test-jwt-secret-r51-log-xxxxxxxxxx";
 
     const srv = await startServer(["--http", "--port", String(port), "--path", dataDir], {
       env: { AGENTDB_HTTP_JWT_SECRET: secret },
@@ -284,7 +284,7 @@ describe.skipIf(!existsSync(CLI))("R5/1 auth wiring integration", () => {
     const port = 39120 + Math.floor(Math.random() * 100);
     const dataDir = join(tmp, "precedence-data");
     const cfgPath = join(tmp, "precedence-cfg.json");
-    const secret = "precedence-jwt-secret-r63";
+    const secret = "precedence-jwt-secret-r63-xxxxxxx";
     const multiTok = "multi-tok-should-be-ignored";
 
     writeFileSync(cfgPath, JSON.stringify({ http: { multiToken: [multiTok] } }));
