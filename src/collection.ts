@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rm, mkdir, rename as fsRename } from "node:fs/promises";
+import { rm, mkdir, rename as fsRename, access } from "node:fs/promises";
 import { join as pathJoin } from "node:path";
 import { Store, FsBackend } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
@@ -473,7 +473,7 @@ export class Collection {
     // FS mode: snapshot-then-swap.
     // Build the new index into text.new/ while the existing text/ (and this.textIdx) remain
     // untouched and queryable. On abort, discard text.new/ and leave the original intact.
-    // On success, close both, rm text/, rename text.new/→text/, reopen.
+    // On success: rename text/→text.old/ → rename text.new/→text/ → rm text.old/ (atomic).
     const textNewDir = pathJoin(this._dir, "text.new");
     await rm(textNewDir, { recursive: true, force: true }); // clean up any previous stale temp dir
     await mkdir(textNewDir, { recursive: true });
@@ -543,11 +543,32 @@ export class Collection {
     this._rebuildingIdx = null;
     await newIdx.flush();
 
-    // Atomic swap: close old → close new → rm old dir → rename new→canonical → reopen.
+    // Atomic swap: rename text/→text.old/ → rename text.new/→text/ → rm text.old/.
+    // text/ is absent for at most one rename syscall (vs the previous rm-then-rename which
+    // left it absent across two separate calls). On rollback, text.old/ is renamed back to
+    // text/ so the collection remains queryable. Stale text.old/ from a previous crashed
+    // swap is removed before step 1; open() also does crash-recovery on next startup.
+    // Step 1 is skipped when text/ does not exist (first-time build or text search disabled).
     if (this.textIdx) await this.textIdx.close();
+    this.textIdx = null;
     await newIdx.close();
-    await rm(textDir, { recursive: true, force: true });
-    await fsRename(textNewDir, textDir);
+    const textOldDir = pathJoin(this._dir, "text.old");
+    const hadExistingIndex = await access(textDir).then(() => true, () => false);
+    if (hadExistingIndex) {
+      await rm(textOldDir, { recursive: true, force: true }); // remove any stale backup
+      await fsRename(textDir, textOldDir);                    // step 1: backup old
+    }
+    try {
+      await fsRename(textNewDir, textDir);                    // step 2: promote new
+    } catch (swapErr) {
+      // Rollback: restore old index so the collection remains queryable.
+      if (hadExistingIndex) await fsRename(textOldDir, textDir).catch(() => {});
+      await rm(textNewDir, { recursive: true, force: true }).catch(() => {});
+      throw swapErr;
+    }
+    if (hadExistingIndex) {
+      await rm(textOldDir, { recursive: true, force: true }); // step 3: drop backup
+    }
     this.textIdx = await TermLog.open({
       dir: textDir,
       k1: this.opts.bm25K1 ?? 1.2,
@@ -741,7 +762,24 @@ export class Collection {
     let termlogAlreadyIndexed = false;
     if (this.opts.textSearch) {
       const textDir = pathJoin(dir, "text");
-      if (!this._termlogBackend) await mkdir(textDir, { recursive: true });
+      if (!this._termlogBackend) {
+        // Crash recovery for an interrupted atomic swap in rebuildTextIndex:
+        //   After step 1 (rename text/→text.old/), before step 2 (rename text.new/→text/):
+        //     text.old/ exists, text/ absent → restore text.old/→text/.
+        //   After step 2, before step 3 (rm text.old/):
+        //     text.old/ exists, text/ present → delete stale backup.
+        const textOldDir = pathJoin(dir, "text.old");
+        const oldExists = await access(textOldDir).then(() => true, () => false);
+        if (oldExists) {
+          const canonExists = await access(textDir).then(() => true, () => false);
+          if (canonExists) {
+            await rm(textOldDir, { recursive: true, force: true });
+          } else {
+            await fsRename(textOldDir, textDir);
+          }
+        }
+        await mkdir(textDir, { recursive: true });
+      }
       this.textIdx = await TermLog.open({
         dir: textDir,
         backend: this._termlogBackend,

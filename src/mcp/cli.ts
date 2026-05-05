@@ -304,22 +304,36 @@ async function main(): Promise<void> {
     const corsOrigins = http.cors;
 
     // Auth priority: JWT > multi-token > single bearer token.
-    // Only one auth mechanism is wired per process; the others are ignored.
+    // Only one auth mechanism is wired per process; the others are silently ignored.
+    // Warn when multiple are configured so operators know which one wins.
     let authFn: import("./auth.js").AuthFn | undefined;
     let authTokens: TokenMap | undefined;
 
-    if (http.jwt?.secret) {
+    const hasJwt = !!http.jwt?.secret;
+    const hasMulti = !!(http.multiToken && http.multiToken.length > 0);
+    const hasBearer = !!http.auth;
+    const activeMechanisms = [hasJwt && "jwt", hasMulti && "multi-token", hasBearer && "bearer"].filter(Boolean);
+    if (activeMechanisms.length > 1) {
+      const winner = activeMechanisms[0] as string; // priority order: jwt > multi-token > bearer
+      console.warn(
+        `agentdb: multiple auth mechanisms configured (${activeMechanisms.join(", ")}). ` +
+        `Using ${winner}; the others are ignored. ` +
+        `Priority order: jwt > multi-token > bearer.`
+      );
+    }
+
+    if (hasJwt) {
       // JWT via static secret (HMAC)
       authFn = createJwtAuth({
-        secret: http.jwt.secret,
-        audience: http.jwt.audience,
-        issuer: http.jwt.issuer,
+        secret: http.jwt!.secret,
+        audience: http.jwt!.audience,
+        issuer: http.jwt!.issuer,
         expectedTenantId: tenantId || undefined,
       });
-    } else if (http.multiToken && http.multiToken.length > 0) {
+    } else if (hasMulti) {
       // Multiple bearer tokens, each gets a positional agent ID
       authTokens = Object.fromEntries(
-        http.multiToken.map((tok, i) => [tok, { agentId: `token-${i + 1}` }]),
+        http.multiToken!.map((tok, i) => [tok, { agentId: `token-${i + 1}` }]),
       ) as TokenMap;
     }
 
