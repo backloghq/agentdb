@@ -6,5 +6,6 @@ NOTES.md
 .claude/
 data/
 blobs/
+agentdb-s3-integration-*/
 .env
 .env.*

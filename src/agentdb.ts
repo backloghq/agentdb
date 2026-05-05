@@ -298,10 +298,12 @@ export class AgentDB {
       try {
         const { S3Backend: TermlogS3Backend } = await import("@backloghq/termlog-s3");
         const b = this.opts.backend as unknown as Record<string, unknown>;
+        // Strip trailing slashes so the join never produces // double-slash keys.
+        const opslogPrefix = (b["prefix"] as string ?? "").replace(/\/+$/, "");
         const tlBackend = new TermlogS3Backend({
           client: b["client"] as import("@aws-sdk/client-s3").S3Client,
           bucket: b["bucket"] as string,
-          prefix: `${b["prefix"] as string}${name}/text/`,
+          prefix: opslogPrefix ? `${opslogPrefix}/${name}/text/` : `${name}/text/`,
         });
         col.setTermlogBackend(tlBackend);
       } catch {

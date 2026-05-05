@@ -102,8 +102,10 @@ describe.skipIf(!integration)("AgentDB S3 + termlog-s3 integration", () => {
   }, 60000);
 
   it("opslog and termlog data live under expected S3 prefixes", async () => {
-    // Verify S3 key layout: opslog data under basePrefix/collections/docs/
-    // termlog data under basePrefix/collections/docs/text/
+    // AgentDB passes a single S3Backend (prefix=basePrefix) to all collections.
+    // Opslog stores its manifest/WAL/snapshot flat under that prefix.
+    // Termlog stores its data under docs/text/ relative to that prefix
+    // (built as <opslogPrefix>/<collectionName>/text/ in _openCollection).
     const allKeys: string[] = [];
     let token: string | undefined;
     do {
@@ -116,12 +118,12 @@ describe.skipIf(!integration)("AgentDB S3 + termlog-s3 integration", () => {
       token = list.IsTruncated ? list.NextContinuationToken : undefined;
     } while (token);
 
-    // Opslog data: manifest.json or WAL batches under collections/docs/
-    const opslogKeys = allKeys.filter((k) => k.includes("collections/docs/") && !k.includes("/text/"));
+    // Opslog data: manifest.json lives directly under the basePrefix
+    const opslogKeys = allKeys.filter((k) => !k.includes("/text/"));
     expect(opslogKeys.length).toBeGreaterThan(0);
 
-    // Termlog data: manifest or segment files under collections/docs/text/
-    const termlogKeys = allKeys.filter((k) => k.includes("collections/docs/text/"));
+    // Termlog data: manifest or segment files under docs/text/ (relative to basePrefix)
+    const termlogKeys = allKeys.filter((k) => k.includes("/docs/text/"));
     expect(termlogKeys.length).toBeGreaterThan(0);
   }, 30000);
 
@@ -134,7 +136,7 @@ describe.skipIf(!integration)("AgentDB S3 + termlog-s3 integration", () => {
     const before = await col.search("rust");
     expect(before.records.some((r) => r._id === "r4")).toBe(true);
 
-    await col.delete("r4");
+    await col.deleteById("r4");
     await db.close();
 
     // Reopen — r4 must not appear
