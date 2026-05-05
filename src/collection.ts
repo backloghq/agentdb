@@ -584,9 +584,19 @@ export class Collection {
       try {
         await fsRename(textNewDir, textDir);                    // step 2: promote new
       } catch (swapErr) {
-        // Rollback: restore old index so the collection remains queryable.
+        // Rollback: restore old index on disk so the collection remains queryable.
         if (hadExistingIndex) await fsRename(textOldDir, textDir).catch(() => {});
         await rm(textNewDir, { recursive: true, force: true }).catch(() => {});
+        // Re-open textIdx from the restored directory so bm25Search works again.
+        // Without this, this.textIdx would remain null after the throw and every
+        // subsequent bm25Search call would fail with "BM25 search not enabled".
+        if (hadExistingIndex) {
+          this.textIdx = await TermLog.open({
+            dir: textDir,
+            k1: this.opts.bm25K1 ?? 1.2,
+            b: this.opts.bm25B ?? 0.75,
+          }).catch(() => null);
+        }
         throw swapErr;
       }
       if (hadExistingIndex) {

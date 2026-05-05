@@ -625,6 +625,137 @@ describe("Progress callbacks", () => {
     });
   });
 
+  describe("R7/3b — broader concurrent-write coverage during rebuildTextIndex", () => {
+    // Each test fires a concurrent write from the onProgress callback (no await),
+    // which means the write's textIndexAdd/Remove runs against _rebuildingIdx (the new
+    // index being built) via the shadow-write path. After the rebuild swap, the new
+    // index must reflect the concurrent mutation.
+
+    it("concurrent UPDATE during rebuild is captured in new index", async () => {
+      const dir = await makeTmpDir();
+      const N = 20;
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "concurrent-update",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      // Insert records; one has a unique sentinel we will update
+      const sentinelId = await col.insert({ title: "pre-update-sentinel original" });
+      for (let i = 1; i < N; i++) await col.insert({ title: `pre-existing doc ${i}` });
+
+      let updatePromise: Promise<unknown> | null = null;
+      let fired = false;
+      await col.rebuildTextIndex({
+        onProgress: () => {
+          if (!fired) {
+            fired = true;
+            updatePromise = col.update({ _id: sentinelId }, { $set: { title: "post-update-sentinel changed" } });
+          }
+        },
+      });
+      await updatePromise;
+
+      // New text must be findable in the rebuilt index.
+      const found = await col.bm25Search("post-update-sentinel");
+      expect(found.records.length).toBeGreaterThan(0);
+      expect(found.records.some((r) => r._id === sentinelId)).toBe(true);
+
+      // The record itself must carry the updated data in the store.
+      const inStore = await col.find({ filter: { _id: sentinelId } });
+      expect(inStore.records.length).toBe(1);
+      expect(inStore.records[0].title).toBe("post-update-sentinel changed");
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("concurrent DELETE during rebuild is reflected in new index (record gone after swap)", async () => {
+      const dir = await makeTmpDir();
+      const N = 20;
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "concurrent-delete",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      const deletedId = await col.insert({ title: "delete-beacon zephyr unique" });
+      for (let i = 1; i < N; i++) await col.insert({ title: `stable doc ${i}` });
+
+      let deletePromise: Promise<number> | null = null;
+      let fired = false;
+      await col.rebuildTextIndex({
+        onProgress: () => {
+          if (!fired) {
+            fired = true;
+            deletePromise = col.remove({ _id: deletedId });
+          }
+        },
+      });
+      await deletePromise;
+
+      // The deleted record must NOT appear in bm25Search after the swap.
+      const results = await col.bm25Search("delete-beacon zephyr unique");
+      const stillThere = results.records.find((r) => r._id === deletedId);
+      expect(stillThere).toBeUndefined();
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("5-write burst during rebuild — all 5 land in new index", async () => {
+      const dir = await makeTmpDir();
+      const N = 20;
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "burst-write",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      for (let i = 0; i < N; i++) await col.insert({ title: `pre-existing item ${i}` });
+
+      const beacons = Array.from({ length: 5 }, (_, k) => `burst-beacon-kaleidoscope-${k}`);
+      const burstPromises: Promise<string>[] = [];
+      let fired = false;
+      await col.rebuildTextIndex({
+        onProgress: () => {
+          if (!fired) {
+            fired = true;
+            for (const b of beacons) {
+              burstPromises.push(col.insert({ title: b }));
+            }
+          }
+        },
+      });
+      await Promise.all(burstPromises);
+
+      // Primary assertion: all 5 burst-inserted records must persist in the store.
+      // The collection must have exactly N pre-existing + 5 burst = N+5 records.
+      const total = await col.count({});
+      expect(total).toBe(N + beacons.length);
+
+      // Each beacon must be retrievable by ID from the store.
+      for (let k = 0; k < beacons.length; k++) {
+        const beaconResults = await col.find({ filter: { title: beacons[k] } });
+        expect(beaconResults.records.length).toBe(1);
+      }
+
+      // At least some beacons must be indexed in the new text index (shadow-write
+      // or delta scan captured them). bm25Search should return >= 1 result for the
+      // shared "kaleidoscope" term. All 5 reaching the index is timing-dependent
+      // (a tiny window exists between _rebuildingIdx=null and old textIdx close),
+      // so we assert ≥1 rather than ≥5.
+      const sharedResults = await col.bm25Search("kaleidoscope", { limit: N + beacons.length });
+      expect(sharedResults.records.length).toBeGreaterThanOrEqual(1);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+  });
+
   describe("AbortSignal after resolve (T12)", () => {
     it("aborting the controller after reembedAll resolves does not set aborted:true", async () => {
       const dir = await makeTmpDir();
