@@ -339,4 +339,56 @@ describe("Progress callbacks", () => {
       await rm(dir, { recursive: true, force: true });
     });
   });
+
+  describe("Empty-collection edge cases (T11)", () => {
+    it("reembedAll on empty collection: spy not called, embedded=0, aborted=false", async () => {
+      const dir = await makeTmpDir();
+      const db = new AgentDB(dir, { embeddings: { provider: hashProvider } });
+      await db.init();
+      const col = await db.collection(defineSchema({ name: "empty-reembed", fields: { v: { type: "string" } } }));
+      // No inserts — collection is empty
+      const spy = vi.fn();
+      const result = await col.reembedAll({ onProgress: spy });
+      expect(spy).not.toHaveBeenCalled();
+      expect(result.embedded).toBe(0);
+      expect(result.aborted).toBeFalsy();
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("db.import on empty payload: spy not called, records=0", async () => {
+      const dir = await makeTmpDir();
+      const db = new AgentDB(dir);
+      await db.init();
+      const spy = vi.fn();
+      const result = await db.import(
+        { version: 1, exportedAt: new Date().toISOString(), collections: { items: { records: [] } } },
+        { onProgress: spy },
+      );
+      expect(spy).not.toHaveBeenCalled();
+      expect(result.records).toBe(0);
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe("AbortSignal after resolve (T12)", () => {
+    it("aborting the controller after reembedAll resolves does not set aborted:true", async () => {
+      const dir = await makeTmpDir();
+      const db = new AgentDB(dir, { embeddings: { provider: hashProvider } });
+      await db.init();
+      const col = await db.collection(defineSchema({ name: "abort-after", fields: { v: { type: "string" } } }));
+      for (let i = 0; i < 5; i++) await col.insert({ v: `text ${i}` });
+
+      const controller = new AbortController();
+      const result = await col.reembedAll({ signal: controller.signal });
+      // Abort AFTER the promise already resolved
+      controller.abort();
+      // Result was already determined — must not be retroactively marked aborted
+      expect(result.aborted).toBeFalsy();
+      expect(result.embedded).toBe(5);
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+  });
 });

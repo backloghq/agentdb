@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { HnswIndex } from "../src/hnsw.js";
 
 /** Simple seeded PRNG for deterministic tests. */
@@ -233,14 +233,21 @@ describe("HnswIndex", () => {
       expect(idx.currentMaxLayer).toBeLessThanOrEqual(16);
     });
 
-    it("derives a larger cap for large M values", () => {
-      // For M=64: floor(log(1e6)/log(64)) = floor(6/1.806) = floor(3.32) = 3 → max(16, 3) = 16
-      // For M=2: floor(log(1e6)/log(2)) = floor(6/0.693) = floor(19.93) = 19 → max(16, 19) = 19
+    it("derived cap allows levels above 16 for M=2 (guards against hardcoded-16 regression)", () => {
+      // For M=2: derived cap = max(16, floor(log(1e6)/log(2))) = max(16, 19) = 19
+      // randomLevel() computes: floor(-ln(rand) * mL) where mL = 1/ln(M) = 1/ln(2) ≈ 1.4427
+      // To force level=17: rand ≈ 7e-6 → -ln(7e-6) ≈ 11.87 → 11.87 * 1.4427 ≈ 17.12 → floor=17
+      // min(17, 19) = 17 ✓ (with correct cap). Old hardcoded cap=16 would return 16 instead.
       const idxM2 = new HnswIndex({ dimensions: DIM, M: 2 });
-      for (let i = 0; i < 500; i++) {
-        idxM2.add(`v${i}`, randomVector(DIM));
+      const randSpy = vi.spyOn(Math, "random").mockReturnValueOnce(7e-6);
+      try {
+        idxM2.add("forced", randomVector(DIM));
+        // With correct derived cap of 19, level 17 is permitted
+        expect(idxM2.currentMaxLayer).toBe(17);
+      } finally {
+        randSpy.mockRestore();
       }
-      // With M=2 the derived cap is 19; actual max should be ≤ 19
+      // Sanity: cap is 19 (not 16) for M=2
       expect(idxM2.currentMaxLayer).toBeLessThanOrEqual(19);
     });
   });

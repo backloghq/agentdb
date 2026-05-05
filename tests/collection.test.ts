@@ -1715,16 +1715,38 @@ describe("Collection", () => {
       }
     });
 
-    it("does not warn when limit is within maxFindLimit", async () => {
+    it("does not warn when requestedLimit equals maxFindLimit (cap boundary)", async () => {
+      // limit=5 = cap=5 → requestedLimit(5) is not > limit(5) → no warn
+      // This exercises the exact boundary: the check is requestedLimit > limit, not >=
       const { col: c, dir } = await makeCol("cap5b", 5);
       for (let i = 0; i < 10; i++) await c.insert({ idx: i });
 
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
-        const result = await c.find({ limit: 3 });
-        expect(result.records).toHaveLength(3);
+        const result = await c.find({ limit: 5 });
+        expect(result.records).toHaveLength(5);
+        expect(result.truncated).toBe(true); // 10 records total, only 5 returned
+        expect(warnSpy).not.toHaveBeenCalled(); // limit == cap, not > cap → no warn
+      } finally {
+        warnSpy.mockRestore();
+        await c.close();
+        const { rm } = await import("node:fs/promises");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("warns when requestedLimit exceeds maxFindLimit (cap+1 case)", async () => {
+      // limit=6 > cap=5 → requestedLimit(6) > limit(5) → warn fires
+      const { col: c, dir } = await makeCol("cap5c", 5);
+      for (let i = 0; i < 10; i++) await c.insert({ idx: i });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const result = await c.find({ limit: 6 });
+        expect(result.records).toHaveLength(5); // capped at 5
         expect(result.truncated).toBe(true);
-        expect(warnSpy).not.toHaveBeenCalled();
+        expect(warnSpy).toHaveBeenCalledOnce();
+        expect(warnSpy.mock.calls[0][0]).toContain("maxFindLimit=5");
       } finally {
         warnSpy.mockRestore();
         await c.close();
@@ -1744,6 +1766,33 @@ describe("Collection", () => {
       await c.close();
       const { rm } = await import("node:fs/promises");
       await rm(dir, { recursive: true, force: true });
+    });
+
+    it("AgentDB-level maxFindLimit propagates to all collections (regression T8)", async () => {
+      // Guards against the propagation path: AgentDBOptions.maxFindLimit → CollectionOptions
+      const { AgentDB } = await import("../src/agentdb.js");
+      const dir = await mkdtemp(join(tmpdir(), "agentdb-mfl-t8-"));
+      try {
+        const db = new AgentDB(dir, { maxFindLimit: 5 });
+        await db.init();
+        const col = await db.collection("t8-col");
+        for (let i = 0; i < 10; i++) await col.insert({ idx: i });
+
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          const result = await col.find({ limit: 100 });
+          expect(result.records).toHaveLength(5);
+          expect(result.truncated).toBe(true);
+          expect(warnSpy).toHaveBeenCalledOnce();
+          expect(warnSpy.mock.calls[0][0]).toContain("maxFindLimit=5");
+        } finally {
+          warnSpy.mockRestore();
+        }
+        await db.close();
+      } finally {
+        const { rm } = await import("node:fs/promises");
+        await rm(dir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -1821,6 +1870,39 @@ describe("Collection", () => {
       expect(col.filterCacheSize).toBe(8);
       await col.close();
       await rm(dir, { recursive: true, force: true });
+    });
+
+    it("AgentDB-level filterCacheSize propagates to all collections (regression T13a)", async () => {
+      const { AgentDB } = await import("../src/agentdb.js");
+      const dir = await mkdtemp(join(tmpdir(), "agentdb-t13a-"));
+      try {
+        const db = new AgentDB(dir, { filterCacheSize: 8 });
+        await db.init();
+        const col = await db.collection("t13a-col");
+        expect(col.filterCacheSize).toBe(8);
+        await db.close();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("AgentDB option propagation regression (T13)", () => {
+    it("mergeThreshold and mergeJsonlThreshold propagate from AgentDB to DiskStore", async () => {
+      const { AgentDB } = await import("../src/agentdb.js");
+      const dir = await mkdtemp(join(tmpdir(), "agentdb-t13b-"));
+      try {
+        const db = new AgentDB(dir, { storageMode: "disk", mergeThreshold: 4, mergeJsonlThreshold: 3 });
+        await db.init();
+        const col = await db.collection("t13b-col");
+        const ds = col.getDiskStore();
+        expect(ds).not.toBeNull();
+        expect(ds!.mergeThreshold).toBe(4);
+        expect(ds!.mergeJsonlThreshold).toBe(3);
+        await db.close();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     });
   });
 });
