@@ -74,8 +74,8 @@ export interface AgentDBOptions {
   maxIndexCardinality?: number;
   /** Per-collection compiled-filter LRU cache size (default: 64). Per-collection override via CollectionOptions.filterCacheSize. */
   filterCacheSize?: number;
-  /** Number of incremental Parquet files before triggering a full merge (default: 10). Per-collection override via CollectionOptions.mergeThreshold. */
-  mergeThreshold?: number;
+  /** Number of incremental Parquet files before triggering a full merge (default: 10). Per-collection override via CollectionOptions.mergeParquetThreshold. */
+  mergeParquetThreshold?: number;
   /** Number of incremental JSONL delta files before triggering a full merge (default: 8). Per-collection override via CollectionOptions.mergeJsonlThreshold. */
   mergeJsonlThreshold?: number;
   /** HNSW index parameters (M, efConstruction, efSearch, maxLevel). Applied to all collections as a default. Per-collection override via CollectionOptions.hnsw. */
@@ -151,7 +151,7 @@ export class AgentDB {
       maxFindLimit: opts?.maxFindLimit,
       maxIndexCardinality: opts?.maxIndexCardinality,
       filterCacheSize: opts?.filterCacheSize,
-      mergeThreshold: opts?.mergeThreshold,
+      mergeParquetThreshold: opts?.mergeParquetThreshold,
       mergeJsonlThreshold: opts?.mergeJsonlThreshold,
       hnsw: opts?.hnsw,
     };
@@ -309,8 +309,8 @@ export class AgentDB {
         ? { maxIndexCardinality: this.opts.maxIndexCardinality } : {}),
       ...(this.opts.filterCacheSize !== undefined && baseOpts?.filterCacheSize === undefined
         ? { filterCacheSize: this.opts.filterCacheSize } : {}),
-      ...(this.opts.mergeThreshold !== undefined && baseOpts?.mergeThreshold === undefined
-        ? { mergeThreshold: this.opts.mergeThreshold } : {}),
+      ...(this.opts.mergeParquetThreshold !== undefined && baseOpts?.mergeParquetThreshold === undefined
+        ? { mergeParquetThreshold: this.opts.mergeParquetThreshold } : {}),
       ...(this.opts.mergeJsonlThreshold !== undefined && baseOpts?.mergeJsonlThreshold === undefined
         ? { mergeJsonlThreshold: this.opts.mergeJsonlThreshold } : {}),
       ...(this.opts.hnsw !== undefined && baseOpts?.hnsw === undefined
@@ -370,7 +370,7 @@ export class AgentDB {
         extractColumns: schema?.indexes ?? [],
         maxIndexCardinality: mergedOpts?.maxIndexCardinality,
         diskConcurrency: mergedOpts?.diskConcurrency,
-        mergeThreshold: mergedOpts?.mergeThreshold,
+        mergeParquetThreshold: mergedOpts?.mergeParquetThreshold,
         mergeJsonlThreshold: mergedOpts?.mergeJsonlThreshold,
       });
       await diskStore.load();

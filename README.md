@@ -871,8 +871,8 @@ Every configurable knob, its location, default, and the workload signal that sho
 | `filterCacheSize` | `AgentDB` / `Collection` | `64` | a collection has many distinct query shapes (>64 unique filters in a session) | 32 – 256 |
 | `cacheSize` | `AgentDB` / `Collection` | `1_000` | `metrics().recordCacheHits / recordCacheFetches` hit rate is low (<50%) on a hot collection | 100 – 100K |
 | `rowGroupSize` | `AgentDB` / `Collection` | `5_000` | column scan performance is slow (lower = smaller seek range, higher = fewer S3 requests) | 1K – 20K |
-| `mergeThreshold` | `AgentDB` / `Collection` | `10` | S3 per-request cost is high (raise), or local read amplification is high (lower) | 4 – 50 |
-| `mergeJsonlThreshold` | `AgentDB` / `Collection` | `8` | same as `mergeThreshold` — controls JSONL delta file accumulation before full merge | 4 – 40 |
+| `mergeParquetThreshold` | `AgentDB` / `Collection` | `10` | S3 per-request cost is high (raise), or local read amplification is high (lower) | 4 – 50 |
+| `mergeJsonlThreshold` | `AgentDB` / `Collection` | `8` | same as `mergeParquetThreshold` — controls JSONL delta file accumulation before full merge | 4 – 40 |
 | `diskConcurrency` | `AgentDB` / `Collection` | `20` | S3 point-lookup latency is high (raise to overlap more requests); has no effect on local FS | 4 – 64 |
 | `embeddingBatchSize` | `AgentDB` / `Collection` | `256` | embedding provider rate-limit errors or timeouts on large batch runs | 8 – 512 |
 | `hnsw.M` | `AgentDB` / `Collection` | `16` | recall is low (raise) or index build is slow and you accept lower recall (lower) | 4 – 64 |
@@ -914,7 +914,7 @@ Every hard cap in the system, what triggers it, and how to change it.
 | `maxSessions` | `100` | 101st concurrent MCP HTTP session arrives | HTTP 503 returned | `HttpOptions.maxSessions` |
 | `auditBufferSize` | `10_000` | 10,001st audit log entry recorded | Oldest entry silently dropped (ring buffer) | `HttpOptions.auditBufferSize` |
 | `auditMaxLimit` | `10_000` | `/audit?limit=N` with N exceeding cap | `limit` silently capped at maximum | `HttpOptions.auditMaxLimit` |
-| `mergeThreshold` | `10` | 10 incremental Parquet files accumulate before compaction | Full merge triggered on next close | `AgentDB/CollectionOptions.mergeThreshold` |
+| `mergeParquetThreshold` | `10` | 10 incremental Parquet files accumulate before compaction | Full merge triggered on next close | `AgentDB/CollectionOptions.mergeParquetThreshold` |
 | `mergeJsonlThreshold` | `8` | 8 incremental JSONL delta files accumulate | Full merge triggered on next close | `AgentDB/CollectionOptions.mergeJsonlThreshold` |
 
 **Removed in v2.0:** the 256 MB per-collection text index cap (~25–30K document ceiling) is gone. termlog uses a segment-based LSM with no in-memory size limit.

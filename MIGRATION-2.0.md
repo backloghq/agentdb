@@ -97,7 +97,7 @@ New configurable knobs (all optional, all with defaults matching previous hard-c
 | `maxFindLimit` | `AgentDB` / `Collection` | `10_000` | Hard cap on `find()` results; emits `console.warn` on truncation |
 | `maxIndexCardinality` | `AgentDB` / `Collection` | `1_000` | B-tree index cardinality threshold; emits `console.warn` when exceeded |
 | `filterCacheSize` | `AgentDB` / `Collection` | `64` | Per-collection compiled-filter LRU cache size |
-| `mergeThreshold` | `AgentDB` / `Collection` | `10` | Incremental Parquet files before full merge |
+| `mergeParquetThreshold` | `AgentDB` / `Collection` | `10` | Incremental Parquet files before full merge |
 | `mergeJsonlThreshold` | `AgentDB` / `Collection` | `8` | Incremental JSONL delta files before full merge |
 | `diskConcurrency` | `AgentDB` / `Collection` | `20` | Parallel JSONL reads for S3 point-lookups |
 | `maxSessions` | `HttpOptions` | `100` | Max concurrent MCP HTTP sessions |

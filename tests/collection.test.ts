@@ -1888,16 +1888,16 @@ describe("Collection", () => {
   });
 
   describe("AgentDB option propagation regression (T13)", () => {
-    it("mergeThreshold and mergeJsonlThreshold propagate from AgentDB to DiskStore", async () => {
+    it("mergeParquetThreshold and mergeJsonlThreshold propagate from AgentDB to DiskStore", async () => {
       const { AgentDB } = await import("../src/agentdb.js");
       const dir = await mkdtemp(join(tmpdir(), "agentdb-t13b-"));
       try {
-        const db = new AgentDB(dir, { storageMode: "disk", mergeThreshold: 4, mergeJsonlThreshold: 3 });
+        const db = new AgentDB(dir, { storageMode: "disk", mergeParquetThreshold: 4, mergeJsonlThreshold: 3 });
         await db.init();
         const col = await db.collection("t13b-col");
         const ds = col.getDiskStore();
         expect(ds).not.toBeNull();
-        expect(ds!.mergeThreshold).toBe(4);
+        expect(ds!.mergeParquetThreshold).toBe(4);
         expect(ds!.mergeJsonlThreshold).toBe(3);
         await db.close();
       } finally {

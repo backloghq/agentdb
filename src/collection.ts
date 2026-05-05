@@ -153,8 +153,8 @@ export interface CollectionOptions {
   maxIndexCardinality?: number;
   /** Per-collection compiled-filter LRU cache size (default: 64). Raise for collections with many distinct query shapes; lower for memory-constrained collections with few patterns. Overrides AgentDBOptions.filterCacheSize for this collection. */
   filterCacheSize?: number;
-  /** Number of incremental Parquet files before triggering a full merge (default: 10). Overrides AgentDBOptions.mergeThreshold for this collection. */
-  mergeThreshold?: number;
+  /** Number of incremental Parquet files before triggering a full merge (default: 10). Overrides AgentDBOptions.mergeParquetThreshold for this collection. */
+  mergeParquetThreshold?: number;
   /** Number of incremental JSONL delta files before triggering a full merge (default: 8). Overrides AgentDBOptions.mergeJsonlThreshold for this collection. */
   mergeJsonlThreshold?: number;
   /** HNSW index parameters for approximate nearest neighbor search. Overrides AgentDBOptions.hnsw for this collection. */

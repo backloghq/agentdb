@@ -497,17 +497,17 @@ describe("Parquet compaction and reader", () => {
   });
 
   describe("DiskStore compaction thresholds", () => {
-    it("mergeThreshold and mergeJsonlThreshold getters reflect defaults", async () => {
+    it("mergeParquetThreshold and mergeJsonlThreshold getters reflect defaults", async () => {
       const { DiskStore } = await import("../src/disk-store.js");
       const store = new DiskStore(backend);
-      expect(store.mergeThreshold).toBe(10);
+      expect(store.mergeParquetThreshold).toBe(10);
       expect(store.mergeJsonlThreshold).toBe(8);
     });
 
-    it("mergeThreshold and mergeJsonlThreshold getters reflect custom values", async () => {
+    it("mergeParquetThreshold and mergeJsonlThreshold getters reflect custom values", async () => {
       const { DiskStore } = await import("../src/disk-store.js");
-      const store = new DiskStore(backend, { mergeThreshold: 3, mergeJsonlThreshold: 2 });
-      expect(store.mergeThreshold).toBe(3);
+      const store = new DiskStore(backend, { mergeParquetThreshold: 3, mergeJsonlThreshold: 2 });
+      expect(store.mergeParquetThreshold).toBe(3);
       expect(store.mergeJsonlThreshold).toBe(2);
     });
 
@@ -547,9 +547,9 @@ describe("Parquet compaction and reader", () => {
       expect(store.shouldCompact()).toBe(false);
     });
 
-    it("compact() uses mergeThreshold to decide incremental vs full", async () => {
+    it("compact() uses mergeParquetThreshold to decide incremental vs full", async () => {
       const { DiskStore } = await import("../src/disk-store.js");
-      const store = new DiskStore(backend, { mergeThreshold: 2 });
+      const store = new DiskStore(backend, { mergeParquetThreshold: 2 });
 
       // Initial full compact
       const r0: Array<[string, Record<string, unknown>]> = [["r-0", { _id: "r-0", n: 0 }]];
