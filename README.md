@@ -289,6 +289,22 @@ await db.init();
 
 AWS credentials use the standard SDK chain (env vars, IAM role, `~/.aws/config`). The AWS SDK is only loaded when S3 is configured — filesystem users never pay the cost.
 
+### Text search on S3
+
+When agentdb detects an S3 opslog backend, text indexes automatically use `@backloghq/termlog-s3` instead of the local filesystem. No configuration needed — the same bucket and prefix are used, with a per-collection subpath (`<prefix>/<collection>/text/`). Install the optional peer dependency to enable it:
+
+```bash
+npm install @backloghq/termlog-s3
+```
+
+### Single-writer constraint
+
+Both `@backloghq/opslog-s3` and `@backloghq/termlog-s3` require that only **one agentdb process** writes to a given `(bucket, prefix)` at a time. Multiple concurrent writers will corrupt the WAL. For multi-process setups, use the HTTP MCP server as a single-writer proxy.
+
+### S3 lifecycle recommendation
+
+Configure an `AbortIncompleteMultipartUpload` lifecycle rule (1-day expiry) on the bucket. This cleans up orphaned multipart uploads from crashed writers. See the [termlog-s3 README](https://github.com/backloghq/termlog-s3#readme) for bucket setup details.
+
 ## Filter Syntax
 
 Two syntaxes. JSON is primary, compact string is secondary.

@@ -158,9 +158,14 @@ export class Collection {
   // True once ensureIndexesLoaded has run and the WAL store has been replayed into textIdx.
   // Prevents ensureIndexesLoaded from overwriting current-session inserts.
   private _textIdxLoaded = false;
+  // Optional termlog StorageBackend — set to S3Backend when running in S3 mode.
+  private _termlogBackend: import("@backloghq/termlog").StorageBackend | undefined = undefined;
 
   /** Set disk store for disk-backed mode. Called by AgentDB during open. */
   setDiskStore(ds: DiskStore): void { this._diskStore = ds; }
+
+  /** Set an alternative termlog StorageBackend (e.g. S3Backend from @backloghq/termlog-s3). Called by AgentDB before open() when running in S3 mode. */
+  setTermlogBackend(backend: import("@backloghq/termlog").StorageBackend): void { this._termlogBackend = backend; }
 
   /**
    * Ensure disk indexes are loaded, then replay any current-session WAL entries into
@@ -310,10 +315,13 @@ export class Collection {
     // Close existing TermLog if open, then wipe and recreate the text directory.
     if (this.textIdx) await this.textIdx.close();
     const textDir = pathJoin(this._dir, "text");
-    await rm(textDir, { recursive: true, force: true });
-    await mkdir(textDir, { recursive: true });
+    if (!this._termlogBackend) {
+      await rm(textDir, { recursive: true, force: true });
+      await mkdir(textDir, { recursive: true });
+    }
     this.textIdx = await TermLog.open({
       dir: textDir,
+      backend: this._termlogBackend,
       k1: this.opts.bm25K1 ?? 1.2,
       b: this.opts.bm25B ?? 0.75,
     });
@@ -493,9 +501,10 @@ export class Collection {
     // Open TermLog for text search (if enabled) before WAL replay so adds land in the index.
     if (this.opts.textSearch) {
       const textDir = pathJoin(dir, "text");
-      await mkdir(textDir, { recursive: true });
+      if (!this._termlogBackend) await mkdir(textDir, { recursive: true });
       this.textIdx = await TermLog.open({
         dir: textDir,
+        backend: this._termlogBackend,
         k1: this.opts.bm25K1 ?? 1.2,
         b: this.opts.bm25B ?? 0.75,
       });

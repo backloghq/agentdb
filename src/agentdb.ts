@@ -291,6 +291,24 @@ export class AgentDB {
       col.setEmbeddingProvider(this.embeddingProvider);
     }
 
+    // Wire termlog-s3 S3Backend when opslog is running on S3.
+    // Detected via constructor name since opslog-s3 S3Backend fields are private.
+    // Uses a scoped prefix: <opslogPrefix>/<collectionName>/text/
+    if (this.opts.backend && this.opts.backend.constructor.name === "S3Backend") {
+      try {
+        const { S3Backend: TermlogS3Backend } = await import("@backloghq/termlog-s3");
+        const b = this.opts.backend as unknown as Record<string, unknown>;
+        const tlBackend = new TermlogS3Backend({
+          client: b["client"] as import("@aws-sdk/client-s3").S3Client,
+          bucket: b["bucket"] as string,
+          prefix: `${b["prefix"] as string}${name}/text/`,
+        });
+        col.setTermlogBackend(tlBackend);
+      } catch {
+        // @backloghq/termlog-s3 not installed — text index falls back to FsBackend
+      }
+    }
+
     // Determine storage mode for this collection
     const schema = this.schemas.get(name);
     const mode = schema?.collectionOptions?.storageMode ?? this.opts.storageMode ?? "memory";
