@@ -243,9 +243,9 @@ function coerceValue(raw: string, varName: string, spec: EnvVarType, path: strin
     case "json": {
       try {
         return JSON.parse(raw);
-      } catch {
+      } catch (err) {
         throw new ConfigValidationError(
-          `${varName}='${raw}' is not valid JSON`,
+          `${varName}=<redacted> is not valid JSON (${(err as Error).message})`,
           path,
           "env",
         );
@@ -394,7 +394,20 @@ export function loadAgentDBConfig(opts?: LoadConfigOptions): AgentDBConfigFile {
   const merged = deepMerge(
     deepMerge(fileConfig as Record<string, unknown>, envConfig as Record<string, unknown>),
     cliConfig as Record<string, unknown>,
-  ) as AgentDBConfigFile;
+  );
 
-  return merged;
+  // Final shape validation — catches env-supplied values that individually
+  // coerced fine but produced a wrong-shape object (e.g. JSON array vs string[]).
+  const result = ConfigFileSchema.safeParse(merged);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    const path = issue.path.map(String);
+    throw new ConfigValidationError(
+      `${path.join(".")} — ${issue.message}`,
+      path,
+      "env",
+    );
+  }
+
+  return result.data;
 }

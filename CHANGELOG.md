@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- **`ConfigFileSchema` removed from package root value exports** — it was leaking zod as a runtime peer-dep for library consumers. `ConfigFileSchema` remains exported from `src/config.ts` for internal use; consumers who need to validate a config shape should use `loadAgentDBConfig` instead. Type exports (`AgentDBConfigFile`, `DbConfig`, etc.) are unaffected.
+- **JSON env var parse error redacted raw value** — `AGENTDB_HTTP_MULTI_TOKEN=<bad>` previously echoed the token list to stderr. Error now reads `AGENTDB_HTTP_MULTI_TOKEN=<redacted> is not valid JSON (…)`.
+- **Post-merge zod validation in `loadAgentDBConfig`** — `parseEnvVars` coerced values individually but did not validate the assembled shape. `ConfigFileSchema.safeParse` is now run on the merged config before return; a wrong-shape env-supplied JSON field throws `ConfigValidationError` with source `"env"`.
+- **`--port` and `--rate-limit` NaN guard** — `parseInt(next, 10)` returned `NaN` silently on non-numeric input. Both flags now route through `parseIntFlag()` which exits 1 with a clear error message on invalid input.
 - **`AgentDBOptions.cacheSize` JSDoc** reported wrong default (`10000`); actual value enforced by `_openCollection` is `1_000`. Corrected.
 - **`AgentDBOptions.diskConcurrency` JSDoc** reported wrong default (`16`); actual value enforced by `DiskStore` constructor is `20`. Corrected.
 - **README `maxIndexCardinality` tune-when signal was wrong** — referenced `metrics().bm25SegmentCount` (BM25 segment count, unrelated to B-tree cardinality). Replaced with the correct signal: the `console.warn` that fires at collection open when a field exceeds the threshold.

@@ -67,6 +67,16 @@ Configuration (precedence: CLI flags > env vars > config file):
 // Parse CLI args into partial config objects
 // ---------------------------------------------------------------------------
 
+/** Parse a CLI flag value as a positive integer, exit 1 on bad input. */
+function parseIntFlag(flag: string, value: string): number {
+  const n = parseInt(value, 10);
+  if (Number.isNaN(n) || n <= 0) {
+    console.error(`Error: ${flag} requires a positive integer, got: ${JSON.stringify(value)}`);
+    process.exit(1);
+  }
+  return n;
+}
+
 let configPath: string | undefined;
 let transport = "stdio";
 const schemaGlobs: string[] = [];
@@ -82,7 +92,7 @@ for (let i = 0; i < args.length; i++) {
   if (arg === "--config" && next) { configPath = next; i++; }
   else if (arg === "--path" && next) { cliDb.path = next; i++; }
   else if (arg === "--http") { transport = "http"; }
-  else if (arg === "--port" && next) { cliHttp.port = parseInt(next, 10); i++; }
+  else if (arg === "--port" && next) { cliHttp.port = parseIntFlag("--port", next); i++; }
   else if (arg === "--host" && next) { cliHttp.host = next; i++; }
   else if (arg === "--backend" && next) { cliDb.backend = next; i++; }
   else if (arg === "--bucket" && next) { cliDb.s3Bucket = next; i++; }
@@ -91,7 +101,7 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === "--agent-id" && next) { cliDb.agentId = next; i++; }
   else if (arg === "--auth-token" && next) { cliHttp.auth = next; i++; }
   else if (arg === "--tenant-id" && next) { cliDb.tenantId = next; i++; }
-  else if (arg === "--rate-limit" && next) { cliHttp.rateLimit = parseInt(next, 10); i++; }
+  else if (arg === "--rate-limit" && next) { cliHttp.rateLimit = parseIntFlag("--rate-limit", next); i++; }
   else if (arg === "--cors" && next) { cliHttp.cors = next.split(",").map((s) => s.trim()); i++; }
   else if (arg === "--write-mode" && next) { cliDb.writeMode = next as "immediate" | "group" | "async"; i++; }
   else if (arg === "--group-commit") { cliDb.writeMode = "group"; }
