@@ -8,7 +8,7 @@ export type { Predicate } from "./filter.js";
 
 export { parseCompactFilter } from "./compact-filter.js";
 
-export { Collection } from "./collection.js";
+export { Collection, LegacyTextIndexError } from "./collection.js";
 export type {
   Filter,
   CollectionOptions,

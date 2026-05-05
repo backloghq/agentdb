@@ -115,6 +115,26 @@ export interface ChangeEvent {
 }
 
 /**
+ * Thrown when a v1.4 text-index.json blob is found on disk without a v1.5
+ * termlog manifest. The collection cannot be opened until the index is rebuilt.
+ *
+ * Resolution: call `collection.rebuildTextIndex()` or the `db_rebuild_text_index`
+ * MCP tool, then reopen the collection.
+ */
+export class LegacyTextIndexError extends Error {
+  readonly legacyPath: string;
+  constructor(legacyPath: string) {
+    super(
+      `v1.4 text index detected at ${legacyPath}. v1.5 does not auto-migrate. ` +
+      `To rebuild from records: call \`collection.rebuildTextIndex()\` or ` +
+      `use the \`db_rebuild_text_index\` MCP tool, then reopen.`,
+    );
+    this.name = "LegacyTextIndexError";
+    this.legacyPath = legacyPath;
+  }
+}
+
+/**
  * A named collection backed by an opslog Store.
  * Provides document-store operations (insert, find, update, delete)
  * with agent identity tracking on mutations.
@@ -273,9 +293,22 @@ export class Collection {
   }
 
   /** Rebuild the full text index from current store contents. */
-  private async rebuildTextIndex(): Promise<void> {
-    if (!this.textIdx || !this._dir) return;
-    await this.textIdx.close();
+  /**
+   * Rebuild the TermLog text index from scratch using current store records.
+   *
+   * Use this to resolve a `LegacyTextIndexError`: the collection cannot be opened
+   * normally when a v1.4 text-index.json blob is present. Instantiate Collection
+   * without `textSearch: true`, call `rebuildTextIndex()`, then reopen with `textSearch: true`.
+   *
+   * Also deletes any legacy `indexes/text-index.json` blob left over from v1.4 so
+   * subsequent opens do not re-throw `LegacyTextIndexError`.
+   *
+   * @returns The number of documents indexed during the rebuild.
+   */
+  async rebuildTextIndex(): Promise<number> {
+    if (!this._dir) return 0;
+    // Close existing TermLog if open, then wipe and recreate the text directory.
+    if (this.textIdx) await this.textIdx.close();
     const textDir = pathJoin(this._dir, "text");
     await rm(textDir, { recursive: true, force: true });
     await mkdir(textDir, { recursive: true });
@@ -284,12 +317,26 @@ export class Collection {
       k1: this.opts.bm25K1 ?? 1.2,
       b: this.opts.bm25B ?? 0.75,
     });
-    for (const [id, record] of this.store.entries()) {
+    let count = 0;
+    const records = this._diskStore
+      ? await (async () => {
+          const out: Array<[string, StoredRecord]> = [];
+          for await (const [id, record] of this._diskStore!.entries()) {
+            out.push([id, record as StoredRecord]);
+          }
+          return out;
+        })()
+      : Array.from(this.store.entries());
+    for (const [id, record] of records) {
       if (!isExpired(record)) {
         await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+        count++;
       }
     }
     await this.textIdx.flush();
+    // Delete any legacy v1.4 blob so subsequent opens don't re-throw LegacyTextIndexError.
+    await this.backend.deleteBlob("indexes/text-index.json").catch(() => {});
+    return count;
   }
 
   /** Rebuild all indexes from current store contents. Delegates to IndexManager. */
@@ -411,6 +458,37 @@ export class Collection {
       this.backend = blobBackend;
     }
     this.blobPrefix = "blobs";
+
+    // Detect v1.4 legacy text-index.json blob. If present without a termlog manifest,
+    // throw LegacyTextIndexError. If both exist (partial earlier rebuild), silently delete
+    // the legacy blob and proceed with the termlog index.
+    if (this.opts.textSearch) {
+      const legacyBlobPath = "indexes/text-index.json";
+      const termlogManifestBlobPath = "text/manifest.json";
+
+      let hasLegacyBlob = false;
+      let hasTermlogManifest = false;
+
+      try {
+        const files = await this.backend.listBlobs("indexes");
+        hasLegacyBlob = files.includes("text-index.json");
+      } catch { /* indexes dir doesn't exist — fresh collection */ }
+
+      try {
+        await this.backend.readBlob(termlogManifestBlobPath);
+        hasTermlogManifest = true;
+      } catch { /* no termlog manifest yet */ }
+
+      if (hasLegacyBlob && !hasTermlogManifest) {
+        await this.store.close();
+        this._opened = false;
+        throw new LegacyTextIndexError(pathJoin(dir, legacyBlobPath));
+      }
+      if (hasLegacyBlob && hasTermlogManifest) {
+        // Termlog index already built — clean up the orphaned legacy blob
+        await this.backend.deleteBlob(legacyBlobPath).catch(() => {});
+      }
+    }
 
     // Open TermLog for text search (if enabled) before WAL replay so adds land in the index.
     if (this.opts.textSearch) {
