@@ -222,9 +222,9 @@ async function resolveAgentDBOpts(): Promise<AgentDBOptions> {
         model: model || undefined,
       } as import("../embeddings/index.js").EmbeddingConfig;
     } else if (provider === "voyage") {
-      opts.embeddings = { provider: "voyage", apiKey, model: model || undefined } as import("../embeddings/index.js").EmbeddingConfig;
+      opts.embeddings = { provider: "voyage", apiKey: apiKey || process.env.VOYAGE_API_KEY || "", model: model || undefined } as import("../embeddings/index.js").EmbeddingConfig;
     } else if (provider === "cohere") {
-      opts.embeddings = { provider: "cohere", apiKey, model: model || undefined } as import("../embeddings/index.js").EmbeddingConfig;
+      opts.embeddings = { provider: "cohere", apiKey: apiKey || process.env.COHERE_API_KEY || "", model: model || undefined } as import("../embeddings/index.js").EmbeddingConfig;
     } else if (provider === "gemini") {
       opts.embeddings = {
         provider: "gemini",

@@ -956,6 +956,8 @@ Full reference:
 | `AGENTDB_HTTP_CORS` | comma-list | Allowed CORS origins |
 | `AWS_REGION` | string | AWS region fallback (standard SDK var) |
 
+> **Security note:** environment variables set in a process are readable from `/proc/<pid>/environ` on Linux by any user with access to that file (root, or the process owner). For long-lived server processes, prefer injecting secrets via a secrets manager, a read-protected config file (`chmod 600 agentdb.config.json`), or systemd `EnvironmentFile=` with appropriate permissions — rather than exporting tokens directly in shell startup scripts.
+
 ### 3. Config file
 
 `agentdb.config.json` in the working directory is loaded automatically when present. Use `--config <path>` or `AGENTDB_CONFIG=<path>` to point at a different file.

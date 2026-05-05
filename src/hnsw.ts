@@ -124,7 +124,7 @@ export class HnswIndex {
   get configEfSearch(): number { return this.efSearch; }
 
   /** Maximum layer cap as configured (default: derived as max(16, floor(log(1e6)/log(M)))). */
-  get configMaxLevelCap(): number { return this.maxLevelCap; }
+  get configMaxLevel(): number { return this.maxLevelCap; }
 
   /** Add a vector to the index. */
   add(id: string, vector: number[]): void {

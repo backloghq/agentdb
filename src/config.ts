@@ -10,7 +10,7 @@
  * injectable parameter for testing.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod/v4";
 
@@ -325,6 +325,21 @@ function loadConfigFile(configPath: string, requireFile = false): AgentDBConfigF
   let raw: unknown;
   try {
     const text = readFileSync(configPath, "utf8");
+    // Warn when the config file is world-readable (POSIX only).
+    // Config files often contain secrets (auth tokens, API keys) that should
+    // not be visible to other users on the system.
+    if (process.platform !== "win32") {
+      try {
+        const st = statSync(configPath);
+        // mode & 0o004 = world-read bit
+        if (st.mode & 0o004) {
+          console.warn(
+            `agentdb: config file ${configPath} is world-readable (mode ${(st.mode & 0o777).toString(8)}). ` +
+            `Run \`chmod 600 ${configPath}\` to restrict access.`,
+          );
+        }
+      } catch { /* stat failed — skip the check */ }
+    }
     raw = JSON.parse(text);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {

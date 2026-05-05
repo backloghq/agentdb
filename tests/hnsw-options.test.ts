@@ -34,14 +34,14 @@ const hashProvider: EmbeddingProvider = {
 
 describe("HNSW options exposure", () => {
   describe("HnswIndex config getters", () => {
-    it("configM / configEfConstruction / configEfSearch / configMaxLevelCap reflect constructor args", async () => {
+    it("configM / configEfConstruction / configEfSearch / configMaxLevel reflect constructor args", async () => {
       const { HnswIndex } = await import("../src/hnsw.js");
       const idx = new HnswIndex({ dimensions: 8, M: 8, efConstruction: 150, efSearch: 40 });
       expect(idx.configM).toBe(8);
       expect(idx.configEfConstruction).toBe(150);
       expect(idx.configEfSearch).toBe(40);
       // maxLevelCap: max(16, floor(log(1e6)/log(8))) = max(16, 6) = 16
-      expect(idx.configMaxLevelCap).toBe(16);
+      expect(idx.configMaxLevel).toBe(16);
     });
 
     it("config getters return defaults when not specified", async () => {
@@ -51,13 +51,13 @@ describe("HNSW options exposure", () => {
       expect(idx.configEfConstruction).toBe(200);
       expect(idx.configEfSearch).toBe(50);
       // maxLevelCap: max(16, floor(log(1e6)/log(16))) = max(16, 4) = 16
-      expect(idx.configMaxLevelCap).toBe(16);
+      expect(idx.configMaxLevel).toBe(16);
     });
 
-    it("explicit maxLevel is stored in configMaxLevelCap", async () => {
+    it("explicit maxLevel is stored in configMaxLevel", async () => {
       const { HnswIndex } = await import("../src/hnsw.js");
       const idx = new HnswIndex({ dimensions: 8, maxLevel: 5 });
-      expect(idx.configMaxLevelCap).toBe(5);
+      expect(idx.configMaxLevel).toBe(5);
     });
   });
 
@@ -172,7 +172,7 @@ describe("HNSW options exposure", () => {
       // Use string-name form so colOpts is not discarded by the schema path
       const col = await db.collection("maxlevel-col", { hnsw: { maxLevel: 5 } });
       const idx = col.getHnswIndex();
-      expect(idx!.configMaxLevelCap).toBe(5);
+      expect(idx!.configMaxLevel).toBe(5);
       await db.close();
       await rm(dir, { recursive: true, force: true });
     });
