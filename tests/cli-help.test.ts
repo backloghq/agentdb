@@ -34,6 +34,7 @@ describe.skipIf(!existsSync(CLI))("CLI --help", () => {
   }, 10000);
 
   const expectedFlags = [
+    "--config",
     "--path",
     "--http",
     "--port",
@@ -44,6 +45,7 @@ describe.skipIf(!existsSync(CLI))("CLI --help", () => {
     "--region",
     "--agent-id",
     "--auth-token",
+    "--tenant-id",
     "--rate-limit",
     "--cors",
     "--write-mode",

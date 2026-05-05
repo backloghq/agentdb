@@ -316,14 +316,21 @@ function parseEnvVars(env: NodeJS.ProcessEnv): AgentDBConfigFile {
 // Config file loader
 // ---------------------------------------------------------------------------
 
-function loadConfigFile(configPath: string): AgentDBConfigFile {
+function loadConfigFile(configPath: string, requireFile = false): AgentDBConfigFile {
   let raw: unknown;
   try {
     const text = readFileSync(configPath, "utf8");
     raw = JSON.parse(text);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      // File absent — treated as empty config, not an error
+      if (requireFile) {
+        throw new ConfigValidationError(
+          `Config file not found: ${configPath}`,
+          [],
+          "file",
+        );
+      }
+      // File absent — silently use empty config
       return {};
     }
     if (err instanceof SyntaxError) {
@@ -356,6 +363,13 @@ function loadConfigFile(configPath: string): AgentDBConfigFile {
 export interface LoadConfigOptions {
   /** Path to config file. If omitted, looks for ./agentdb.config.json. */
   configPath?: string;
+  /**
+   * When true, a missing config file at `configPath` throws a ConfigValidationError.
+   * Default false — missing files silently produce an empty config. Set to true when
+   * the path was explicitly supplied by the user (e.g. via `--config` CLI flag) so
+   * that typos surface as errors rather than silent no-ops.
+   */
+  requireConfigFile?: boolean;
   /** Env source (process.env by default). Inject for testing. */
   env?: NodeJS.ProcessEnv;
   /** CLI args already parsed. Highest precedence. */
@@ -365,9 +379,10 @@ export interface LoadConfigOptions {
 export function loadAgentDBConfig(opts?: LoadConfigOptions): AgentDBConfigFile {
   const env = opts?.env ?? process.env;
   const configPath = opts?.configPath ?? env["AGENTDB_CONFIG"] ?? resolve("agentdb.config.json");
+  const requireFile = opts?.requireConfigFile ?? false;
 
   // Layer 3 (lowest): config file
-  const fileConfig = loadConfigFile(configPath);
+  const fileConfig = loadConfigFile(configPath, requireFile);
 
   // Layer 2: env vars
   const envConfig = parseEnvVars(env);
