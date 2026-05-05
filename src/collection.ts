@@ -212,6 +212,10 @@ export class Collection {
   private _opened = false;
   private opts: CollectionOptions;
   private textIdx: TermLog | null = null;
+  /** During an FS-mode rebuildTextIndex run, this is the new index being built.
+   *  All live writes (insert/update/delete) shadow-write here so concurrent mutations
+   *  are captured. Null when no rebuild is in progress. */
+  private _rebuildingIdx: TermLog | null = null;
   private _dir = "";
   private views = new ViewManager();
   private hnswIdx: HnswIndex | null = null;
@@ -251,12 +255,10 @@ export class Collection {
     if (this._textIdxLoaded) return;
     await this._diskStore.ensureIndexesLoaded();
     // Replay in-memory (WAL) entries into text index — these may predate this load call
-    if (this.textIdx) {
-      for (const [id, record] of this.store.entries()) {
-        if (!isExpired(record)) {
-          const clean = stripMeta(record);
-          await this.textIdx.add(id, extractTextFromRecord(this.textRecord(clean)));
-        }
+    for (const [id, record] of this.store.entries()) {
+      if (!isExpired(record)) {
+        const clean = stripMeta(record);
+        await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(clean)));
       }
     }
     this._textIdxLoaded = true;
@@ -481,6 +483,11 @@ export class Collection {
       b: this.opts.bm25B ?? 0.75,
     });
 
+    // Shadow-write: all live writes (insert/update/delete) that arrive during the rebuild
+    // window will call textIndexAdd/textIndexRemove, which forward to _rebuildingIdx as well.
+    // This ensures concurrent mutations land in the new index before the swap.
+    this._rebuildingIdx = newIdx;
+
     let count = 0;
     const records = this._diskStore
       ? await (async () => {
@@ -496,6 +503,7 @@ export class Collection {
     for (const [id, record] of records) {
       if (signal?.aborted) {
         // Abort: discard temp dir, leave existing textIdx untouched.
+        this._rebuildingIdx = null;
         await newIdx.close();
         await rm(textNewDir, { recursive: true, force: true });
         throw new DOMException("The operation was aborted.", "AbortError");
@@ -507,6 +515,32 @@ export class Collection {
       }
     }
 
+    // Post-loop delta reconciliation (in-memory mode only):
+    // opslog's _set() updates the in-memory Map synchronously inside its serialize chain,
+    // before the WAL write resolves. So a concurrent insert's record IS in this.store.entries()
+    // after the first yield point following the store.set() call — even if col.insert() is
+    // still awaiting the WAL flush. We scan for IDs not in the original snapshot and replay
+    // them into newIdx. Shadow-write (_rebuildingIdx) covers cases where textIndexAdd ran
+    // during the loop; this delta scan covers the complement.
+    if (!this._diskStore) {
+      const snapshotIds = new Set(records.map(([id]) => id));
+      for (const [id, record] of this.store.entries()) {
+        if (!snapshotIds.has(id) && !isExpired(record)) {
+          await newIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+          count++;
+        }
+      }
+      for (const [id] of records) {
+        if (!this.store.get(id)) {
+          // Record deleted during rebuild — remove from new index
+          await newIdx.remove(id);
+        }
+      }
+    }
+
+    // Clear shadow before flush+swap. Any writes from this point route to textIdx (old) only
+    // until the swap completes — the window is negligible (close + rename + reopen).
+    this._rebuildingIdx = null;
     await newIdx.flush();
 
     // Atomic swap: close old → close new → rm old dir → rename new→canonical → reopen.
@@ -537,12 +571,29 @@ export class Collection {
    */
   private async incrementalIndexUpdate(affectedIds: string[]): Promise<void> {
     const cleanRecords = this.indexes.incrementalUpdate(affectedIds, (id) => this.store.get(id));
-    if (this.textIdx) {
-      for (const [id, clean] of cleanRecords) {
-        if (clean) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(clean)));
-        else await this.textIdx.remove(id);
-      }
+    for (const [id, clean] of cleanRecords) {
+      if (clean) await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(clean)));
+      else await this.textIndexRemove(id);
     }
+  }
+
+  /**
+   * Write text for `id` to the active text index (and the rebuild shadow index when a rebuild
+   * is in progress). All live-write paths must call this rather than `this.textIdx.add` directly
+   * so concurrent inserts/updates are captured in the new index during a rebuildTextIndex run.
+   */
+  private async textIndexAdd(id: string, text: string): Promise<void> {
+    if (this.textIdx) await this.textIdx.add(id, text);
+    if (this._rebuildingIdx) await this._rebuildingIdx.add(id, text);
+  }
+
+  /**
+   * Remove `id` from the active text index (and the rebuild shadow index when a rebuild is in
+   * progress). See `textIndexAdd` for rationale.
+   */
+  private async textIndexRemove(id: string): Promise<void> {
+    if (this.textIdx) await this.textIdx.remove(id);
+    if (this._rebuildingIdx) await this._rebuildingIdx.remove(id);
   }
 
   /** Run the validate hook on a clean record (meta stripped). Throws on invalid. */
@@ -703,8 +754,8 @@ export class Collection {
     // Single pass: detect TTL, build text index, load HNSW embeddings
     for (const [id, record] of this.store.entries()) {
       if (record[META_EXPIRES]) this._hasTTL = true;
-      if (this.textIdx && !termlogAlreadyIndexed && !isExpired(record)) {
-        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+      if (!termlogAlreadyIndexed && !isExpired(record)) {
+        await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
       }
       if (!isExpired(record)) {
         const stored = record[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
@@ -745,7 +796,7 @@ export class Collection {
     this.stampVersion(stored, id);
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
-    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
+    await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("insert", [id], opts?.agent);
     return id;
@@ -774,10 +825,8 @@ export class Collection {
         this.store.set(id, stored);
       }
     });
-    if (this.textIdx) {
-      for (const { id, stored } of prepared) {
-        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
-      }
+    for (const { id, stored } of prepared) {
+      await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     }
     for (const { id, stored } of prepared) {
       this.updateBTreeIndexes(id, undefined, stored);
@@ -1215,10 +1264,8 @@ export class Collection {
       }
     });
     // Incremental re-index for text and B-tree (only affected records)
-    if (this.textIdx) {
-      for (const { id, updated } of updates) {
-        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(updated))));
-      }
+    for (const { id, updated } of updates) {
+      await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(updated))));
     }
     for (const { id, old, updated } of updates) {
       this.updateBTreeIndexes(id, old, updated);
@@ -1237,7 +1284,7 @@ export class Collection {
     const record = this.store.get(id);
     if (!record || isExpired(record)) return false;
     this.store.delete(id);
-    if (this.textIdx) await this.textIdx.remove(id);
+    await this.textIndexRemove(id);
     this.updateBTreeIndexes(id, record, undefined);
     if (record._blobs) this.deleteBlobsForRecord(id).catch(() => {});
     this.emitChange("delete", [id], opts?.agent);
@@ -1264,7 +1311,7 @@ export class Collection {
     this.validateRecord(stored);
     this.stampVersion(stored, id);
     await this.store.set(id, stored);
-    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
+    await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("upsert", [id], opts?.agent);
     return { id, action: existing ? "updated" : "inserted" };
@@ -1302,7 +1349,7 @@ export class Collection {
     });
 
     for (const { id, stored, oldRecord, existing } of prepared) {
-      if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
+      await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
       this.updateBTreeIndexes(id, oldRecord, stored);
       results.push({ id, action: existing ? "updated" : "inserted" });
     }
@@ -1351,9 +1398,7 @@ export class Collection {
         this.store.delete(id);
       }
     });
-    if (this.textIdx) {
-      for (const id of toDelete) await this.textIdx.remove(id);
-    }
+    for (const id of toDelete) await this.textIndexRemove(id);
     for (const { id, record } of oldRecords) {
       if (record) this.updateBTreeIndexes(id, record, undefined);
       if (record?._blobs) this.deleteBlobsForRecord(id).catch(() => {});
@@ -1480,7 +1525,7 @@ export class Collection {
       }
     });
     for (const { id, record } of expired) {
-      if (this.textIdx) await this.textIdx.remove(id);
+      await this.textIndexRemove(id);
       this.updateBTreeIndexes(id, record, undefined);
     }
     const ids = expired.map((e) => e.id);
@@ -2097,7 +2142,7 @@ export class Collection {
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
     this.updateBTreeIndexes(id, oldRecord, stored);
-    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
+    await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     // Update HNSW (remove old if exists, add new)
     if (this.hnswIdx.size > 0) {
       try { this.hnswIdx.remove(id); } catch { /* not in index yet */ }

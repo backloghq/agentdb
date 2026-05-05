@@ -305,6 +305,47 @@ describe("Progress callbacks", () => {
       await rm(dir, { recursive: true, force: true });
     });
 
+    it("concurrent inserts during rebuild are captured in the new index (R6/1)", async () => {
+      // Shadow-write: textIndexAdd/Remove forward to _rebuildingIdx during rebuild,
+      // so records inserted while the loop is running land in the new index before swap.
+      const dir = await makeTmpDir();
+      const N = 20; // enough records to create async yield points between each newIdx.add call
+
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "concurrent-rebuild",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      for (let i = 0; i < N; i++) await col.insert({ title: `pre-existing doc ${i}` });
+
+      // Fire a concurrent insert from inside the onProgress callback.
+      // The callback is not awaited by the rebuild loop, so the insert runs asynchronously
+      // during the next yield (newIdx.add call). The shadow-write mechanism routes it to
+      // both the old textIdx and the _rebuildingIdx (= newIdx) so it ends up in the new index.
+      let concurrentInsertPromise: Promise<string> | null = null;
+      let callbackFired = false;
+      await col.rebuildTextIndex({
+        onProgress: () => {
+          if (!callbackFired) {
+            callbackFired = true;
+            concurrentInsertPromise = col.insert({ title: "concurrent-unique-beacon" });
+          }
+        },
+      });
+      // Ensure the concurrent insert has fully completed before querying.
+      await concurrentInsertPromise;
+
+      // The record must be findable in the new index after the rebuild swap.
+      const results = await col.bm25Search("concurrent-unique-beacon");
+      expect(results.records.length).toBeGreaterThan(0);
+      expect(results.records[0].title).toBe("concurrent-unique-beacon");
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
     it("snapshot-then-swap: abort preserves the original index (not empty)", async () => {
       // Verify that aborting rebuildTextIndex mid-run does NOT destroy the existing text index.
       // The collection must still be able to bm25Search using the pre-abort index.
