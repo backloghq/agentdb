@@ -359,6 +359,7 @@ export class AgentDB {
       });
 
       const diskStore = new DiskStore(col.getBackend(), {
+        collectionName: name,
         cacheSize: mergedOpts?.cacheSize ?? 1_000,
         rowGroupSize: mergedOpts?.rowGroupSize ?? 5000,
         extractColumns: schema?.indexes ?? [],

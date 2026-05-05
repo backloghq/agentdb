@@ -33,6 +33,8 @@ import { FsBackend } from "@backloghq/opslog";
 import type { StorageBackend } from "@backloghq/opslog";
 
 export interface DiskStoreOptions {
+  /** Collection name — included in diagnostic warn messages to identify the source. */
+  collectionName?: string;
   /** Max records in LRU cache (default: 1000). */
   cacheSize?: number;
   /** Parquet row group size (default: 5000). */
@@ -69,9 +71,11 @@ export class DiskStore {
   private diskConcurrency: number;
   private _mergeThreshold: number;
   private _mergeJsonlThreshold: number;
+  private _collectionName: string;
 
   constructor(backend: StorageBackend, options?: DiskStoreOptions) {
     this.backend = backend;
+    this._collectionName = options?.collectionName ?? "<unknown>";
     this.cache = new RecordCache(options?.cacheSize ?? 1_000);
     this.rowGroupSize = options?.rowGroupSize ?? 5000;
     this.extractColumns = options?.extractColumns ?? [];
@@ -127,7 +131,7 @@ export class DiskStore {
     if (!this._warnedCardinalityFields.has(field)) {
       this._warnedCardinalityFields.add(field);
       console.warn(
-        `agentdb: B-tree index on field "${field}" skipped — cardinality ${cardinality} exceeds maxIndexCardinality=${this.maxIndexCardinality}. Queries on this field will full-scan. Raise CollectionOptions.maxIndexCardinality to index high-cardinality fields.`,
+        `agentdb [${this._collectionName}]: B-tree index on field "${field}" skipped — cardinality ${cardinality} exceeds maxIndexCardinality=${this.maxIndexCardinality}. Queries on this field will full-scan. Raise CollectionOptions.maxIndexCardinality to index high-cardinality fields.`,
       );
     }
     return false;

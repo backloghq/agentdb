@@ -867,7 +867,7 @@ Every configurable knob, its location, default, and the workload signal that sho
 | Option | Location | Default | Tune when… | Recommended range |
 |--------|----------|---------|-----------|-------------------|
 | `maxFindLimit` | `AgentDB` / `Collection` | `10_000` | batch exports need >10K records per page, or you want to enforce a lower cap | 1K – unlimited |
-| `maxIndexCardinality` | `AgentDB` / `Collection` | `1_000` | `metrics().bm25SegmentCount` shows frequent Parquet scans on a high-cardinality field, or `console.warn` fires at index load | 100 – 100K |
+| `maxIndexCardinality` | `AgentDB` / `Collection` | `1_000` | `console.warn` fires at collection open naming a field that exceeds the threshold; queries on that field fall back to full Parquet scan | 100 – 100K |
 | `filterCacheSize` | `AgentDB` / `Collection` | `64` | a collection has many distinct query shapes (>64 unique filters in a session) | 32 – 256 |
 | `cacheSize` | `AgentDB` / `Collection` | `1_000` | `metrics().recordCacheHits / recordCacheFetches` hit rate is low (<50%) on a hot collection | 100 – 100K |
 | `rowGroupSize` | `AgentDB` / `Collection` | `5_000` | column scan performance is slow (lower = smaller seek range, higher = fewer S3 requests) | 1K – 20K |

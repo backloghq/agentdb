@@ -139,7 +139,7 @@ export interface CollectionOptions {
   bm25K1?: number;
   /** BM25 b length normalization parameter (default: 0.75). */
   bm25B?: number;
-  /** Max concurrent disk fetches in materializeCandidates for non-FS backends (default: 16). Has no effect on local FS. */
+  /** Max concurrent disk fetches in materializeCandidates for non-FS backends (default: 20). Has no effect on local FS. */
   diskConcurrency?: number;
   /** Number of records per embedding provider call in embedUnembedded (default: 256). */
   embeddingBatchSize?: number;
@@ -970,7 +970,7 @@ export class Collection {
     if (capCaused) {
       this._findTruncations++;
       console.warn(
-        `agentdb: find() truncated at maxFindLimit=${MAX_LIMIT} — set CollectionOptions.maxFindLimit to raise or lower this cap`,
+        `agentdb [${this.name}]: find() truncated at maxFindLimit=${MAX_LIMIT} — set CollectionOptions.maxFindLimit to raise or lower this cap`,
       );
     }
     return {
@@ -1516,7 +1516,7 @@ export class Collection {
           candidates.map(async (c) => ((await ds.get(c.id)) ?? walFallback(c.id)) as StoredRecord | undefined),
         );
       } else {
-        const cap = this.opts.diskConcurrency ?? 16;
+        const cap = this.opts.diskConcurrency ?? 20;
         hydrated = new Array(candidates.length);
         let next = 0;
         const workers = Array.from({ length: Math.min(cap, candidates.length) }, async () => {
@@ -1891,7 +1891,7 @@ export class Collection {
     const walTotal = walToEmbed.length;
 
     for (let i = 0; i < walToEmbed.length; i += batchSize) {
-      if (signal?.aborted) return { embedded, failed, errors, aborted: true };
+      if (signal?.aborted) { console.warn(`agentdb [${this.name}]: reembedAll aborted — embedded=${embedded}, failed=${failed}`); return { embedded, failed, errors, aborted: true }; }
       const batch = walToEmbed.slice(i, i + batchSize);
       const batchIndex = Math.floor(i / batchSize);
       let vectors: number[][];
@@ -1976,11 +1976,11 @@ export class Collection {
         diskBatch.push({ id, text, record: record as StoredRecord });
         if (diskBatch.length >= batchSize) {
           const aborted = await flushDiskBatch();
-          if (aborted) return { embedded, failed, errors, aborted: true };
+          if (aborted) { console.warn(`agentdb [${this.name}]: reembedAll aborted — embedded=${embedded}, failed=${failed}`); return { embedded, failed, errors, aborted: true }; }
         }
       }
       const aborted = await flushDiskBatch();
-      if (aborted || signal?.aborted) return { embedded, failed, errors, aborted: true };
+      if (aborted || signal?.aborted) { console.warn(`agentdb [${this.name}]: reembedAll aborted — embedded=${embedded}, failed=${failed}`); return { embedded, failed, errors, aborted: true }; }
     }
 
     return { embedded, failed, errors };
