@@ -226,3 +226,65 @@ describe("createMcpServer — instructions", () => {
     expect(instructions).toContain("db_insert");
   });
 });
+
+async function openSession(port: number): Promise<string> {
+  const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "test-client", version: "1.0.0" },
+      },
+    }),
+  });
+  const sessionId = res.headers.get("mcp-session-id");
+  if (!sessionId) throw new Error(`initialize failed: ${res.status}`);
+  return sessionId;
+}
+
+describe("maxSessions and sessionIdleMs", () => {
+  it("enforces maxSessions — 3rd session gets 503 when limit is 2", async () => {
+    await setup({ maxSessions: 2 });
+
+    const s1 = await openSession(port);
+    const s2 = await openSession(port);
+    expect(s1).toBeTruthy();
+    expect(s2).toBeTruthy();
+
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "test-client", version: "1.0.0" },
+        },
+      }),
+    });
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toContain("Max sessions (2)");
+  });
+
+  it("evicts idle sessions after sessionIdleMs", async () => {
+    await setup({ sessionIdleMs: 100 });
+
+    await openSession(port);
+
+    // Wait past the idle timeout (cleanup runs at sessionIdleMs interval)
+    await new Promise((r) => setTimeout(r, 300));
+
+    // After eviction, a new session should succeed (not hit any phantom limit)
+    const s2 = await openSession(port);
+    expect(s2).toBeTruthy();
+  });
+});

@@ -146,6 +146,10 @@ export interface HttpOptions {
    * claim configured on `authFn`). Process invariant: read once at startup.
    */
   expectedTenantId?: string;
+  /** Max concurrent MCP sessions. Default: 100. */
+  maxSessions?: number;
+  /** Idle session timeout in ms. Default: 1_800_000 (30 min). */
+  sessionIdleMs?: number;
 }
 
 /**
@@ -292,15 +296,16 @@ export async function startHttp(
   const subscriptions = new SubscriptionManager(db);
 
   // Session management with limits and idle timeout
-  const MAX_SESSIONS = 100;
-  const SESSION_IDLE_MS = 30 * 60 * 1000; // 30 minutes
+  const MAX_SESSIONS = opts?.maxSessions ?? 100;
+  const SESSION_IDLE_MS = opts?.sessionIdleMs ?? 30 * 60 * 1000; // 30 minutes
   const transports = new Map<string, StreamableHTTPServerTransport>();
   const sessionLastActive = new Map<string, number>();
 
   // Track MCP servers for cleanup
   const mcpServers = new Map<string, McpServer>();
 
-  // Periodic cleanup of idle sessions
+  // Periodic cleanup of idle sessions — interval matches SESSION_IDLE_MS when it's short
+  const CLEANUP_INTERVAL_MS = Math.min(60000, SESSION_IDLE_MS);
   const cleanupInterval = setInterval(() => {
     const now = Date.now();
     for (const [sid, lastActive] of sessionLastActive) {
@@ -315,7 +320,7 @@ export async function startHttp(
         sessionLastActive.delete(sid);
       }
     }
-  }, 60000); // Check every minute
+  }, CLEANUP_INTERVAL_MS);
 
   app.post("/mcp", async (req, res) => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
