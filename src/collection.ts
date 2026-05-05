@@ -315,7 +315,11 @@ export class Collection {
     // Close existing TermLog if open, then wipe and recreate the text directory.
     if (this.textIdx) await this.textIdx.close();
     const textDir = pathJoin(this._dir, "text");
-    if (!this._termlogBackend) {
+    if (this._termlogBackend) {
+      // S3 mode: delete all blobs under the termlog prefix so TermLog.open starts clean.
+      const blobs = await this._termlogBackend.listBlobs("").catch(() => [] as string[]);
+      await Promise.all(blobs.map((b) => this._termlogBackend!.deleteBlob(b).catch(() => {})));
+    } else {
       await rm(textDir, { recursive: true, force: true });
       await mkdir(textDir, { recursive: true });
     }
@@ -467,10 +471,10 @@ export class Collection {
     }
     this.blobPrefix = "blobs";
 
-    // Detect v1.4 legacy text-index.json blob. If present without a termlog manifest,
-    // throw LegacyTextIndexError. If both exist (partial earlier rebuild), silently delete
-    // the legacy blob and proceed with the termlog index.
-    if (this.opts.textSearch) {
+    // Detect v1.4 legacy text-index.json blob. Only relevant for local-FS mode:
+    // v1.4 never wrote text-index.json to S3 (the old TextIndex was local-FS-only).
+    // In S3 mode (_termlogBackend set), skip this check entirely.
+    if (this.opts.textSearch && !this._termlogBackend) {
       const legacyBlobPath = "indexes/text-index.json";
       const termlogManifestBlobPath = "text/manifest.json";
 
@@ -1973,7 +1977,7 @@ export class Collection {
     return { activeRecords: s.activeRecords, opsCount: s.opsCount, textIndexBytes: this.textIdx?.estimatedBytes() ?? 0 };
   }
 
-  /** Flush the TermLog text index to disk (called by AgentDB.close and after WAL replay). */
+  /** Flush the TermLog write buffer to disk. Used in tests to ensure segment files exist. */
   async flushTextIndex(): Promise<void> {
     if (this.textIdx) await this.textIdx.flush();
   }

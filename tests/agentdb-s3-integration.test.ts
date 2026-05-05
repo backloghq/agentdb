@@ -146,4 +146,47 @@ describe.skipIf(!integration)("AgentDB S3 + termlog-s3 integration", () => {
     expect(after.records.some((r) => r._id === "r4")).toBe(false);
     await db2.close();
   }, 60000);
+
+  it("rebuildTextIndex in S3 mode: docCount stays at 100 (no double-count)", async () => {
+    const { S3Backend: OpsS3 } = await import("@backloghq/opslog-s3");
+    const rebuildPrefix = `${basePrefix}rebuild-test/`;
+    const rebuildBackend = new OpsS3({ bucket, prefix: rebuildPrefix, client });
+    const db = new AgentDB(rebuildPrefix, { backend: rebuildBackend });
+    await db.init();
+
+    const col = await db.collection(textSchema);
+    for (let i = 0; i < 100; i++) {
+      await col.insert({ _id: `rb${i}`, title: `word${i} common` });
+    }
+    await db.close();
+
+    // Reopen and rebuild — must NOT double-count
+    const db2 = new AgentDB(rebuildPrefix, { backend: new OpsS3({ bucket, prefix: rebuildPrefix, client }) });
+    await db2.init();
+    const col2 = await db2.collection(textSchema);
+    const countBefore = col2.getTextIndex()?.docCount() ?? 0;
+    await col2.rebuildTextIndex();
+    const countAfter = col2.getTextIndex()?.docCount() ?? 0;
+    expect(countBefore).toBeGreaterThan(0);
+    expect(countAfter).toBe(100);
+    await db2.close();
+
+    await cleanupPrefix(client, rebuildPrefix);
+  }, 90000);
+
+  it("S3 mode open with textSearch does not throw LegacyTextIndexError", async () => {
+    // v1.4 never wrote indexes/text-index.json to S3, so the legacy check must be skipped.
+    // This verifies that a fresh S3 collection opens without false-throwing.
+    const { S3Backend: OpsS3 } = await import("@backloghq/opslog-s3");
+    const legacyPrefix = `${basePrefix}legacy-check/`;
+    const db = new AgentDB(legacyPrefix, { backend: new OpsS3({ bucket, prefix: legacyPrefix, client }) });
+    await db.init();
+    // Should not throw — no legacy blob exists, and S3 mode skips the check anyway.
+    const col = await db.collection(textSchema);
+    await col.insert({ _id: "x1", title: "test legacy check" });
+    const result = await col.search("legacy");
+    expect(result.records.some((r) => r._id === "x1")).toBe(true);
+    await db.close();
+    await cleanupPrefix(client, legacyPrefix);
+  }, 60000);
 });
