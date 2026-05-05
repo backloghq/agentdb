@@ -2,6 +2,7 @@ import type { EmbeddingProvider } from "./types.js";
 
 const DEFAULT_MODEL = "gemini-embedding-001";
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+const BATCH_LIMIT = 100;
 
 export interface GeminiEmbeddingOptions {
   apiKey: string;
@@ -32,7 +33,16 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
 
   async embed(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
+    const all: number[][] = [];
+    for (let i = 0; i < texts.length; i += BATCH_LIMIT) {
+      const batch = texts.slice(i, i + BATCH_LIMIT);
+      const result = await this.embedBatch(batch);
+      all.push(...result);
+    }
+    return all;
+  }
 
+  private async embedBatch(texts: string[]): Promise<number[][]> {
     // Gemini embedContent supports multiple parts in a single request
     const response = await fetch(
       `${this.baseUrl}/models/${this.model}:embedContent?key=${this.apiKey}`,
@@ -83,7 +93,7 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
   private async embedIndividually(texts: string[]): Promise<number[][]> {
     const results: number[][] = [];
     for (const text of texts) {
-      const [vec] = await this.embed([text]);
+      const [vec] = await this.embedBatch([text]);
       results.push(vec);
     }
     return results;

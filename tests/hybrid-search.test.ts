@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
 import { Collection } from "../src/collection.js";
-import { DiskStore } from "../src/disk-store.js";
 import { defineSchema } from "../src/schema.js";
 import { getTools } from "../src/tools/index.js";
 import type { AgentTool } from "../src/tools/index.js";
@@ -1143,15 +1142,12 @@ describe("materializeCandidates — concurrency cap", () => {
 });
 
 describe("hybridSearch — arm failure modes", () => {
-  it("BM25 arm throws (IndexFileTooLargeError): hybrid returns semantic results only", async () => {
-    const REAL_LIMIT = DiskStore.MAX_INDEX_FILE_SIZE;
+  it("BM25 arm throws (simulated text arm failure): hybrid returns semantic results only", async () => {
     const dir = await makeTmpDir();
 
-    // Disk-mode schema with text search so we get a real text-index.json on disk
     const schema = defineSchema({
       name: "armthrow",
       textSearch: true,
-      storageMode: "disk",
       fields: { title: { type: "string", searchable: true } },
     });
 
@@ -1161,39 +1157,28 @@ describe("hybridSearch — arm failure modes", () => {
     ]);
     const provider = new FakeEmbeddingProvider(vectors);
 
-    // Session 1: insert + embed → compacts text-index.json to disk
-    {
-      const db = new AgentDB(dir, { embeddings: { provider } });
-      await db.init();
+    const db = new AgentDB(dir, { embeddings: { provider } });
+    await db.init();
+    try {
       const col = await db.collection(schema);
       await col.insert({ _id: "d1", title: "typescript guide" });
       await col.embedUnembedded();
-      await db.close();
-    }
 
-    // Lower the size cap so the on-disk text-index.json now exceeds the limit
-    DiskStore.MAX_INDEX_FILE_SIZE = 1;
-    let db2: AgentDB | null = null;
-    try {
-      // Session 2: reopen — BM25 arm will throw IndexFileTooLargeError on ensureIndexesLoaded
-      db2 = new AgentDB(dir, { embeddings: { provider } });
-      await db2.init();
-      const col = await db2.collection(schema);
-
-      // Spy on both arms to observe actual outcomes (vitest tracks .mock.results)
-      const bm25Spy = vi.spyOn(Collection.prototype, "bm25Search");
+      // Inject a generic failure into the BM25 arm — RRF must absorb it and return semantic results
+      const bm25Spy = vi.spyOn(Collection.prototype, "bm25Search").mockRejectedValueOnce(
+        new Error("simulated text arm failure"),
+      );
       const semSpy = vi.spyOn(Collection.prototype, "semanticSearch");
 
-      // hybridSearch must not reject; BM25 arm failure absorbed by .catch(empty)
       const result = await col.hybridSearch("typescript generics", { limit: 5 });
 
-      // bm25Search was called and its returned promise rejected (threw, not returned [])
+      // bm25Search was called and its promise rejected
       expect(bm25Spy).toHaveBeenCalledOnce();
       const bm25Outcome = await bm25Spy.mock.results[0].value.catch((e: Error) => e);
       expect(bm25Outcome).toBeInstanceOf(Error);
-      expect((bm25Outcome as Error).message).toMatch(/exceeds MAX_INDEX_FILE_SIZE|IndexFileTooLarge/i);
+      expect((bm25Outcome as Error).message).toBe("simulated text arm failure");
 
-      // semanticSearch was called and its returned promise resolved with records
+      // semanticSearch was called and resolved with records
       expect(semSpy).toHaveBeenCalledOnce();
       const semOutcome = await semSpy.mock.results[0].value;
       expect(semOutcome.records.length).toBeGreaterThan(0);
@@ -1201,26 +1186,22 @@ describe("hybridSearch — arm failure modes", () => {
       bm25Spy.mockRestore();
       semSpy.mockRestore();
 
-      // Final result comes only from the semantic arm — d1 is present, scores match
+      // Final result comes from semantic arm only — d1 is present, scores aligned
       expect(result.records.length).toBeGreaterThan(0);
       expect(result.records.map((r) => r._id)).toContain("d1");
       expect(result.records.length).toBe(result.scores.length);
     } finally {
-      // Restore limit before close so compaction can write the index cleanly
-      DiskStore.MAX_INDEX_FILE_SIZE = REAL_LIMIT;
-      if (db2) await db2.close().catch(() => {});
+      await db.close().catch(() => {});
       await rm(dir, { recursive: true, force: true });
     }
   });
 
   it("both arms throw: hybrid returns {records:[], scores:[]}", async () => {
-    const REAL_LIMIT = DiskStore.MAX_INDEX_FILE_SIZE;
     const dir = await makeTmpDir();
 
     const schema = defineSchema({
       name: "boththrow",
       textSearch: true,
-      storageMode: "disk",
       fields: { title: { type: "string", searchable: true } },
     });
 
@@ -1229,30 +1210,24 @@ describe("hybridSearch — arm failure modes", () => {
       embed: async (): Promise<number[][]> => { throw new Error("provider offline"); },
     };
 
-    // Session 1: insert → compacts text-index.json to disk (no embedding)
-    {
-      const db = new AgentDB(dir, { embeddings: { provider: throwingProvider } });
-      await db.init();
+    const db = new AgentDB(dir, { embeddings: { provider: throwingProvider } });
+    await db.init();
+    try {
       const col = await db.collection(schema);
       await col.insert({ _id: "d1", title: "typescript guide" });
-      await db.close();
-    }
 
-    // Lower size cap so BM25 arm throws; provider always throws too
-    DiskStore.MAX_INDEX_FILE_SIZE = 1;
-    let db2: AgentDB | null = null;
-    try {
-      db2 = new AgentDB(dir, { embeddings: { provider: throwingProvider } });
-      await db2.init();
-      const col = await db2.collection(schema);
+      // Both arms fail: BM25 via spy, semantic via throwing provider
+      const bm25Spy = vi.spyOn(Collection.prototype, "bm25Search").mockRejectedValueOnce(
+        new Error("simulated text arm failure"),
+      );
 
       const result = await col.hybridSearch("typescript", { limit: 5 });
       expect(result.records).toEqual([]);
       expect(result.scores).toEqual([]);
+
+      bm25Spy.mockRestore();
     } finally {
-      // Restore limit before close so compaction can write the index cleanly
-      DiskStore.MAX_INDEX_FILE_SIZE = REAL_LIMIT;
-      if (db2) await db2.close().catch(() => {});
+      await db.close().catch(() => {});
       await rm(dir, { recursive: true, force: true });
     }
   });
@@ -1478,5 +1453,115 @@ describe("embedUnembedded — disk-mode lazy embedding gap", () => {
     }
 
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BM25 parity test — verifies that bm25Search scores match a hand-derived
+// reference implementation of the BM25 formula to within 1e-9.
+//
+// Formula (from termlog/src/scoring.ts):
+//   idf       = log((N - df + 0.5) / (df + 0.5) + 1)
+//   norm      = k1 * (1 - b + b * (dl / avgdl))
+//   termScore = idf * tf * (k1 + 1) / (tf + norm)
+//   docScore  = Σ termScore  (OR semantics)
+// ---------------------------------------------------------------------------
+
+function refBm25Score(
+  tf: number, dl: number, df: number, N: number,
+  k1: number, b: number, avgdl: number,
+): number {
+  const idf = Math.log((N - df + 0.5) / (df + 0.5) + 1);
+  const norm = k1 * (1 - b + b * (dl / avgdl));
+  return idf * (tf * (k1 + 1)) / (tf + norm);
+}
+
+describe("bm25Search — BM25 scoring parity with reference implementation", () => {
+  // Corpus (ASCII only, UnicodeTokenizer lowercases):
+  //   "a" : "rust rust systems"   → tokens [rust,rust,systems]   dl=3
+  //   "b" : "rust language guide" → tokens [rust,language,guide] dl=3
+  //   "c" : "python programming"  → tokens [python,programming]  dl=2
+  // N=3, totalLen=8, avgdl=8/3
+  //
+  // Query "rust" (OR, single term): df(rust)=2
+  //   doc "a": tf=2 → higher score  doc "b": tf=1 → lower score  doc "c": absent
+
+  it("default k1=1.2 b=0.75: top-2 scores match reference within 1e-9", async () => {
+    const dir = await makeTmpDir();
+    const db = new AgentDB(dir);
+    await db.init();
+    try {
+      const schema = defineSchema({
+        name: "paritycol",
+        textSearch: true,
+        fields: { title: { type: "string", searchable: true } },
+      });
+      const col = await db.collection(schema);
+      await col.insert({ _id: "a", title: "rust rust systems" });
+      await col.insert({ _id: "b", title: "rust language guide" });
+      await col.insert({ _id: "c", title: "python programming" });
+
+      const result = await col.bm25Search("rust", { limit: 10 });
+
+      const ids = result.records.map((r) => r._id);
+      expect(ids).toContain("a");
+      expect(ids).toContain("b");
+      expect(ids).not.toContain("c");
+      expect(ids[0]).toBe("a");
+      expect(ids[1]).toBe("b");
+
+      const N = 3, df = 2, totalLen = 8, avgdl = totalLen / N;
+      const k1 = 1.2, b = 0.75;
+      const refA = refBm25Score(2, 3, df, N, k1, b, avgdl);
+      const refB = refBm25Score(1, 3, df, N, k1, b, avgdl);
+      expect(refA).toBeGreaterThan(refB);
+
+      const scoreMap = new Map(result.records.map((r, i) => [r._id as string, result.scores[i]]));
+      expect(Math.abs(scoreMap.get("a")! - refA)).toBeLessThan(1e-9);
+      expect(Math.abs(scoreMap.get("b")! - refB)).toBeLessThan(1e-9);
+    } finally {
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("tuned k1=2 b=0.3: top-2 scores match reference within 1e-9", async () => {
+    const dir = await makeTmpDir();
+    const db = new AgentDB(dir);
+    await db.init();
+    try {
+      const schema = defineSchema({
+        name: "paritycol2",
+        textSearch: true,
+        bm25: { k1: 2, b: 0.3 },
+        fields: { title: { type: "string", searchable: true } },
+      });
+      const col = await db.collection(schema);
+      await col.insert({ _id: "a", title: "rust rust systems" });
+      await col.insert({ _id: "b", title: "rust language guide" });
+      await col.insert({ _id: "c", title: "python programming" });
+
+      const result = await col.bm25Search("rust", { limit: 10 });
+
+      const ids = result.records.map((r) => r._id);
+      expect(ids).toContain("a");
+      expect(ids).toContain("b");
+      expect(ids).not.toContain("c");
+      expect(ids[0]).toBe("a");
+      expect(ids[1]).toBe("b");
+
+      const N = 3, df = 2, totalLen = 8, avgdl = totalLen / N;
+      const k1 = 2, b = 0.3;
+      const refA = refBm25Score(2, 3, df, N, k1, b, avgdl);
+      const refB = refBm25Score(1, 3, df, N, k1, b, avgdl);
+      expect(refA).toBeGreaterThan(refB);
+
+      const scoreMap = new Map(result.records.map((r, i) => [r._id as string, result.scores[i]]));
+      expect(Math.abs(scoreMap.get("a")! - refA)).toBeLessThan(1e-9);
+      expect(Math.abs(scoreMap.get("b")! - refB)).toBeLessThan(1e-9);
+    } finally {
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

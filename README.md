@@ -289,6 +289,22 @@ await db.init();
 
 AWS credentials use the standard SDK chain (env vars, IAM role, `~/.aws/config`). The AWS SDK is only loaded when S3 is configured — filesystem users never pay the cost.
 
+### Text search on S3
+
+When agentdb detects an S3 opslog backend, text indexes automatically use `@backloghq/termlog-s3` instead of the local filesystem. No configuration needed — the same bucket and prefix are used, with a per-collection subpath (`<prefix>/<collection>/text/`). Install the optional peer dependency to enable it:
+
+```bash
+npm install @backloghq/termlog-s3
+```
+
+### Single-writer constraint
+
+Both `@backloghq/opslog-s3` and `@backloghq/termlog-s3` require that only **one agentdb process** writes to a given `(bucket, prefix)` at a time. Multiple concurrent writers will corrupt the WAL. For multi-process setups, use the HTTP MCP server as a single-writer proxy.
+
+### S3 lifecycle recommendation
+
+Configure an `AbortIncompleteMultipartUpload` lifecycle rule (1-day expiry) on the bucket. This cleans up orphaned multipart uploads from crashed writers. See the [termlog-s3 README](https://github.com/backloghq/termlog-s3#readme) for bucket setup details.
+
 ## Filter Syntax
 
 Two syntaxes. JSON is primary, compact string is secondary.
@@ -502,6 +518,8 @@ const { persisted, warnings } = mergeSchemas(codeSchema, persistedSchema);
 | `db_vector_search` | Search by raw vector (no embedding provider needed) |
 | `db_bm25_search` | Pure BM25 lexical search (no embedding provider needed) |
 | `db_hybrid_search` | Hybrid BM25 + semantic search fused via RRF (degrades gracefully) |
+| `db_reembed_all` | Force-reembed all records in a collection — use when upgrading from v1.3 (admin-only, DESTRUCTIVE) |
+| `db_rebuild_text_index` | Rebuild the BM25 text index from scratch — use after upgrading from v1.4 (admin-only) |
 | `db_blob_write` | Attach a file (base64) to a record |
 | `db_blob_read` | Read an attached file |
 | `db_blob_list` | List files attached to a record |
@@ -741,20 +759,13 @@ const { records, scores } = await notes.hybridSearch("typescript generics", {
 
 **BM25 defaults:** `k1=1.2`, `b=0.75` (Okapi BM25 standard). Configurable via `Collection` constructor options. **RRF default:** `k=60` (Cormack et al. 2009).
 
-**Upgrading from v1.3:** collections indexed before v1.4 use a v1 text-index format with no TF data. These docs are excluded from BM25 results until re-indexed. To upgrade a collection in-place, iterate its records and reinsert them (or call `bm25Search` after any mutation — each write upgrades that doc automatically).
+**Upgrading from v1.4:** v1.4 stored BM25 indexes as a single JSON blob (`indexes/text-index.json`). v2.0 uses `@backloghq/termlog` (segment-based LSM). On first open with `textSearch: true`, AgentDB detects the old blob and throws `LegacyTextIndexError`. See [Migration from v1.4](#migration-from-v14) below.
 
 **Unicode normalisation:** AgentDB does not normalise Unicode before tokenizing. Precomposed (`é`, U+00E9) and decomposed (`e` + U+0301) forms of the same character are treated as distinct tokens. Ensure your application uses consistent Unicode normalisation (e.g. NFC) on both indexed text and queries; otherwise the same word in different normal forms will not match.
 
 #### Limits
 
-The BM25 text index is stored as a single JSON blob on disk. At ~10 KB per document the `256 MB` safety cap (`DiskStore.MAX_INDEX_FILE_SIZE`) is reached at roughly **25–30K documents**. When this limit is exceeded on reopen, AgentDB throws `IndexFileTooLargeError` instead of silently returning empty BM25 results.
-
-Recovery options:
-- Disable text search on the collection (`textSearch: false`) and use semantic search only.
-- Reduce corpus size (archive or delete old records before reopening).
-- Use a separate collection per corpus shard and merge results in application code.
-
-A sharded/streamed v3 text-index format that removes this ceiling is planned for a future release.
+v2.0+ uses `@backloghq/termlog` (segment-based LSM) for BM25 — there is no per-collection document cap. The old 256 MB `IndexFileTooLargeError` ceiling is gone.
 
 ### Embedding and disk performance knobs
 
@@ -770,7 +781,7 @@ const db = new AgentDB("./data", { embeddingBatchSize: 128 });
 const col = await db.collection("articles", { embeddingBatchSize: 64 });
 ```
 
-Smaller batches reduce peak memory and provider timeout risk; larger batches reduce round-trips. Most hosted providers cap at 512–2048 texts per call — stay below their limit.
+Smaller batches reduce peak memory and provider timeout risk; larger batches reduce round-trips. Most hosted providers cap at 512–2048 texts per call — stay below their limit. All embedding providers (OpenAI, Voyage, Cohere, Gemini, Ollama, HTTP) automatically chunk each `embed()` call into provider-safe batches, so `embeddingBatchSize` can be set independently of API limits.
 
 **`diskConcurrency`** — maximum number of concurrent `DiskStore.get()` calls when materializing BM25/vector candidates in disk mode. Default: `16` for non-local-filesystem backends (e.g. S3); local filesystem is unbounded.
 
@@ -845,14 +856,61 @@ col.find({ filter: { status: "active" }, summary: true });
 
 **Default recommendation:** Use `memory` for small datasets, `disk` or `auto` for anything that might grow.
 
+## Migration from v1.4
+
+v2.0 replaces the in-house `TextIndex` JSON blob with `@backloghq/termlog` (segment-based LSM). The change is automatic for new collections. Existing collections that have a v1.4 BM25 index on disk require a one-time rebuild.
+
+**Detection:** on the first open with `textSearch: true`, AgentDB checks for `indexes/text-index.json` (v1.4 format) without a termlog manifest. If found, it throws `LegacyTextIndexError` (exported from core) with a `legacyPath` field pointing at the old file.
+
+**Rebuild via library API:**
+
+```typescript
+import { AgentDB, LegacyTextIndexError, defineSchema } from "@backloghq/agentdb";
+
+const schema = defineSchema({ name: "notes", textSearch: true, fields: { ... } });
+const db = new AgentDB("./data");
+await db.init();
+
+try {
+  await db.collection(schema);
+} catch (e) {
+  if (e instanceof LegacyTextIndexError) {
+    await db.rebuildTextIndex("notes");  // wipes old index, re-indexes all records
+    await db.collection(schema);         // succeeds now
+  }
+}
+```
+
+**Rebuild via MCP tool** (no code change required):
+
+```json
+{ "name": "db_rebuild_text_index", "arguments": { "collection": "notes" } }
+```
+
+Returns `{ rebuiltDocCount: N }`. Requires admin permission.
+
+**What's new in v2.0:**
+- No per-collection document cap (256 MB / ~25–30K doc ceiling is gone)
+- S3-backed text indexes via `@backloghq/termlog-s3` (auto-wired when opslog uses S3)
+- Segment-based LSM — writes never block reads; compaction happens in the background
+- BM25 scores are deterministic across close/reopen (WAL replay double-count bug fixed)
+
+**S3 text search** — install the optional peer dependency:
+
+```bash
+npm install @backloghq/termlog-s3
+```
+
+Text indexes are then automatically stored in S3 alongside opslog data. No configuration needed beyond the existing S3 backend setup.
+
 ## Examples
 
 See [examples/](./examples/) for runnable demos powered by Ollama:
 
 - **[Multi-Agent Task Board](./examples/multi-agent/)** — Agents collaborate on a shared task board. Event-driven via NOTIFY/LISTEN.
-- **[RAG Knowledge Base](./examples/rag-knowledge-base/)** — Ingest docs, embed with Ollama, answer questions via hybrid search (BM25 + semantic, fused via RRF). Updated for v1.4.
+- **[RAG Knowledge Base](./examples/rag-knowledge-base/)** — Ingest docs, embed with Ollama, answer questions via hybrid search (BM25 + semantic, fused via RRF). Updated for v2.0.
 - **[Research Pipeline](./examples/research-pipeline/)** — 3-stage AI pipeline: Researcher → Analyst → Writer. Each stage triggers the next.
-- **[Multi-Model Code Review](./examples/code-review/)** — Gemini generates code, Ollama reviews locally, Gemini writes tests. Multi-provider orchestration. Updated for v1.3: shows schema lifecycle (`defineSchema` with description/instructions/field descriptions, auto-persistence, `db_get_schema` discovery).
+- **[Multi-Model Code Review](./examples/code-review/)** — Gemini generates code, Ollama reviews locally, Gemini writes tests. Multi-provider orchestration. Updated for v2.0: shows schema lifecycle (`defineSchema` with description/instructions/field descriptions, auto-persistence, `db_get_schema` discovery).
 - **[Live Dashboard](./examples/live-dashboard/)** — Real-time CLI view of any running demo's collections.
 
 ## Development

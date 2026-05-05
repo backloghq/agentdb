@@ -82,7 +82,7 @@ export interface SchemaDefinition {
   hooks?: SchemaHooks;
   /** Enable full-text search. */
   textSearch?: boolean;
-  /** BM25 tuning parameters. Overrides the TextIndex defaults (k1=1.2, b=0.75). */
+  /** BM25 tuning parameters (k1=1.2, b=0.75 defaults). */
   bm25?: { k1?: number; b?: number };
   /** Array field name for +tag/-tag compact filter syntax. Default: "tags". */
   tagField?: string;

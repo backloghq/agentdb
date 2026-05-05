@@ -37,14 +37,14 @@ describe("Tool Definitions — admin", () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns 39 tools", () => {
-    expect(tools).toHaveLength(39);
+  it("returns 40 tools", () => {
+    expect(tools).toHaveLength(40);
   });
 
   it("tool order is canonical (admin → crud → schema → migrate → archive → vector → blob → backup)", () => {
     expect(tools.map((t) => t.name)).toEqual([
       // admin
-      "db_collections", "db_create", "db_drop", "db_purge", "db_stats",
+      "db_collections", "db_create", "db_drop", "db_purge", "db_stats", "db_rebuild_text_index",
       // crud
       "db_insert", "db_find", "db_find_one", "db_update", "db_upsert",
       "db_delete", "db_batch", "db_count", "db_undo", "db_history", "db_distinct",

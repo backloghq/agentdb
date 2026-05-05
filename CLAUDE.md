@@ -2,19 +2,19 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status: v1.4 — hybrid search (BM25+RRF+vector), disk-backed embeddings, persisted schemas. 1255 tests.**
+**Status: v2.0 — termlog BM25 backend, hybrid search (BM25+RRF+vector), disk-backed embeddings, persisted schemas.**
 
 Major capabilities:
-- **Search:** `bm25Search` (BM25 k1/b tunable, `searchable:true` per field, Unicode tokenizer, 256 MB index cap), `semanticSearch` (HNSW, 6 providers, Int8 quantization), `hybridSearch` (RRF fusion, per-arm failure degrades gracefully), `searchByVector`
+- **Search:** `bm25Search` (BM25 via `@backloghq/termlog`, k1/b tunable, `searchable:true` per field, segment-based LSM, S3-aware), `semanticSearch` (HNSW, 6 providers, Int8 quantization), `hybridSearch` (RRF fusion, per-arm failure degrades gracefully), `searchByVector`
 - **Disk mode:** JSONL for point lookups + Parquet for column scans; LRU cache; async `entries()` iterator; `appendEmbeddings` writes embedding batches durably to JSONL (bypasses eviction race); `embedUnembedded` single-pass disk scan (halves S3 I/O); `reembedAll` for v1.3→v1.4 migration (`_id` was incorrectly included in embedding text) with mid-flight `compactInPlace()` every 8 JSONL files (bounds index rewrite cost for large runs); `rebuildHnswFromDisk` on reopen
-- **Embeddings:** batched `embedUnembedded` (configurable `embeddingBatchSize`, continue-on-error per batch); `extractTextFromRecord` excludes explicit `META_FIELDS_FOR_EMBED` set (`_id`,`_version`,`_agent`,`_reason`,`_expires`,`_embedding`) — user `_`-prefixed fields are included; `reembedAll()` returns `ReembedResult{embedded,failed,errors[]}` for structured partial-failure reporting; `db_reembed_all` admin tool (DESTRUCTIVE)
+- **Embeddings:** batched `embedUnembedded` (configurable `embeddingBatchSize`, continue-on-error per batch); `extractTextFromRecord` excludes explicit `META_FIELDS_FOR_EMBED` set (`_id`,`_version`,`_agent`,`_reason`,`_expires`,`_embedding`) — user `_`-prefixed fields are included; `reembedAll()` returns `ReembedResult{embedded,failed,errors[]}` for structured partial-failure reporting; `db_reembed_all` admin tool (DESTRUCTIVE); all 6 providers chunk `embed()` calls into provider-safe batches automatically (OpenAI=100, Voyage=128, Cohere=96, Gemini=100, Ollama=1, HTTP=configurable via `batchLimit` option)
 - **Config knobs:** `embeddingBatchSize`, `diskConcurrency`, `cacheSize`, `rowGroupSize` — all follow AgentDB (db-wide default) + CollectionOptions (per-collection override) shape
 - **Schemas:** `PersistedSchema` in `meta/{name}.schema.json` (description, instructions, field types); `db_get/set/delete/diff/infer/migrate` lifecycle tools; `validatePersistedSchema` rejects `searchable:true` on non-string types; schema bootstrap from `schemas/*.json` glob
-- **Tools:** 39 core / 41 with HTTP (`db_subscribe`/`db_unsubscribe`); auth (bearer, multi-token, JWT, pluggable `authFn`); rate limiting, CORS, audit logging
+- **Tools:** 40 core / 42 with HTTP (`db_subscribe`/`db_unsubscribe`); auth (bearer, multi-token, JWT, pluggable `authFn`); rate limiting, CORS, audit logging
 - **Write modes:** `immediate` (default, crash-safe), `group` (~12x faster), `async` (~50x faster, lossy). Single-writer only for group/async.
 - **Other:** $strLen filter operator; _agent audit stamp from authenticated identity; TTL; optimistic locking (_version); import/export; archive; blob store; memory monitor with per-collection budgets
 
-See `CHANGELOG.md` ([Unreleased] section) for current-cycle details.
+See `CHANGELOG.md` for release history.
 
 ## Commands
 
@@ -42,7 +42,7 @@ npm run test:coverage  # vitest coverage
 
 ```
 agentdb          — core library (AgentDB, Collection, filters, indexes, embeddings, S3Backend)
-agentdb/tools    — framework-agnostic tool definitions (getTools → 39 tools)
+agentdb/tools    — framework-agnostic tool definitions (getTools → 40 tools)
 agentdb/mcp      — MCP server adapter (stdio + HTTP/Streamable transport)
 ```
 
@@ -66,7 +66,6 @@ src/
   hnsw.ts               # HNSW index for approximate nearest neighbor search
   btree.ts              # Sorted-array index + query frequency tracker
   bloom.ts              # Bloom filter for probabilistic existence checks
-  text-index.ts         # Inverted index for full-text search; BM25 scoring via searchScored() (k1/b configurable, v2 JSON persistence)
   rrf.ts                # Reciprocal Rank Fusion utility — rrf(lists, opts?) fuses N ranked lists; k configurable (default 60)
   view.ts               # Named views with cache invalidation
   permissions.ts        # Per-agent permission manager
@@ -81,10 +80,10 @@ src/
     http.ts             # Custom HTTP embedding provider
     quantize.ts         # Int8 quantization for vector storage
     index.ts            # Provider factory
-  tools/                # Tool definitions split into per-domain modules (getTools aggregator → 39 core, 41 with HTTP)
+  tools/                # Tool definitions split into per-domain modules (getTools aggregator → 40 core, 42 with HTTP)
     index.ts            # Aggregator: getTools(db, opts?) composes all domains in canonical order
     shared.ts           # AgentTool type, makeSafe() wrapper (auth identity unification), READ/WRITE/DESTRUCTIVE annotations, shared zod params
-    admin.ts            # db_collections, db_create, db_drop, db_purge, db_stats (5 tools)
+    admin.ts            # db_collections, db_create, db_drop, db_purge, db_stats, db_rebuild_text_index (6 tools)
     crud.ts             # db_insert, db_find, db_find_one, db_update, db_upsert, db_delete, db_batch, db_count, db_undo, db_history, db_distinct (11 tools)
     schema.ts           # db_schema, db_get_schema, db_set_schema, db_delete_schema, db_diff_schema, db_infer_schema (6 tools)
     migrate.ts          # db_migrate — two-phase snapshot, deletion-as-failed, ops cap, prototype-pollution guards (1 tool)
@@ -102,8 +101,8 @@ src/
 ## Key Design Decisions
 
 - **Schema terminology** — three distinct concepts: `defineSchema()` = code-level (hooks, validators, computed fields, never serialized); `PersistedSchema` = JSON subset in `meta/{name}.schema.json` (description, instructions, field types — agent-facing); `db_schema` tool = samples records to infer shape dynamically, does not read `PersistedSchema`.
-- **`searchable: true` on FieldDef** — opt-in BM25 indexing per field; Collection projects to marked string fields before calling TextIndex.add(). Zero-flag fallback: all string fields indexed (v1.3 compat). Non-string fields with searchable:true warn and are ignored.
-- **BM25 v2 JSON persistence** — TextIndex.toJSON() emits version:2 with per-doc TF maps and doc lengths; fromJSON() accepts v1 (lazy upgrade: posting-lists only, scores degrade to 0) and v2. avgdl guard: falls back to 1 when totalLen=0 to prevent NaN on v1-loaded indexes.
+- **`searchable: true` on FieldDef** — opt-in BM25 indexing per field; Collection projects to marked string fields before calling TermLog.add(). Zero-flag fallback: all string fields indexed (v1.3 compat). Non-string fields with searchable:true warn and are ignored.
+- **BM25 via `@backloghq/termlog`** — segment-based LSM full-text index persisted at `<dir>/text/`; manifest at `text/manifest.json`; k1/b tunable via schema or CollectionOptions. S3 backend wired transparently via `@backloghq/termlog-s3` (optional peer dep) when opslog uses S3. `LegacyTextIndexError` thrown on open when v1.4 `indexes/text-index.json` exists without termlog manifest; resolved via `rebuildTextIndex()` or `db_rebuild_text_index` tool.
 - Library-first, MCP is just an adapter — see NOTES.md
 - opslog Store per collection, lazy-loaded with LRU eviction
 - JSON filter syntax primary, compact string syntax secondary

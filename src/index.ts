@@ -8,7 +8,7 @@ export type { Predicate } from "./filter.js";
 
 export { parseCompactFilter } from "./compact-filter.js";
 
-export { Collection } from "./collection.js";
+export { Collection, LegacyTextIndexError } from "./collection.js";
 export type {
   Filter,
   CollectionOptions,
@@ -21,11 +21,8 @@ export type {
 } from "./collection.js";
 
 export { RecordCache } from "./record-cache.js";
-export { IndexFileTooLargeError } from "./disk-store.js";
 export type { CacheStats } from "./record-cache.js";
 export { ArrayIndex } from "./array-index.js";
-export { TextIndex } from "./text-index.js";
-export type { TextIndexOpts } from "./text-index.js";
 export { rrf } from "./rrf.js";
 export type { RankedItem, RRFOptions } from "./rrf.js";
 export type { ViewDefinition } from "./view.js";

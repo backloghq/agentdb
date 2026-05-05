@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { estimateBytes, MemoryMonitor } from "../src/memory.js";
-import { TextIndex } from "../src/text-index.js";
 import { AgentDB } from "../src/agentdb.js";
 import { defineSchema } from "../src/schema.js";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -97,44 +96,7 @@ describe("MemoryMonitor", () => {
   });
 });
 
-describe("TextIndex.estimatedBytes()", () => {
-  it("returns 0-ish for empty index", () => {
-    const idx = new TextIndex();
-    expect(idx.estimatedBytes()).toBeGreaterThanOrEqual(0);
-    expect(idx.estimatedBytes()).toBeLessThan(256); // just overhead
-  });
-
-  it("grows monotonically as docs are added", () => {
-    const idx = new TextIndex();
-    let prev = idx.estimatedBytes();
-    for (let i = 0; i < 20; i++) {
-      idx.add(`doc${i}`, { text: `unique term alpha${i} beta${i} gamma${i}` });
-      const cur = idx.estimatedBytes();
-      expect(cur).toBeGreaterThan(prev);
-      prev = cur;
-    }
-  });
-
-  it("decreases when docs are removed", () => {
-    const idx = new TextIndex();
-    for (let i = 0; i < 10; i++) {
-      idx.add(`doc${i}`, { text: `word${i} common` });
-    }
-    const full = idx.estimatedBytes();
-    for (let i = 0; i < 10; i++) idx.remove(`doc${i}`);
-    const empty = idx.estimatedBytes();
-    expect(empty).toBeLessThan(full);
-  });
-
-  it("returns near-zero after clear()", () => {
-    const idx = new TextIndex();
-    for (let i = 0; i < 50; i++) idx.add(`doc${i}`, { text: `content word${i}` });
-    idx.clear();
-    expect(idx.estimatedBytes()).toBeLessThan(256);
-  });
-});
-
-describe("TextIndex memory monitor integration", () => {
+describe("TermLog memory monitor integration", () => {
   async function makeTmpDir() {
     return mkdtemp(join(tmpdir(), "agentdb-mem-"));
   }

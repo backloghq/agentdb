@@ -2,6 +2,7 @@ import type { EmbeddingProvider } from "./types.js";
 
 const DEFAULT_MODEL = "voyage-3-lite";
 const DEFAULT_BASE_URL = "https://api.voyageai.com/v1";
+const BATCH_LIMIT = 128;
 
 export interface VoyageOptions {
   apiKey: string;
@@ -31,7 +32,16 @@ export class VoyageEmbeddingProvider implements EmbeddingProvider {
 
   async embed(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
+    const all: number[][] = [];
+    for (let i = 0; i < texts.length; i += BATCH_LIMIT) {
+      const batch = texts.slice(i, i + BATCH_LIMIT);
+      const result = await this.embedBatch(batch);
+      all.push(...result);
+    }
+    return all;
+  }
 
+  private async embedBatch(texts: string[]): Promise<number[][]> {
     const response = await fetch(`${this.baseUrl}/embeddings`, {
       method: "POST",
       headers: {

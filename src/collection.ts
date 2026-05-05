@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { rm, mkdir } from "node:fs/promises";
+import { join as pathJoin } from "node:path";
 import { Store, FsBackend } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
 import type { DiskStore } from "./disk-store.js";
 import { getNestedValue } from "./filter.js";
 // parseCompactFilter used by IndexManager (imported there directly)
-import { TextIndex } from "./text-index.js";
+import { TermLog } from "@backloghq/termlog";
 import { rrf } from "./rrf.js";
 import { ViewManager } from "./view.js";
 import type { ViewDefinition } from "./view.js";
@@ -113,6 +115,26 @@ export interface ChangeEvent {
 }
 
 /**
+ * Thrown when a v1.4 text-index.json blob is found on disk without a v2.0
+ * termlog manifest. The collection cannot be opened until the index is rebuilt.
+ *
+ * Resolution: call `db.rebuildTextIndex(name)` then reopen, or use the
+ * `db_rebuild_text_index` MCP tool.
+ */
+export class LegacyTextIndexError extends Error {
+  readonly legacyPath: string;
+  constructor(legacyPath: string) {
+    super(
+      `v1.4 text index detected at ${legacyPath}. v2.0 does not auto-migrate. ` +
+      `To rebuild: call \`await db.rebuildTextIndex(name)\` or ` +
+      `use the \`db_rebuild_text_index\` MCP tool, then reopen.`,
+    );
+    this.name = "LegacyTextIndexError";
+    this.legacyPath = legacyPath;
+  }
+}
+
+/**
  * A named collection backed by an opslog Store.
  * Provides document-store operations (insert, find, update, delete)
  * with agent identity tracking on mutations.
@@ -122,7 +144,8 @@ export class Collection {
   private store: Store<StoredRecord>;
   private _opened = false;
   private opts: CollectionOptions;
-  private textIdx: TextIndex | null = null;
+  private textIdx: TermLog | null = null;
+  private _dir = "";
   private views = new ViewManager();
   private hnswIdx: HnswIndex | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
@@ -135,9 +158,14 @@ export class Collection {
   // True once ensureIndexesLoaded has run and the WAL store has been replayed into textIdx.
   // Prevents ensureIndexesLoaded from overwriting current-session inserts.
   private _textIdxLoaded = false;
+  // Optional termlog StorageBackend — set to S3Backend when running in S3 mode.
+  private _termlogBackend: import("@backloghq/termlog").StorageBackend | undefined = undefined;
 
   /** Set disk store for disk-backed mode. Called by AgentDB during open. */
   setDiskStore(ds: DiskStore): void { this._diskStore = ds; }
+
+  /** Set an alternative termlog StorageBackend (e.g. S3Backend from @backloghq/termlog-s3). Called by AgentDB before open() when running in S3 mode. */
+  setTermlogBackend(backend: import("@backloghq/termlog").StorageBackend): void { this._termlogBackend = backend; }
 
   /**
    * Ensure disk indexes are loaded, then replay any current-session WAL entries into
@@ -154,7 +182,7 @@ export class Collection {
       for (const [id, record] of this.store.entries()) {
         if (!isExpired(record)) {
           const clean = stripMeta(record);
-          this.textIdx.add(id, this.textRecord(clean));
+          await this.textIdx.add(id, extractTextFromRecord(this.textRecord(clean)));
         }
       }
     }
@@ -183,8 +211,8 @@ export class Collection {
   /** Get the index manager (for persistence). */
   getIndexManager(): IndexManager { return this.indexes; }
 
-  /** Get the text index (for persistence). */
-  getTextIndex(): TextIndex | null { return this.textIdx; }
+  /** Get the text index (TermLog handle). */
+  getTextIndex(): TermLog | null { return this.textIdx; }
 
   /** Field names restricted to BM25/text indexing. Empty means all-strings fallback. */
   searchableFields(): string[] { return this.opts.searchableFields ?? []; }
@@ -199,7 +227,7 @@ export class Collection {
     this.name = name;
     this.store = store;
     this.opts = opts ?? {};
-    if (this.opts.textSearch) this.textIdx = new TextIndex({ k1: this.opts.bm25K1, b: this.opts.bm25B });
+    // TermLog is opened in open() once the directory is known; textIdx stays null until then.
   }
 
   /** Check optimistic lock and throw on version mismatch. */
@@ -270,12 +298,62 @@ export class Collection {
   }
 
   /** Rebuild the full text index from current store contents. */
-  private rebuildTextIndex(): void {
-    if (!this.textIdx) return;
-    this.textIdx.clear();
-    for (const [id, record] of this.store.entries()) {
-      this.textIdx.add(id, this.textRecord(stripMeta(record)));
+  /**
+   * Rebuild the TermLog text index from scratch using current store records.
+   *
+   * Use this to resolve a `LegacyTextIndexError`: the collection cannot be opened
+   * normally when a v1.4 text-index.json blob is present. Instantiate Collection
+   * without `textSearch: true`, call `rebuildTextIndex()`, then reopen with `textSearch: true`.
+   *
+   * Also deletes any legacy `indexes/text-index.json` blob left over from v1.4 so
+   * subsequent opens do not re-throw `LegacyTextIndexError`.
+   *
+   * @returns The number of documents indexed during the rebuild.
+   */
+  async rebuildTextIndex(): Promise<number> {
+    if (!this._dir) return 0;
+    // Close existing TermLog if open, then wipe and recreate the text directory.
+    if (this.textIdx) await this.textIdx.close();
+    const textDir = pathJoin(this._dir, "text");
+    if (this._termlogBackend) {
+      // S3 mode: delete all blobs under the termlog prefix so TermLog.open starts clean.
+      // Use a 16-parallel batch loop to avoid unbounded fan-out on large indexes.
+      const blobs = await this._termlogBackend.listBlobs("").catch(() => [] as string[]);
+      const CONCURRENCY = 16;
+      for (let i = 0; i < blobs.length; i += CONCURRENCY) {
+        const batch = blobs.slice(i, i + CONCURRENCY);
+        await Promise.all(batch.map((b) => this._termlogBackend!.deleteBlob(b).catch(() => {})));
+      }
+    } else {
+      await rm(textDir, { recursive: true, force: true });
+      await mkdir(textDir, { recursive: true });
     }
+    this.textIdx = await TermLog.open({
+      dir: textDir,
+      backend: this._termlogBackend,
+      k1: this.opts.bm25K1 ?? 1.2,
+      b: this.opts.bm25B ?? 0.75,
+    });
+    let count = 0;
+    const records = this._diskStore
+      ? await (async () => {
+          const out: Array<[string, StoredRecord]> = [];
+          for await (const [id, record] of this._diskStore!.entries()) {
+            out.push([id, record as StoredRecord]);
+          }
+          return out;
+        })()
+      : Array.from(this.store.entries());
+    for (const [id, record] of records) {
+      if (!isExpired(record)) {
+        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+        count++;
+      }
+    }
+    await this.textIdx.flush();
+    // Delete any legacy v1.4 blob so subsequent opens don't re-throw LegacyTextIndexError.
+    await this.backend.deleteBlob("indexes/text-index.json").catch(() => {});
+    return count;
   }
 
   /** Rebuild all indexes from current store contents. Delegates to IndexManager. */
@@ -288,12 +366,12 @@ export class Collection {
    * Re-indexes only the specified records in the text index (avoids re-tokenizing all records).
    * B-tree indexes are fully rebuilt (cheap — just field lookups, no tokenization).
    */
-  private incrementalIndexUpdate(affectedIds: string[]): void {
+  private async incrementalIndexUpdate(affectedIds: string[]): Promise<void> {
     const cleanRecords = this.indexes.incrementalUpdate(affectedIds, (id) => this.store.get(id));
     if (this.textIdx) {
       for (const [id, clean] of cleanRecords) {
-        if (clean) this.textIdx.add(id, this.textRecord(clean));
-        else this.textIdx.remove(id);
+        if (clean) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(clean)));
+        else await this.textIdx.remove(id);
       }
     }
   }
@@ -386,6 +464,7 @@ export class Collection {
   async open(dir: string, options?: { checkpointThreshold?: number; checkpointOnClose?: boolean; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean; skipLoad?: boolean }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
+    this._dir = dir;
     if (options?.backend) {
       this.backend = options.backend;
     } else {
@@ -396,10 +475,62 @@ export class Collection {
       this.backend = blobBackend;
     }
     this.blobPrefix = "blobs";
+
+    // Detect v1.4 legacy text-index.json blob. Only relevant for local-FS mode:
+    // v1.4 never wrote text-index.json to S3 (the old TextIndex was local-FS-only).
+    // In S3 mode (_termlogBackend set), skip this check entirely.
+    if (this.opts.textSearch && !this._termlogBackend) {
+      const legacyBlobPath = "indexes/text-index.json";
+      const termlogManifestBlobPath = "text/manifest.json";
+
+      let hasLegacyBlob = false;
+      let hasTermlogManifest = false;
+
+      try {
+        const files = await this.backend.listBlobs("indexes");
+        hasLegacyBlob = files.includes("text-index.json");
+      } catch { /* indexes dir doesn't exist — fresh collection */ }
+
+      try {
+        await this.backend.readBlob(termlogManifestBlobPath);
+        hasTermlogManifest = true;
+      } catch { /* no termlog manifest yet */ }
+
+      if (hasLegacyBlob && !hasTermlogManifest) {
+        await this.store.close();
+        this._opened = false;
+        throw new LegacyTextIndexError(pathJoin(dir, legacyBlobPath));
+      }
+      if (hasLegacyBlob && hasTermlogManifest) {
+        // Termlog index already built — clean up the orphaned legacy blob
+        await this.backend.deleteBlob(legacyBlobPath).catch(() => {});
+      }
+    }
+
+    // Open TermLog for text search (if enabled) before WAL replay so adds land in the index.
+    // termlogAlreadyIndexed: true when TermLog reopened from existing segments.
+    // In that case skip the WAL-replay add() loop — segments already have all data.
+    // Re-adding every record doubles totalDocs/totalLen in the BM25 scoring state,
+    // shifting IDF and breaking score determinism across close/reopen.
+    let termlogAlreadyIndexed = false;
+    if (this.opts.textSearch) {
+      const textDir = pathJoin(dir, "text");
+      if (!this._termlogBackend) await mkdir(textDir, { recursive: true });
+      this.textIdx = await TermLog.open({
+        dir: textDir,
+        backend: this._termlogBackend,
+        k1: this.opts.bm25K1 ?? 1.2,
+        b: this.opts.bm25B ?? 0.75,
+      });
+      termlogAlreadyIndexed = this.textIdx.docCount() > 0;
+    }
+
     // Single pass: detect TTL, build text index, load HNSW embeddings
     for (const [id, record] of this.store.entries()) {
       if (record[META_EXPIRES]) this._hasTTL = true;
-      if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(record)));
+      if (this.textIdx && !termlogAlreadyIndexed && !isExpired(record)) {
+        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+      }
       if (!isExpired(record)) {
         const stored = record[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
         if (stored) {
@@ -412,10 +543,15 @@ export class Collection {
         }
       }
     }
+    if (this.textIdx) await this.textIdx.flush();
   }
 
   /** Close the underlying store. */
   async close(): Promise<void> {
+    if (this.textIdx) {
+      await this.textIdx.close();
+      this.textIdx = null;
+    }
     await this.store.close();
     this._opened = false;
   }
@@ -434,7 +570,7 @@ export class Collection {
     this.stampVersion(stored, id);
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
-    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
+    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("insert", [id], opts?.agent);
     return id;
@@ -465,7 +601,7 @@ export class Collection {
     });
     if (this.textIdx) {
       for (const { id, stored } of prepared) {
-        this.textIdx.add(id, this.textRecord(stripMeta(stored)));
+        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
       }
     }
     for (const { id, stored } of prepared) {
@@ -586,7 +722,9 @@ export class Collection {
     let textMatchIds: Set<string> | null = null;
     if (textQuery) {
       if (!this.textIdx) throw new Error("Text search not enabled. Set textSearch: true in collection options.");
-      textMatchIds = new Set(this.textIdx.search(textQuery));
+      await this.textIdx.flush();
+      const hits = await this.textIdx.search(textQuery, { mode: "and" });
+      textMatchIds = new Set(hits.map((h) => h.docId));
     }
 
     // Lazy-load persisted indexes on first query (deferred from open for fast cold start)
@@ -889,7 +1027,7 @@ export class Collection {
     // Incremental re-index for text and B-tree (only affected records)
     if (this.textIdx) {
       for (const { id, updated } of updates) {
-        this.textIdx.add(id, this.textRecord(stripMeta(updated)));
+        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(updated))));
       }
     }
     for (const { id, old, updated } of updates) {
@@ -909,7 +1047,7 @@ export class Collection {
     const record = this.store.get(id);
     if (!record || isExpired(record)) return false;
     this.store.delete(id);
-    if (this.textIdx) this.textIdx.remove(id);
+    if (this.textIdx) await this.textIdx.remove(id);
     this.updateBTreeIndexes(id, record, undefined);
     if (record._blobs) this.deleteBlobsForRecord(id).catch(() => {});
     this.emitChange("delete", [id], opts?.agent);
@@ -936,7 +1074,7 @@ export class Collection {
     this.validateRecord(stored);
     this.stampVersion(stored, id);
     await this.store.set(id, stored);
-    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
+    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("upsert", [id], opts?.agent);
     return { id, action: existing ? "updated" : "inserted" };
@@ -974,7 +1112,7 @@ export class Collection {
     });
 
     for (const { id, stored, oldRecord, existing } of prepared) {
-      if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
+      if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
       this.updateBTreeIndexes(id, oldRecord, stored);
       results.push({ id, action: existing ? "updated" : "inserted" });
     }
@@ -1024,7 +1162,7 @@ export class Collection {
       }
     });
     if (this.textIdx) {
-      for (const id of toDelete) this.textIdx.remove(id);
+      for (const id of toDelete) await this.textIdx.remove(id);
     }
     for (const { id, record } of oldRecords) {
       if (record) this.updateBTreeIndexes(id, record, undefined);
@@ -1045,9 +1183,9 @@ export class Collection {
     const result = await this.store.undo();
     if (result) {
       if (lastOp) {
-        this.incrementalIndexUpdate([lastOp.id]);
+        await this.incrementalIndexUpdate([lastOp.id]);
       } else {
-        this.rebuildTextIndex();
+        await this.rebuildTextIndex();
         this.rebuildBTreeIndexes();
       }
       this.emitChange("undo", lastOp ? [lastOp.id] : []);
@@ -1077,7 +1215,7 @@ export class Collection {
    */
   async batch(fn: () => void): Promise<void> {
     await this.store.batch(fn);
-    this.rebuildTextIndex();
+    await this.rebuildTextIndex();
     this.rebuildBTreeIndexes();
     this.emitChange("update", []);
   }
@@ -1092,7 +1230,7 @@ export class Collection {
    */
   async refresh(): Promise<void> {
     await this.store.refresh();
-    this.rebuildTextIndex();
+    await this.rebuildTextIndex();
     this.rebuildBTreeIndexes();
     this.emitChange("update", []);
   }
@@ -1107,7 +1245,7 @@ export class Collection {
     const newOps = await this.store.tail();
     if (newOps.length > 0) {
       const affectedIds = [...new Set(newOps.map((op) => op.id))];
-      this.incrementalIndexUpdate(affectedIds);
+      await this.incrementalIndexUpdate(affectedIds);
       this.emitChange("update", affectedIds);
     }
     return newOps;
@@ -1152,7 +1290,7 @@ export class Collection {
       }
     });
     for (const { id, record } of expired) {
-      if (this.textIdx) this.textIdx.remove(id);
+      if (this.textIdx) await this.textIdx.remove(id);
       this.updateBTreeIndexes(id, record, undefined);
     }
     const ids = expired.map((e) => e.id);
@@ -1214,7 +1352,9 @@ export class Collection {
       throw new Error("Full-text search not enabled. Set textSearch: true in collection options.");
     }
     await this.ensureDiskIndexesLoaded();
-    const matchIds = this.textIdx.search(query);
+    await this.textIdx.flush();
+    const hits = await this.textIdx.search(query, { mode: "and" });
+    const matchIds = new Set(hits.map((h) => h.docId));
     const allAccessor = this.allCleanRecords();
     const limit = opts?.limit ?? 50;
     const offset = opts?.offset ?? 0;
@@ -1333,7 +1473,9 @@ export class Collection {
     const limit = opts?.limit ?? 10;
     const candidateLimit = opts?.candidateLimit ?? Math.max(limit * 4, 50);
 
-    const candidates = this.textIdx.searchScored(query, { limit: candidateLimit });
+    await this.textIdx.flush();
+    const hits = await this.textIdx.search(query, { mode: "or", limit: candidateLimit });
+    const candidates = hits.map((h) => ({ id: h.docId, score: h.score }));
     if (candidates.length === 0) return { records: [], scores: [] };
 
     return this.materializeCandidates(candidates, { limit, filter: opts?.filter, summary: opts?.summary });
@@ -1750,7 +1892,7 @@ export class Collection {
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
     this.updateBTreeIndexes(id, oldRecord, stored);
-    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
+    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     // Update HNSW (remove old if exists, add new)
     if (this.hnswIdx.size > 0) {
       try { this.hnswIdx.remove(id); } catch { /* not in index yet */ }
@@ -1838,6 +1980,11 @@ export class Collection {
   stats(): { activeRecords: number; opsCount: number; textIndexBytes: number } {
     const s = this.store.stats();
     return { activeRecords: s.activeRecords, opsCount: s.opsCount, textIndexBytes: this.textIdx?.estimatedBytes() ?? 0 };
+  }
+
+  /** Flush the TermLog write buffer to disk. Used in tests to ensure segment files exist. */
+  async flushTextIndex(): Promise<void> {
+    if (this.textIdx) await this.textIdx.flush();
   }
 
   /**

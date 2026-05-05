@@ -89,12 +89,30 @@ export function getAdminTools(db: AgentDB): AgentTool[] {
     {
       name: "db_stats",
       title: "Database Stats",
-      description: "Get database-level statistics: total collections, total records, and estimated TextIndex memory across all collections. Lightweight — does not scan individual records." + API_NOTE,
+      description: "Get database-level statistics: total collections, total records, and estimated text index memory across all collections. Lightweight — does not scan individual records." + API_NOTE,
       schema: z.object({}),
       outputSchema: z.object({ collections: z.number(), totalRecords: z.number(), textIndexBytes: z.number() }),
       annotations: READ,
       execute: safe("db_stats", READ)(async () => {
         return db.stats();
+      }),
+    },
+
+    {
+      name: "db_rebuild_text_index",
+      title: "Rebuild Text Index",
+      description:
+        "Rebuild the TermLog full-text index for a collection from scratch. " +
+        "Use this to resolve a LegacyTextIndexError thrown when opening a v1.4 collection " +
+        "that has a text-index.json blob but no termlog index. Also deletes the legacy blob " +
+        "so subsequent opens succeed. Safe to call multiple times — idempotent." + API_NOTE,
+      schema: z.object({ collection: collectionParam }),
+      outputSchema: z.object({ rebuiltDocCount: z.number() }),
+      annotations: WRITE_IDEMPOTENT,
+      execute: safe("db_rebuild_text_index", WRITE_IDEMPOTENT)(async (args) => {
+        const col = await db.collection(args.collection as string);
+        const rebuiltDocCount = await col.rebuildTextIndex();
+        return { rebuiltDocCount };
       }),
     },
   ];
