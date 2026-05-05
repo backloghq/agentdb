@@ -781,7 +781,7 @@ const db = new AgentDB("./data", { embeddingBatchSize: 128 });
 const col = await db.collection("articles", { embeddingBatchSize: 64 });
 ```
 
-Smaller batches reduce peak memory and provider timeout risk; larger batches reduce round-trips. Most hosted providers cap at 512–2048 texts per call — stay below their limit.
+Smaller batches reduce peak memory and provider timeout risk; larger batches reduce round-trips. Most hosted providers cap at 512–2048 texts per call — stay below their limit. All embedding providers (OpenAI, Voyage, Cohere, Gemini, Ollama, HTTP) automatically chunk each `embed()` call into provider-safe batches, so `embeddingBatchSize` can be set independently of API limits.
 
 **`diskConcurrency`** — maximum number of concurrent `DiskStore.get()` calls when materializing BM25/vector candidates in disk mode. Default: `16` for non-local-filesystem backends (e.g. S3); local filesystem is unbounded.
 

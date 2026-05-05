@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [2.0.0] - 2026-05-05
 
+### Changed (pre-release audit round 3)
+
+- **Per-provider batch limits for all embedding providers** — all providers now chunk large `texts[]` arrays into sequential batches before hitting their respective APIs, matching the chunking pattern already in place for OpenAI. Per-provider limits: Voyage=128, Cohere=96, Gemini=100, Ollama=1 (sequential by API design, unchanged), HTTP=configurable via `batchLimit` constructor option (default 100). `HttpEmbeddingOptions` gains an optional `batchLimit?: number` field.
+
 ### Fixed (pre-release audit round 2)
 
 - **Documented migration flow re-threw `LegacyTextIndexError` on second open** — `AgentDB.collection()` caches `colOpts` (including `textSearch: true`) before calling `_openCollection()`. When step 1 threw, the cached opts persisted; a subsequent `db.collection("name")` call used the same opts and threw again, making the documented recovery impossible. Fix: new `AgentDB.rebuildTextIndex(name)` top-level method that opens the collection internally with `textSearch: false` (temporarily overriding cached opts), calls `col.rebuildTextIndex()`, then evicts so the next open uses the caller's opts. README, MIGRATION-2.0.md, and the `LegacyTextIndexError` message all updated to the new single-call API.
