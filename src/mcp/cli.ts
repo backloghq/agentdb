@@ -2,6 +2,8 @@
 import { readdir } from "node:fs/promises";
 import { dirname, basename, resolve, join } from "node:path";
 import { startStdio, startHttp } from "./index.js";
+import { createJwtAuth } from "./jwt.js";
+import type { TokenMap } from "./auth.js";
 import { validateTenantId } from "./tenant-binding.js";
 import { loadAgentDBConfig, ConfigValidationError } from "../config.js";
 import type { DbConfig, HttpConfig } from "../config.js";
@@ -291,14 +293,38 @@ async function main(): Promise<void> {
     const host = http.host ?? "127.0.0.1";
     const authToken = http.auth ?? "";
     const rateLimit = http.rateLimit ?? 0;
+    const rateLimitWindow = http.rateLimitWindow;
     const corsOrigins = http.cors;
+
+    // Auth priority: JWT > multi-token > single bearer token.
+    // Only one auth mechanism is wired per process; the others are ignored.
+    let authFn: import("./auth.js").AuthFn | undefined;
+    let authTokens: TokenMap | undefined;
+
+    if (http.jwt?.secret) {
+      // JWT via static secret (HMAC)
+      authFn = createJwtAuth({
+        secret: http.jwt.secret,
+        audience: http.jwt.audience,
+        issuer: http.jwt.issuer,
+        expectedTenantId: tenantId || undefined,
+      });
+    } else if (http.multiToken && http.multiToken.length > 0) {
+      // Multiple bearer tokens, each gets a positional agent ID
+      authTokens = Object.fromEntries(
+        http.multiToken.map((tok, i) => [tok, { agentId: `token-${i + 1}` }]),
+      ) as TokenMap;
+    }
 
     await startHttp(dataDir, {
       port,
       host,
       dbOpts,
-      authToken: authToken || undefined,
+      authToken: (!authFn && !authTokens && authToken) ? authToken : undefined,
+      authTokens,
+      authFn,
       rateLimit: rateLimit || undefined,
+      rateLimitWindow: rateLimitWindow || undefined,
       corsOrigins: corsOrigins?.length ? corsOrigins : undefined,
       maxSessions: http.maxSessions,
       sessionIdleMs: http.sessionIdleMs,
@@ -309,7 +335,9 @@ async function main(): Promise<void> {
       expectedTenantId: tenantId || undefined,
     });
     console.error(`AgentDB MCP server running on http://${host}:${port}/mcp`);
-    if (authToken) console.error("Authentication: bearer token required");
+    if (authFn) console.error("Authentication: JWT (HMAC secret)");
+    else if (authTokens) console.error(`Authentication: multi-token (${Object.keys(authTokens).length} tokens)`);
+    else if (authToken) console.error("Authentication: bearer token required");
     if (tenantId) console.error(`Tenant binding: bound to tenant ${tenantId}`);
     if (rateLimit) console.error(`Rate limit: ${rateLimit} requests/minute`);
   } else {
