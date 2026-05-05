@@ -856,6 +856,66 @@ col.find({ filter: { status: "active" }, summary: true });
 
 **Default recommendation:** Use `memory` for small datasets, `disk` or `auto` for anything that might grow.
 
+## Production Tuning
+
+Every configurable knob, its location, default, and the workload signal that should prompt you to change it.
+
+`AgentDB` options propagate as defaults to every collection; per-collection `CollectionOptions` override them.
+
+### Storage and query knobs
+
+| Option | Location | Default | Tune when… | Recommended range |
+|--------|----------|---------|-----------|-------------------|
+| `maxFindLimit` | `AgentDB` / `Collection` | `10_000` | batch exports need >10K records per page, or you want to enforce a lower cap | 1K – unlimited |
+| `maxIndexCardinality` | `AgentDB` / `Collection` | `1_000` | `metrics().bm25SegmentCount` shows frequent Parquet scans on a high-cardinality field, or `console.warn` fires at index load | 100 – 100K |
+| `filterCacheSize` | `AgentDB` / `Collection` | `64` | a collection has many distinct query shapes (>64 unique filters in a session) | 32 – 256 |
+| `cacheSize` | `AgentDB` / `Collection` | `1_000` | `metrics().recordCacheHits / recordCacheFetches` hit rate is low (<50%) on a hot collection | 100 – 100K |
+| `rowGroupSize` | `AgentDB` / `Collection` | `5_000` | column scan performance is slow (lower = smaller seek range, higher = fewer S3 requests) | 1K – 20K |
+| `mergeThreshold` | `AgentDB` / `Collection` | `10` | S3 per-request cost is high (raise), or local read amplification is high (lower) | 4 – 50 |
+| `mergeJsonlThreshold` | `AgentDB` / `Collection` | `8` | same as `mergeThreshold` — controls JSONL delta file accumulation before full merge | 4 – 40 |
+| `diskConcurrency` | `AgentDB` / `Collection` | `20` | S3 point-lookup latency is high (raise to overlap more requests); has no effect on local FS | 4 – 64 |
+| `embeddingBatchSize` | `AgentDB` / `Collection` | `256` | embedding provider rate-limit errors or timeouts on large batch runs | 8 – 512 |
+
+### HTTP / MCP server knobs
+
+| Option | Location | Default | Tune when… | Recommended range |
+|--------|----------|---------|-----------|-------------------|
+| `maxSessions` | `HttpOptions` | `100` | multi-agent orchestrators fan out more than 100 concurrent connections | 10 – 1000 |
+| `sessionIdleMs` | `HttpOptions` | `1_800_000` (30 min) | agents hold long-lived idle connections (raise) or session memory is expensive (lower) | 60K – 86_400_000 |
+| `auditBufferSize` | `HttpOptions` | `10_000` | audit entries are silently dropped (observable via log volume drops) | 1K – 100K |
+
+### Observability
+
+Use `col.metrics()` to read live counters without any instrumentation cost:
+
+```typescript
+const m = col.metrics();
+// Filter cache hit rate — low values mean filterCacheSize should be raised
+console.log(m.filterCacheHits / (m.filterCacheHits + m.filterCompilations));
+// Disk LRU hit rate — low values mean cacheSize should be raised
+console.log(m.recordCacheHits / m.recordCacheFetches);
+// findTruncations — non-zero means some queries hit the maxFindLimit cap
+console.log(m.findTruncations);
+// Index sizes
+console.log(m.bm25SegmentCount, m.hnswNodeCount, m.walRecordCount, m.parquetRowGroups);
+```
+
+## Limits and Ceilings
+
+Every hard cap in the system, what triggers it, and how to change it.
+
+| Cap | Default | What triggers it | Effect | How to change |
+|-----|---------|-----------------|--------|---------------|
+| `maxFindLimit` | `10_000` | `find()` called with `limit` exceeding the cap | Result is truncated (`truncated: true`); `console.warn` printed; `metrics().findTruncations` incremented | `CollectionOptions.maxFindLimit` or `AgentDBOptions.maxFindLimit` |
+| `maxIndexCardinality` | `1_000` | Field cardinality exceeds threshold at index load | B-tree index for that field is skipped; queries fall back to full Parquet scan; `console.warn` printed once per field | `CollectionOptions.maxIndexCardinality` or `AgentDBOptions.maxIndexCardinality` |
+| `maxSessions` | `100` | 101st concurrent MCP HTTP session arrives | HTTP 503 returned | `HttpOptions.maxSessions` |
+| `auditBufferSize` | `10_000` | 10,001st audit log entry recorded | Oldest entry silently dropped (ring buffer) | `HttpOptions.auditBufferSize` |
+| `auditMaxLimit` | `10_000` | `/audit?limit=N` with N exceeding cap | `limit` silently capped at maximum | `HttpOptions.auditMaxLimit` |
+| `mergeThreshold` | `10` | 10 incremental Parquet files accumulate before compaction | Full merge triggered on next close | `AgentDB/CollectionOptions.mergeThreshold` |
+| `mergeJsonlThreshold` | `8` | 8 incremental JSONL delta files accumulate | Full merge triggered on next close | `AgentDB/CollectionOptions.mergeJsonlThreshold` |
+
+**Removed in v2.0:** the 256 MB per-collection text index cap (~25–30K document ceiling) is gone. termlog uses a segment-based LSM with no in-memory size limit.
+
 ## Migration from v1.4
 
 v2.0 replaces the in-house `TextIndex` JSON blob with `@backloghq/termlog` (segment-based LSM). The change is automatic for new collections. Existing collections that have a v1.4 BM25 index on disk require a one-time rebuild.

@@ -60,11 +60,11 @@ export interface AgentDBOptions {
   storageMode?: "memory" | "disk" | "auto";
   /** Record count threshold for auto mode (default: 10000). */
   diskThreshold?: number;
-  /** LRU cache size for disk mode (max records, default: 10000). */
+  /** LRU cache size for disk mode (max records, default: 1_000). */
   cacheSize?: number;
   /** Parquet row group size for disk mode (default: 5000). */
   rowGroupSize?: number;
-  /** Max concurrent disk fetches for non-FS backends (e.g. S3). Default: 16. Per-collection override via CollectionOptions.diskConcurrency. */
+  /** Max concurrent disk fetches for non-FS backends (e.g. S3). Default: 20. Per-collection override via CollectionOptions.diskConcurrency. */
   diskConcurrency?: number;
   /** Number of records per embedding provider call in embedUnembedded (default: 256). Per-collection override via CollectionOptions.embeddingBatchSize. */
   embeddingBatchSize?: number;
