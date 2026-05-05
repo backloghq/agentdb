@@ -44,8 +44,15 @@
   "files": [
     "dist/",
     "README.md",
+    "CHANGELOG.md",
+    "MIGRATION-1.5.md",
     "LICENSE"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/backloghq/agentdb.git"
+  },
+  "sideEffects": false,
   "dependencies": {
     "@backloghq/opslog": "^0.8.1",
     "@backloghq/termlog": "^0.1.2",
