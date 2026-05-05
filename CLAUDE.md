@@ -14,7 +14,7 @@ Major capabilities:
 - **Write modes:** `immediate` (default, crash-safe), `group` (~12x faster), `async` (~50x faster, lossy). Single-writer only for group/async.
 - **Other:** $strLen filter operator; _agent audit stamp from authenticated identity; TTL; optimistic locking (_version); import/export; archive; blob store; memory monitor with per-collection budgets
 
-See `CHANGELOG.md` ([Unreleased] section) for current-cycle details.
+See `CHANGELOG.md` for release history.
 
 ## Commands
 
@@ -80,7 +80,7 @@ src/
     http.ts             # Custom HTTP embedding provider
     quantize.ts         # Int8 quantization for vector storage
     index.ts            # Provider factory
-  tools/                # Tool definitions split into per-domain modules (getTools aggregator → 39 core, 41 with HTTP)
+  tools/                # Tool definitions split into per-domain modules (getTools aggregator → 40 core, 42 with HTTP)
     index.ts            # Aggregator: getTools(db, opts?) composes all domains in canonical order
     shared.ts           # AgentTool type, makeSafe() wrapper (auth identity unification), READ/WRITE/DESTRUCTIVE annotations, shared zod params
     admin.ts            # db_collections, db_create, db_drop, db_purge, db_stats, db_rebuild_text_index (6 tools)

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-05-05
+
 ### Changed
 
 - **`Collection` text index backend replaced with `@backloghq/termlog` (phase 3)** — `private textIdx: TextIndex | null` replaced with `TermLog | null`. TermLog is opened at `<dir>/text/` in `Collection.open()` and closed in `Collection.close()`. `rebuildTextIndex()` and `incrementalIndexUpdate()` are now async. All `textIdx.add/remove` call sites await the TermLog async API. `DiskStore.loadIndexes`/`saveIndexes` no longer receive a text-index argument — TermLog owns its own directory. `find()/$text`, `search()`, and `bm25Search()` flush the TermLog write buffer before querying so buffered writes are immediately visible without an explicit flush call. Added `Collection.flushTextIndex()` public method (used by AgentDB.close and WAL replay). `Collection.getTextIndex()` return type is now `TermLog | null`.
