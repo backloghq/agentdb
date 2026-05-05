@@ -243,6 +243,17 @@ describe("Collection.metrics()", () => {
       await db.close();
       await rm(dir, { recursive: true, force: true });
     });
+
+    // T11: async write mode
+    it("writeMode reflects AgentDBOptions.writeMode when set to 'async'", async () => {
+      const dir = await makeTmpDir();
+      const db = new AgentDB(dir, { writeMode: "async" });
+      await db.init();
+      const col = await db.collection(defineSchema({ name: "metrics-wm-async", fields: { v: { type: "string" } } }));
+      expect(col.metrics().writeMode).toBe("async");
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
   });
 
   describe("bm25DocCount and bm25NeedsMerge", () => {
@@ -294,6 +305,36 @@ describe("Collection.metrics()", () => {
       // After rebuildTextIndex: at most 1 segment → no merge pending
       expect(m.bm25SegmentCount).toBeLessThanOrEqual(1);
       expect(m.bm25NeedsMerge).toBe(false);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    // T12: bm25NeedsMerge: true — produce >1 segment by flushing twice without a merge/rebuild
+    it("bm25NeedsMerge is true when multiple segments exist (T12)", async () => {
+      const dir = await makeTmpDir();
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "metrics-bm25multi",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+
+      // First batch: insert → flush → segment 1
+      for (let i = 0; i < 3; i++) await col.insert({ title: `batch-one doc ${i}` });
+      const textIdx = col.getTextIndex();
+      if (!textIdx) throw new Error("textIdx should be non-null when textSearch is enabled");
+      await textIdx.flush();
+
+      // Second batch: insert → flush → segment 2
+      for (let i = 0; i < 3; i++) await col.insert({ title: `batch-two doc ${i}` });
+      await textIdx.flush();
+
+      const m = col.metrics();
+      // Two flushes without a merge → segmentCount > 1 → bm25NeedsMerge true
+      expect(m.bm25SegmentCount).toBeGreaterThan(1);
+      expect(m.bm25NeedsMerge).toBe(true);
 
       await db.close();
       await rm(dir, { recursive: true, force: true });

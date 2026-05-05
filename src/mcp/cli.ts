@@ -274,6 +274,7 @@ async function main(): Promise<void> {
   const tenantId = config.db?.tenantId ?? "";
   if (tenantId) validateTenantId(tenantId);
 
+  console.error(`Data directory: ${dataDir}`);
   const dbOpts = await resolveAgentDBOpts();
 
   // Schema paths: merge CLI --schemas globs + config.db.schemaPaths

@@ -255,4 +255,69 @@ describe.skipIf(!existsSync(CLI))("config-cli integration", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toMatch(/unknown embedding provider/i);
   }, 10000);
+
+  // ------------------------------------------------------------------
+  // H5 carryover: --port NaN guard
+  // ------------------------------------------------------------------
+
+  it("--port with non-numeric value exits 1 (H5 parseIntFlag guard)", async () => {
+    const result = await runCli(["--http", "--port", "abc"], { timeoutMs: 3000 });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/--port/i);
+  }, 10000);
+
+  it("--rate-limit with non-numeric value exits 1 (H5 parseIntFlag guard)", async () => {
+    const result = await runCli(["--http", "--rate-limit", "abc"], { timeoutMs: 3000 });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/--rate-limit/i);
+  }, 10000);
+
+  // ------------------------------------------------------------------
+  // T13: Strengthened precedence tests — verify actual resolved value
+  // The CLI logs key resolved values to stderr at startup:
+  //   "Data directory: <path>"
+  //   "AgentDB MCP server running on http://<host>:<port>/mcp"
+  //   "Rate limit: <n> requests/minute"
+  // ------------------------------------------------------------------
+
+  // T13-a: CLI --path beats AGENTDB_PATH env var (assert data dir in stderr)
+  it("T13-a: --path value is the one used, not AGENTDB_PATH env var", async () => {
+    const cliPath = join(tmp, "t13a-cli");
+    const envPath = join(tmp, "t13a-env");
+    const result = await runCli(["--path", cliPath], {
+      env: { AGENTDB_PATH: envPath },
+      timeoutMs: 3000,
+    });
+    // The CLI wins: startup log should mention cliPath, not envPath
+    expect(result.stderr).toContain(`Data directory: ${cliPath}`);
+    expect(result.stderr).not.toContain(envPath);
+  }, 10000);
+
+  // T13-b: CLI --http --port beats AGENTDB_HTTP_PORT env var (assert port in stderr startup msg)
+  it("T13-b: --port value is the one used, not AGENTDB_HTTP_PORT env var", async () => {
+    const cliPort = 39201;
+    const envPort = 39202;
+    const dataDir = join(tmp, "t13b-data");
+    const result = await runCli(["--http", "--port", String(cliPort), "--path", dataDir], {
+      env: { AGENTDB_HTTP_PORT: String(envPort) },
+      timeoutMs: 3000,
+    });
+    expect(result.stderr).toContain(`:${cliPort}/mcp`);
+    expect(result.stderr).not.toContain(`:${envPort}/mcp`);
+  }, 10000);
+
+  // T13-c: AGENTDB_HTTP_RATE_LIMIT env var beats config-file http.rateLimit
+  it("T13-c: AGENTDB_HTTP_RATE_LIMIT env var beats config-file rateLimit", async () => {
+    const cfgPath = join(tmp, "t13c.json");
+    const dataDir = join(tmp, "t13c-data");
+    writeFileSync(cfgPath, JSON.stringify({ http: { rateLimit: 100 } }));
+
+    const result = await runCli(["--http", "--port", "39203", "--config", cfgPath, "--path", dataDir], {
+      env: { AGENTDB_HTTP_RATE_LIMIT: "42" },
+      timeoutMs: 3000,
+    });
+    // Env wins: startup log should say 42 requests/minute, not 100
+    expect(result.stderr).toContain("42 requests/minute");
+    expect(result.stderr).not.toContain("100 requests/minute");
+  }, 10000);
 });

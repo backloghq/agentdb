@@ -166,6 +166,40 @@ describe("Config env var coercion", () => {
       }
       throw new Error("Expected error not thrown");
     });
+
+    // B2 carryover: error must NOT echo the raw secret value
+    it("AGENTDB_HTTP_MULTI_TOKEN bad JSON — error does NOT contain the raw value (B2 redaction)", () => {
+      const secret = '["tok-abc","tok-xyz"]broken';
+      try {
+        fromEnv({ AGENTDB_HTTP_MULTI_TOKEN: secret });
+      } catch (e) {
+        expect(e).toBeInstanceOf(ConfigValidationError);
+        const msg = (e as ConfigValidationError).message;
+        expect(msg).toContain("AGENTDB_HTTP_MULTI_TOKEN");  // var name is present
+        expect(msg).not.toContain("tok-abc");               // raw secret value is NOT present
+        expect(msg).toContain("<redacted>");                 // redaction marker is present
+        return;
+      }
+      throw new Error("Expected error not thrown");
+    });
+
+    // B3 carryover: JSON parses but wrong shape → post-merge zod catches it
+    it("AGENTDB_HTTP_MULTI_TOKEN='[1,2,3]' (number array) → throws ConfigValidationError (wrong shape)", () => {
+      try {
+        fromEnv({ AGENTDB_HTTP_MULTI_TOKEN: "[1,2,3]" });
+      } catch (e) {
+        expect(e).toBeInstanceOf(ConfigValidationError);
+        expect((e as ConfigValidationError).source).toBe("env");
+        return;
+      }
+      throw new Error("Expected error not thrown");
+    });
+
+    // B3 carryover: valid JSON, correct shape — no error
+    it("AGENTDB_HTTP_MULTI_TOKEN='[\"a\",\"b\"]' (string array) → no error (B3 positive)", () => {
+      const cfg = fromEnv({ AGENTDB_HTTP_MULTI_TOKEN: '["a","b"]' });
+      expect(cfg.http?.multiToken).toEqual(["a", "b"]);
+    });
   });
 
   describe("boolean coercion", () => {
@@ -503,5 +537,78 @@ describe("Config precedence (cli > env > file)", () => {
       cli: { db: { path: "/cli-path" } },
     });
     expect(cfg.db?.path).toBe("/cli-path");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T10: Parameterised coverage for env vars not exercised by the tests above.
+// One data-driven loop per type bucket keeps the test count manageable while
+// ensuring a typo in ENV_VAR_MAP (wrong path or kind) is caught.
+// ---------------------------------------------------------------------------
+
+describe("T10: parameterised env var coverage", () => {
+  // Helper: load config from a single env var with no config file.
+  function envOnly(varName: string, value: string) {
+    return loadAgentDBConfig({ env: { [varName]: value }, configPath: "/nonexistent/no-file.json" });
+  }
+
+  // -------------------------------------------------------------------------
+  // Number bucket — untested vars
+  // -------------------------------------------------------------------------
+  const numberCases: Array<{ varName: string; value: number; get: (c: ReturnType<typeof envOnly>) => number | undefined }> = [
+    { varName: "AGENTDB_MAX_INDEX_CARDINALITY", value: 500,   get: (c) => c.db?.maxIndexCardinality },
+    { varName: "AGENTDB_DISK_CONCURRENCY",      value: 8,     get: (c) => c.db?.diskConcurrency },
+    { varName: "AGENTDB_EMBEDDING_BATCH_SIZE",  value: 64,    get: (c) => c.db?.embeddingBatchSize },
+    { varName: "AGENTDB_FILTER_CACHE_SIZE",     value: 128,   get: (c) => c.db?.filterCacheSize },
+    { varName: "AGENTDB_MERGE_PARQUET_THRESHOLD", value: 15,  get: (c) => c.db?.mergeParquetThreshold },
+    { varName: "AGENTDB_MERGE_JSONL_THRESHOLD", value: 12,    get: (c) => c.db?.mergeJsonlThreshold },
+    { varName: "AGENTDB_GROUP_COMMIT_SIZE",     value: 25,    get: (c) => c.db?.groupCommitSize },
+    { varName: "AGENTDB_ROW_GROUP_SIZE",        value: 4096,  get: (c) => c.db?.rowGroupSize },
+    { varName: "AGENTDB_EMBEDDINGS_BATCH_LIMIT", value: 50,   get: (c) => c.db?.embeddings?.batchLimit },
+    { varName: "AGENTDB_EMBEDDINGS_DIMENSIONS", value: 1536,  get: (c) => c.db?.embeddings?.dimensions },
+    { varName: "AGENTDB_DISK_THRESHOLD",        value: 5000,  get: (c) => c.db?.diskThreshold },
+    { varName: "AGENTDB_HTTP_MAX_SESSIONS",     value: 200,   get: (c) => c.http?.maxSessions },
+    { varName: "AGENTDB_HTTP_SESSION_IDLE_MS",  value: 30000, get: (c) => c.http?.sessionIdleMs },
+    { varName: "AGENTDB_HTTP_AUDIT_MAX_LIMIT",  value: 5000,  get: (c) => c.http?.auditMaxLimit },
+    { varName: "AGENTDB_HTTP_AUDIT_DEFAULT_LIMIT", value: 500, get: (c) => c.http?.auditDefaultLimit },
+    { varName: "AGENTDB_HTTP_RATE_LIMIT",       value: 120,   get: (c) => c.http?.rateLimit },
+    { varName: "AGENTDB_HTTP_RATE_LIMIT_WINDOW", value: 60000, get: (c) => c.http?.rateLimitWindow },
+  ];
+
+  for (const { varName, value, get } of numberCases) {
+    it(`${varName}='${value}' coerces to number ${value}`, () => {
+      const cfg = envOnly(varName, String(value));
+      expect(get(cfg)).toBe(value);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // String bucket — untested vars
+  // -------------------------------------------------------------------------
+  const stringCases: Array<{ varName: string; value: string; get: (c: ReturnType<typeof envOnly>) => string | undefined }> = [
+    { varName: "AGENTDB_EMBEDDINGS_API_KEY",  value: "sk-test",           get: (c) => c.db?.embeddings?.apiKey },
+    { varName: "AGENTDB_EMBEDDINGS_MODEL",    value: "text-emb-3-small",  get: (c) => c.db?.embeddings?.model },
+    { varName: "AGENTDB_EMBEDDINGS_URL",      value: "http://localhost/v1/embed", get: (c) => c.db?.embeddings?.url },
+    { varName: "AGENTDB_EMBEDDINGS_BASE_URL", value: "http://ollama:11434", get: (c) => c.db?.embeddings?.baseUrl },
+    { varName: "AGENTDB_OLLAMA_URL",          value: "http://ollama:11434", get: (c) => c.db?.embeddings?.baseUrl },
+    { varName: "AGENTDB_S3_PREFIX",           value: "prod/agentdb",       get: (c) => c.db?.s3Prefix },
+    { varName: "AGENTDB_AGENT_ID",            value: "agent-1",            get: (c) => c.db?.agentId },
+    { varName: "AGENTDB_TENANT_ID",           value: "org-abc",            get: (c) => c.db?.tenantId },
+    { varName: "AGENTDB_HTTP_JWT_AUDIENCE",   value: "https://api.example.com", get: (c) => c.http?.jwt?.audience },
+    { varName: "AGENTDB_HTTP_JWT_ISSUER",     value: "https://auth.example.com", get: (c) => c.http?.jwt?.issuer },
+  ];
+
+  for (const { varName, value, get } of stringCases) {
+    it(`${varName}='${value}' passes through as string`, () => {
+      const cfg = envOnly(varName, value);
+      expect(get(cfg)).toBe(value);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Verify a NaN number input still rejects (type safety)
+  // -------------------------------------------------------------------------
+  it("AGENTDB_MERGE_PARQUET_THRESHOLD='notanumber' → throws ConfigValidationError", () => {
+    expect(() => envOnly("AGENTDB_MERGE_PARQUET_THRESHOLD", "notanumber")).toThrow(ConfigValidationError);
   });
 });
