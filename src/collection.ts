@@ -595,7 +595,13 @@ export class Collection {
             dir: textDir,
             k1: this.opts.bm25K1 ?? 1.2,
             b: this.opts.bm25B ?? 0.75,
-          }).catch(() => null);
+          }).catch((reopenErr: unknown) => {
+            console.error(
+              `agentdb [${this.name}]: rollback reopen failed after rebuildTextIndex swap error — ` +
+              `text index unavailable until next rebuild: ${(reopenErr as Error).message}`,
+            );
+            return null;
+          });
         }
         throw swapErr;
       }
