@@ -150,6 +150,12 @@ export class AgentDB {
   private _opened = false;
   /** In-flight init promise — shared by concurrent first callers to prevent double-init. */
   private _initPromise: Promise<void> | null = null;
+  /**
+   * Per-collection subscriber counts set by SubscriptionManager.
+   * Collections with a non-zero count are skipped by evictLru so that active
+   * change subscriptions are never silently broken by LRU eviction.
+   */
+  private _subscriptionPins: Map<string, number> = new Map();
 
   constructor(dir: string, opts?: AgentDBOptions) {
     this.dir = dir;
@@ -206,6 +212,29 @@ export class AgentDB {
   /** Get the configured embedding provider, or null if none. */
   getEmbeddingProvider(): EmbeddingProvider | null {
     return this.embeddingProvider;
+  }
+
+  /**
+   * Increment the subscription pin count for a collection.
+   * Pinned collections are skipped by LRU eviction.
+   * Called by SubscriptionManager when a new subscriber is registered.
+   */
+  pinForSubscription(name: string): void {
+    this._subscriptionPins.set(name, (this._subscriptionPins.get(name) ?? 0) + 1);
+  }
+
+  /**
+   * Decrement the subscription pin count for a collection.
+   * When the count reaches zero the collection becomes eligible for LRU eviction again.
+   * Called by SubscriptionManager when a subscriber is removed.
+   */
+  unpinForSubscription(name: string): void {
+    const count = this._subscriptionPins.get(name) ?? 0;
+    if (count <= 1) {
+      this._subscriptionPins.delete(name);
+    } else {
+      this._subscriptionPins.set(name, count - 1);
+    }
   }
 
   /**
@@ -352,9 +381,13 @@ export class AgentDB {
   }
 
   private async _openCollection(name: string): Promise<Collection> {
-    // Evict until under limit (loop handles concurrent opens that may overshoot)
+    // Evict until under limit (loop handles concurrent opens that may overshoot).
+    // evictLru returns false when all remaining candidates are pinned by active subscriptions;
+    // in that case we allow opening over the limit rather than deadlocking or evicting a
+    // subscribed collection. Operators must size maxOpenCollections accordingly.
     while (this.open.size >= this.opts.maxOpenCollections && this.lru.length > 0) {
-      await this.evictLru();
+      const evicted = await this.evictLru();
+      if (!evicted) break;
     }
 
     const colDir = join(this.dir, COLLECTIONS_DIR, name);
@@ -1015,6 +1048,7 @@ export class AgentDB {
     this.open.clear();
     this.collectionListeners.clear();
     this.lru = [];
+    this._subscriptionPins.clear();
     this._opened = false;
     this._initPromise = null; // allow re-init if this instance is reused after close
   }
@@ -1051,9 +1085,12 @@ export class AgentDB {
     }
   }
 
-  private async evictLru(): Promise<void> {
-    if (this.lru.length === 0) return;
-    const evict = this.lru.shift()!;
+  private async evictLru(): Promise<boolean> {
+    if (this.lru.length === 0) return false;
+    // Find the oldest (lowest index) LRU entry that is not pinned by active subscriptions.
+    const evictIdx = this.lru.findIndex(name => !this._subscriptionPins.has(name));
+    if (evictIdx === -1) return false; // all candidates pinned — cannot evict
+    const [evict] = this.lru.splice(evictIdx, 1);
     const col = this.open.get(evict);
     if (col) {
       // Remove listener before closing to prevent leak
@@ -1064,6 +1101,7 @@ export class AgentDB {
       await col.close();
       this.open.delete(evict);
     }
+    return true;
   }
 
   // --- Meta-manifest ---
