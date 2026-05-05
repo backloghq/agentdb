@@ -60,6 +60,8 @@ export interface HnswOptions {
   efSearch?: number;
   /** Vector dimensions. */
   dimensions: number;
+  /** Maximum HNSW layer a node can be assigned to (default: derived as max(16, floor(log(1e6)/log(M)))). */
+  maxLevel?: number;
 }
 
 interface HnswNode {
@@ -86,6 +88,7 @@ export class HnswIndex {
   private entryPoint: string | null = null;
   private maxLayer = 0;
   private mL: number; // normalization factor for level generation
+  private maxLevelCap: number;
 
   constructor(opts: HnswOptions) {
     this.M = opts.M ?? 16;
@@ -93,6 +96,7 @@ export class HnswIndex {
     this.efSearch = opts.efSearch ?? 50;
     this.dimensions = opts.dimensions;
     this.mL = 1 / Math.log(this.M);
+    this.maxLevelCap = opts.maxLevel ?? Math.max(16, Math.floor(Math.log(1e6) / Math.log(this.M)));
   }
 
   /** Number of indexed vectors. */
@@ -103,6 +107,11 @@ export class HnswIndex {
   /** Vector dimensions. */
   get dims(): number {
     return this.dimensions;
+  }
+
+  /** Highest layer currently occupied in the index (0-indexed). Reflects the max level assigned to any node. */
+  get currentMaxLayer(): number {
+    return this.maxLayer;
   }
 
   /** Add a vector to the index. */
@@ -251,7 +260,7 @@ export class HnswIndex {
 
   private randomLevel(): number {
     // Standard HNSW level generation: floor(-ln(uniform) * mL)
-    return Math.min(Math.floor(-Math.log(Math.random()) * this.mL), 16);
+    return Math.min(Math.floor(-Math.log(Math.random()) * this.mL), this.maxLevelCap);
   }
 
   /** Greedy search at a layer: find the single closest node. */

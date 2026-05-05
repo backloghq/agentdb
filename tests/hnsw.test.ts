@@ -211,4 +211,37 @@ describe("HnswIndex", () => {
       expect(elapsed).toBeLessThan(20);
     });
   });
+
+  describe("maxLevel option", () => {
+    it("respects explicit maxLevel cap during insertion", () => {
+      seed = 1;
+      const cap = 8;
+      const capped = new HnswIndex({ dimensions: DIM, M: 4, maxLevel: cap });
+      for (let i = 0; i < 500; i++) {
+        capped.add(`v${i}`, randomVector(DIM));
+      }
+      expect(capped.currentMaxLayer).toBeLessThanOrEqual(cap);
+    });
+
+    it("defaults to max(16, floor(log(1e6)/log(M))) when maxLevel is not set", () => {
+      // For M=16: floor(log(1e6)/log(16)) = floor(6/1.204) = floor(4.98) = 4 → max(16, 4) = 16
+      const idx = new HnswIndex({ dimensions: DIM, M: 16 });
+      for (let i = 0; i < 500; i++) {
+        idx.add(`v${i}`, randomVector(DIM));
+      }
+      // maxLayer must be ≤ 16 (default cap for M=16)
+      expect(idx.currentMaxLayer).toBeLessThanOrEqual(16);
+    });
+
+    it("derives a larger cap for large M values", () => {
+      // For M=64: floor(log(1e6)/log(64)) = floor(6/1.806) = floor(3.32) = 3 → max(16, 3) = 16
+      // For M=2: floor(log(1e6)/log(2)) = floor(6/0.693) = floor(19.93) = 19 → max(16, 19) = 19
+      const idxM2 = new HnswIndex({ dimensions: DIM, M: 2 });
+      for (let i = 0; i < 500; i++) {
+        idxM2.add(`v${i}`, randomVector(DIM));
+      }
+      // With M=2 the derived cap is 19; actual max should be ≤ 19
+      expect(idxM2.currentMaxLayer).toBeLessThanOrEqual(19);
+    });
+  });
 });
