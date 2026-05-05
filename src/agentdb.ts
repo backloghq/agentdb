@@ -348,6 +348,7 @@ export class AgentDB {
         rowGroupSize: mergedOpts?.rowGroupSize ?? 5000,
         extractColumns: schema?.indexes ?? [],
         maxIndexCardinality: mergedOpts?.maxIndexCardinality,
+        diskConcurrency: mergedOpts?.diskConcurrency,
       });
       await diskStore.load();
 

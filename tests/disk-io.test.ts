@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -403,6 +403,46 @@ describe("Parquet compaction and reader", () => {
       }).rejects.toThrow(SyntaxError);
     });
 
+    it("readRecordsByOffsets respects concurrency=5 (6 Promise.all calls for 30 records)", async () => {
+      const { writeRecordStore, readRecordsByOffsets } = await import("../src/disk-io.js");
+      const N = 30;
+      const records: Array<[string, Record<string, unknown>]> = Array.from({ length: N }, (_, i) => [
+        `rc5-${i}`, { _id: `rc5-${i}`, value: i },
+      ]);
+      const { path, offsetIndex } = await writeRecordStore(backend, records);
+      const entries = Array.from(offsetIndex.entries()).map(([id, entry]) => ({ id, entry }));
+
+      const spy = vi.spyOn(Promise, "all");
+      try {
+        const result = await readRecordsByOffsets(backend, path, entries, 5);
+        expect(result.size).toBe(N);
+        // 30 records ÷ concurrency 5 = exactly 6 batches → 6 Promise.all calls
+        expect(spy).toHaveBeenCalledTimes(6);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("readRecordsByOffsets defaults to concurrency=20 (2 Promise.all calls for 30 records)", async () => {
+      const { writeRecordStore, readRecordsByOffsets } = await import("../src/disk-io.js");
+      const N = 30;
+      const records: Array<[string, Record<string, unknown>]> = Array.from({ length: N }, (_, i) => [
+        `rc20-${i}`, { _id: `rc20-${i}`, value: i },
+      ]);
+      const { path, offsetIndex } = await writeRecordStore(backend, records);
+      const entries = Array.from(offsetIndex.entries()).map(([id, entry]) => ({ id, entry }));
+
+      const spy = vi.spyOn(Promise, "all");
+      try {
+        const result = await readRecordsByOffsets(backend, path, entries);
+        expect(result.size).toBe(N);
+        // 30 records ÷ default concurrency 20 = 2 batches (ceil) → 2 Promise.all calls
+        expect(spy).toHaveBeenCalledTimes(2);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("streaming uses less peak heap than readAllFromJsonl for large JSONL", async () => {
       const { writeRecordStore, readJsonlStream, readAllFromJsonl } = await import("../src/disk-io.js");
 
@@ -439,6 +479,20 @@ describe("Parquet compaction and reader", () => {
       if (global.gc) {
         expect(streamDelta).toBeLessThan(mapDelta * 3);
       }
+    });
+  });
+
+  describe("DiskStore.jsonlConcurrency", () => {
+    it("defaults to 20 when diskConcurrency is not set", async () => {
+      const { DiskStore } = await import("../src/disk-store.js");
+      const store = new DiskStore(backend);
+      expect(store.jsonlConcurrency).toBe(20);
+    });
+
+    it("reflects custom diskConcurrency option", async () => {
+      const { DiskStore } = await import("../src/disk-store.js");
+      const store = new DiskStore(backend, { diskConcurrency: 5 });
+      expect(store.jsonlConcurrency).toBe(5);
     });
   });
 });

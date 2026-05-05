@@ -41,6 +41,8 @@ export interface DiskStoreOptions {
   extractColumns?: string[];
   /** Max unique values a field may have before its B-tree index is skipped (default: 1000). */
   maxIndexCardinality?: number;
+  /** Parallel batch size for JSONL record reads (default: 20). Ties to diskConcurrency on CollectionOptions/AgentDBOptions. */
+  diskConcurrency?: number;
 }
 
 export class DiskStore {
@@ -60,6 +62,7 @@ export class DiskStore {
   private _indexManager: IndexManager | null = null;
   private maxIndexCardinality: number;
   private _warnedCardinalityFields: Set<string> = new Set();
+  private diskConcurrency: number;
 
   constructor(backend: StorageBackend, options?: DiskStoreOptions) {
     this.backend = backend;
@@ -67,6 +70,7 @@ export class DiskStore {
     this.rowGroupSize = options?.rowGroupSize ?? 5000;
     this.extractColumns = options?.extractColumns ?? [];
     this.maxIndexCardinality = options?.maxIndexCardinality ?? DiskStore.MAX_INDEX_CARDINALITY;
+    this.diskConcurrency = options?.diskConcurrency ?? 20;
   }
 
   /** Load persisted state: offset index + compaction metadata + JSONL offsets. */
@@ -115,6 +119,11 @@ export class DiskStore {
   /** Whether there are unsaved writes since last compaction. */
   get isDirty(): boolean {
     return this._dirty;
+  }
+
+  /** Parallel batch size used for JSONL record reads. */
+  get jsonlConcurrency(): number {
+    return this.diskConcurrency;
   }
 
   /** Number of records in the offset index. */
@@ -182,7 +191,7 @@ export class DiskStore {
         .map((id) => ({ id, entry: this.recordOffsetIndex.get(id)! }))
         .filter((e) => e.entry);
       if (entries.length > 0) {
-        const fromJsonl = await readRecordsByOffsets(this.backend, this.compactionMeta.jsonlFile, entries);
+        const fromJsonl = await readRecordsByOffsets(this.backend, this.compactionMeta.jsonlFile, entries, this.diskConcurrency);
         for (const [id, record] of fromJsonl) {
           this.cache.set(id, record);
           results.set(id, record);
