@@ -759,13 +759,13 @@ const { records, scores } = await notes.hybridSearch("typescript generics", {
 
 **BM25 defaults:** `k1=1.2`, `b=0.75` (Okapi BM25 standard). Configurable via `Collection` constructor options. **RRF default:** `k=60` (Cormack et al. 2009).
 
-**Upgrading from v1.4:** v1.4 stored BM25 indexes as a single JSON blob (`indexes/text-index.json`). v1.5 uses `@backloghq/termlog` (segment-based LSM). On first open with `textSearch: true`, AgentDB detects the old blob and throws `LegacyTextIndexError`. See [Migration from v1.4](#migration-from-v14) below.
+**Upgrading from v1.4:** v1.4 stored BM25 indexes as a single JSON blob (`indexes/text-index.json`). v2.0 uses `@backloghq/termlog` (segment-based LSM). On first open with `textSearch: true`, AgentDB detects the old blob and throws `LegacyTextIndexError`. See [Migration from v1.4](#migration-from-v14) below.
 
 **Unicode normalisation:** AgentDB does not normalise Unicode before tokenizing. Precomposed (`é`, U+00E9) and decomposed (`e` + U+0301) forms of the same character are treated as distinct tokens. Ensure your application uses consistent Unicode normalisation (e.g. NFC) on both indexed text and queries; otherwise the same word in different normal forms will not match.
 
 #### Limits
 
-v1.5+ uses `@backloghq/termlog` (segment-based LSM) for BM25 — there is no per-collection document cap. The old 256 MB `IndexFileTooLargeError` ceiling is gone.
+v2.0+ uses `@backloghq/termlog` (segment-based LSM) for BM25 — there is no per-collection document cap. The old 256 MB `IndexFileTooLargeError` ceiling is gone.
 
 ### Embedding and disk performance knobs
 
@@ -858,7 +858,7 @@ col.find({ filter: { status: "active" }, summary: true });
 
 ## Migration from v1.4
 
-v1.5 replaces the in-house `TextIndex` JSON blob with `@backloghq/termlog` (segment-based LSM). The change is automatic for new collections. Existing collections that have a v1.4 BM25 index on disk require a one-time rebuild.
+v2.0 replaces the in-house `TextIndex` JSON blob with `@backloghq/termlog` (segment-based LSM). The change is automatic for new collections. Existing collections that have a v1.4 BM25 index on disk require a one-time rebuild.
 
 **Detection:** on the first open with `textSearch: true`, AgentDB checks for `indexes/text-index.json` (v1.4 format) without a termlog manifest. If found, it throws `LegacyTextIndexError` (exported from core) with a `legacyPath` field pointing at the old file.
 
@@ -893,7 +893,7 @@ try {
 
 Returns `{ rebuiltDocCount: N }`. Requires admin permission.
 
-**What's new in v1.5:**
+**What's new in v2.0:**
 - No per-collection document cap (256 MB / ~25–30K doc ceiling is gone)
 - S3-backed text indexes via `@backloghq/termlog-s3` (auto-wired when opslog uses S3)
 - Segment-based LSM — writes never block reads; compaction happens in the background
@@ -912,7 +912,7 @@ Text indexes are then automatically stored in S3 alongside opslog data. No confi
 See [examples/](./examples/) for runnable demos powered by Ollama:
 
 - **[Multi-Agent Task Board](./examples/multi-agent/)** — Agents collaborate on a shared task board. Event-driven via NOTIFY/LISTEN.
-- **[RAG Knowledge Base](./examples/rag-knowledge-base/)** — Ingest docs, embed with Ollama, answer questions via hybrid search (BM25 + semantic, fused via RRF). Updated for v1.5.
+- **[RAG Knowledge Base](./examples/rag-knowledge-base/)** — Ingest docs, embed with Ollama, answer questions via hybrid search (BM25 + semantic, fused via RRF). Updated for v2.0.
 - **[Research Pipeline](./examples/research-pipeline/)** — 3-stage AI pipeline: Researcher → Analyst → Writer. Each stage triggers the next.
 - **[Multi-Model Code Review](./examples/code-review/)** — Gemini generates code, Ollama reviews locally, Gemini writes tests. Multi-provider orchestration. Updated for v1.3: shows schema lifecycle (`defineSchema` with description/instructions/field descriptions, auto-persistence, `db_get_schema` discovery).
 - **[Live Dashboard](./examples/live-dashboard/)** — Real-time CLI view of any running demo's collections.

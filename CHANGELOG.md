@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-05-05
+## [2.0.0] - 2026-05-05
 
 ### Fixed (pre-release audit)
 
@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`db.import()` indexed each record twice** — `agentdb.ts` called `col.rebuildTextIndex()` after the per-record `insert/upsert` loop. Each insert already calls `tl.add()` via `incrementalIndexUpdate`, so the rebuild was redundant and, combined with the S3 double-count bug, actively poisoned BM25 scores. The `rebuildTextIndex()` call is removed; per-record inserts are sufficient.
 - **Legacy v1.4 detection check skipped in S3 mode** — `Collection.open()` probed `this.backend` (opslog top-level) for `text/manifest.json`, but in S3 mode termlog writes through `_termlogBackend` at a different prefix — so the check was structurally wrong and could false-pass or crash if v1.4 S3 data ever existed. Since v1.4 never wrote `indexes/text-index.json` to S3 (old `TextIndex` was local-FS-only), the legacy check is now guarded by `!this._termlogBackend` and skipped entirely in S3 mode.
 - **`Collection.flushTextIndex()` JSDoc claimed wrong callers** — the method is used by tests (to force segment files to disk before asserting on file existence); it is not called by `AgentDB.close` or WAL replay. JSDoc corrected.
-- **`CHANGELOG.md` and `MIGRATION-1.5.md` excluded from npm tarball** — `package.json:files` listed only `dist/`, `README.md`, `LICENSE`. Both files added.
+- **`CHANGELOG.md` and `MIGRATION-2.0.md` excluded from npm tarball** — `package.json:files` listed only `dist/`, `README.md`, `LICENSE`. Both files added.
 
 ### Changed (pre-release audit)
 

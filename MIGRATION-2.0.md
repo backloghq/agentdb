@@ -1,8 +1,8 @@
-# Migrating to AgentDB v1.5
+# Migrating to AgentDB v2.0
 
 ## What changed
 
-v1.5 replaces the in-house `TextIndex` JSON blob (`indexes/text-index.json`) with [`@backloghq/termlog`](https://github.com/backloghq/termlog) — a segment-based LSM full-text index. The BM25 scoring algorithm, `k1`/`b` tuning, and all search APIs (`bm25Search`, `hybridSearch`, `search`, `$text` filter) are unchanged.
+v2.0 replaces the in-house `TextIndex` JSON blob (`indexes/text-index.json`) with [`@backloghq/termlog`](https://github.com/backloghq/termlog) — a segment-based LSM full-text index. The BM25 scoring algorithm, `k1`/`b` tuning, and all search APIs (`bm25Search`, `hybridSearch`, `search`, `$text` filter) are unchanged.
 
 ## Breaking changes
 
@@ -49,7 +49,7 @@ try {
 
 Returns `{ rebuiltDocCount: N }`. Requires admin permission (`READ_WRITE_ADMIN` or equivalent).
 
-## New capabilities in v1.5
+## New capabilities in v2.0
 
 ### No per-collection document cap
 
@@ -69,7 +69,7 @@ Single-writer constraint applies: only one agentdb process may write to a given 
 
 ### BM25 score stability across close/reopen
 
-v1.4 had a WAL replay bug where reopening a collection doubled `totalDocs` and `totalLen` in the termlog manifest, shifting BM25 IDF scores for boundary documents. This is fixed in v1.5: agentdb detects that the termlog already has indexed documents on open and skips the WAL replay into the text index.
+v1.4 had a WAL replay bug where reopening a collection doubled `totalDocs` and `totalLen` in the termlog manifest, shifting BM25 IDF scores for boundary documents. This is fixed in v2.0: agentdb detects that the termlog already has indexed documents on open and skips the WAL replay into the text index.
 
 ## Dependency versions
 

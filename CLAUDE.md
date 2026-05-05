@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status: v1.5 — termlog BM25 backend, hybrid search (BM25+RRF+vector), disk-backed embeddings, persisted schemas.**
+**Status: v2.0 — termlog BM25 backend, hybrid search (BM25+RRF+vector), disk-backed embeddings, persisted schemas.**
 
 Major capabilities:
 - **Search:** `bm25Search` (BM25 via `@backloghq/termlog`, k1/b tunable, `searchable:true` per field, segment-based LSM, S3-aware), `semanticSearch` (HNSW, 6 providers, Int8 quantization), `hybridSearch` (RRF fusion, per-arm failure degrades gracefully), `searchByVector`

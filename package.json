@@ -45,7 +45,7 @@
     "dist/",
     "README.md",
     "CHANGELOG.md",
-    "MIGRATION-1.5.md",
+    "MIGRATION-2.0.md",
     "LICENSE"
   ],
   "repository": {
