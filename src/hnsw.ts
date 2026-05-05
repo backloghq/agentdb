@@ -60,6 +60,8 @@ export interface HnswOptions {
   efSearch?: number;
   /** Vector dimensions. */
   dimensions: number;
+  /** Maximum HNSW layer a node can be assigned to (default: derived as max(16, floor(log(1e6)/log(M)))). */
+  maxLevel?: number;
 }
 
 interface HnswNode {
@@ -86,6 +88,7 @@ export class HnswIndex {
   private entryPoint: string | null = null;
   private maxLayer = 0;
   private mL: number; // normalization factor for level generation
+  private maxLevelCap: number;
 
   constructor(opts: HnswOptions) {
     this.M = opts.M ?? 16;
@@ -93,6 +96,7 @@ export class HnswIndex {
     this.efSearch = opts.efSearch ?? 50;
     this.dimensions = opts.dimensions;
     this.mL = 1 / Math.log(this.M);
+    this.maxLevelCap = opts.maxLevel ?? Math.max(16, Math.floor(Math.log(1e6) / Math.log(this.M)));
   }
 
   /** Number of indexed vectors. */
@@ -104,6 +108,23 @@ export class HnswIndex {
   get dims(): number {
     return this.dimensions;
   }
+
+  /** Highest layer currently occupied in the index (0-indexed). Reflects the max level assigned to any node. */
+  get currentMaxLayer(): number {
+    return this.maxLayer;
+  }
+
+  /** Max connections per node per layer as configured (default: 16). */
+  get configM(): number { return this.M; }
+
+  /** Search width used during construction as configured (default: 200). */
+  get configEfConstruction(): number { return this.efConstruction; }
+
+  /** Search width used during queries as configured (default: 50). */
+  get configEfSearch(): number { return this.efSearch; }
+
+  /** Maximum layer cap as configured (default: derived as max(16, floor(log(1e6)/log(M)))). */
+  get configMaxLevel(): number { return this.maxLevelCap; }
 
   /** Add a vector to the index. */
   add(id: string, vector: number[]): void {
@@ -251,7 +272,7 @@ export class HnswIndex {
 
   private randomLevel(): number {
     // Standard HNSW level generation: floor(-ln(uniform) * mL)
-    return Math.min(Math.floor(-Math.log(Math.random()) * this.mL), 16);
+    return Math.min(Math.floor(-Math.log(Math.random()) * this.mL), this.maxLevelCap);
   }
 
   /** Greedy search at a layer: find the single closest node. */

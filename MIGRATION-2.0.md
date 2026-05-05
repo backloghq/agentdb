@@ -85,3 +85,29 @@ v1.4 had a WAL replay bug where reopening a collection doubled `totalDocs` and `
   }
 }
 ```
+
+## New in v2.1 (no migration required)
+
+v2.1 is purely additive — no breaking changes, no migration steps. All new options have defaults that preserve v2.0 behaviour.
+
+New configurable knobs (all optional, all with defaults matching previous hard-coded values):
+
+| Option | Where | Default | What it controls |
+|--------|-------|---------|-----------------|
+| `maxFindLimit` | `AgentDB` / `Collection` | `10_000` | Hard cap on `find()` results; emits `console.warn` on truncation |
+| `maxIndexCardinality` | `AgentDB` / `Collection` | `1_000` | B-tree index cardinality threshold; emits `console.warn` when exceeded |
+| `filterCacheSize` | `AgentDB` / `Collection` | `64` | Per-collection compiled-filter LRU cache size |
+| `mergeParquetThreshold` | `AgentDB` / `Collection` | `10` | Incremental Parquet files before full merge |
+| `mergeJsonlThreshold` | `AgentDB` / `Collection` | `8` | Incremental JSONL delta files before full merge |
+| `diskConcurrency` | `AgentDB` / `Collection` | `20` | Parallel JSONL reads for S3 point-lookups |
+| `maxSessions` | `HttpOptions` | `100` | Max concurrent MCP HTTP sessions |
+| `sessionIdleMs` | `HttpOptions` | `1_800_000` | Session idle timeout |
+| `auditBufferSize` | `HttpOptions` | `10_000` | Audit log ring-buffer capacity |
+| `auditMaxLimit` | `HttpOptions` | `10_000` | Max records per audit query |
+
+New APIs:
+- `col.metrics()` — returns `CollectionMetrics` with live filter cache, record cache, find truncation, BM25 segment, HNSW node, WAL record, and Parquet row group counters.
+- `ProgressEvent` / `ProgressCallback` — optional `onProgress` on `reembedAll`, `rebuildTextIndex`, and `db.import`.
+- `AbortSignal` — optional `signal` on `reembedAll`, `rebuildTextIndex`, and `find`.
+
+See the [Production Tuning](./README.md#production-tuning) section in the README for guidance on when and how to adjust these knobs.

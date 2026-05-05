@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Store } from "@backloghq/opslog";
 import type { StorageBackend } from "@backloghq/opslog";
 import { Collection } from "./collection.js";
-import type { CollectionOptions } from "./collection.js";
+import type { CollectionOptions, ProgressCallback } from "./collection.js";
 import type { EmbeddingConfig, EmbeddingProvider } from "./embeddings/index.js";
 import { resolveProvider } from "./embeddings/index.js";
 import { PermissionManager } from "./permissions.js";
@@ -60,14 +60,45 @@ export interface AgentDBOptions {
   storageMode?: "memory" | "disk" | "auto";
   /** Record count threshold for auto mode (default: 10000). */
   diskThreshold?: number;
-  /** LRU cache size for disk mode (max records, default: 10000). */
+  /** LRU cache size for disk mode (max records, default: 1_000). */
   cacheSize?: number;
   /** Parquet row group size for disk mode (default: 5000). */
   rowGroupSize?: number;
-  /** Max concurrent disk fetches for non-FS backends (e.g. S3). Default: 16. Per-collection override via CollectionOptions.diskConcurrency. */
+  /** Max concurrent disk fetches for non-FS backends (e.g. S3). Default: 20. Per-collection override via CollectionOptions.diskConcurrency. */
   diskConcurrency?: number;
   /** Number of records per embedding provider call in embedUnembedded (default: 256). Per-collection override via CollectionOptions.embeddingBatchSize. */
   embeddingBatchSize?: number;
+  /** Maximum records returned by find() across all collections (default: 10_000). Per-collection override via CollectionOptions.maxFindLimit. */
+  maxFindLimit?: number;
+  /** Max unique values a field may have before its disk B-tree index is skipped (default: 1000). Per-collection override via CollectionOptions.maxIndexCardinality. */
+  maxIndexCardinality?: number;
+  /** Per-collection compiled-filter LRU cache size (default: 64). Per-collection override via CollectionOptions.filterCacheSize. */
+  filterCacheSize?: number;
+  /** Number of incremental Parquet files before triggering a full merge (default: 10). Per-collection override via CollectionOptions.mergeParquetThreshold. */
+  mergeParquetThreshold?: number;
+  /** Number of incremental JSONL delta files before triggering a full merge (default: 8). Per-collection override via CollectionOptions.mergeJsonlThreshold. */
+  mergeJsonlThreshold?: number;
+  /** HNSW index parameters (M, efConstruction, efSearch, maxLevel). Applied to all collections as a default. Per-collection override via CollectionOptions.hnsw. */
+  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number };
+  /**
+   * Per-collection option overrides, keyed by collection name.
+   *
+   * Precedence (highest → lowest):
+   *   1. Options passed programmatically to `db.collection(name, opts)` — wins for every field
+   *      that the caller explicitly defines (i.e. the field is not `undefined`).
+   *   2. This map (`collectionOverrides[name]`) — fills gaps not covered by the caller's opts.
+   *   3. AgentDB-level db-wide defaults (e.g. `AgentDBOptions.maxFindLimit`) — fill remaining gaps.
+   *   4. Built-in defaults (e.g. `maxFindLimit: 10_000`).
+   *
+   * Overrides are applied at collection-open time. The map reference is stored directly, so
+   * mutations to this object after construction are visible to future opens of any collection
+   * whose name appears in the map. Already-open collections are NOT affected — evict or close
+   * the collection first (e.g. via LRU or `db.close()`) for changes to take effect.
+   *
+   * The `agentdb.config.json` `collections:` block is piped into this field automatically by
+   * `loadAgentDBConfig` / the CLI.
+   */
+  collectionOverrides?: Record<string, CollectionOptions>;
 }
 
 export interface CollectionInfo {
@@ -117,6 +148,8 @@ export class AgentDB {
   private lru: string[] = []; // Most recently used at end
   private meta: MetaManifest = { collections: [], dropped: [] };
   private _opened = false;
+  /** In-flight init promise — shared by concurrent first callers to prevent double-init. */
+  private _initPromise: Promise<void> | null = null;
 
   constructor(dir: string, opts?: AgentDBOptions) {
     this.dir = dir;
@@ -136,6 +169,13 @@ export class AgentDB {
       rowGroupSize: opts?.rowGroupSize,
       diskConcurrency: opts?.diskConcurrency,
       embeddingBatchSize: opts?.embeddingBatchSize,
+      maxFindLimit: opts?.maxFindLimit,
+      maxIndexCardinality: opts?.maxIndexCardinality,
+      filterCacheSize: opts?.filterCacheSize,
+      mergeParquetThreshold: opts?.mergeParquetThreshold,
+      mergeJsonlThreshold: opts?.mergeJsonlThreshold,
+      hnsw: opts?.hnsw,
+      collectionOverrides: opts?.collectionOverrides,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -168,8 +208,47 @@ export class AgentDB {
     return this.embeddingProvider;
   }
 
-  /** Initialize the database directory and load metadata. */
+  /**
+   * Static factory — constructs and initializes the database in a single awaitable call.
+   *
+   * ```ts
+   * const db = await AgentDB.open("./data", opts);
+   * const col = await db.collection("items"); // ready immediately
+   * ```
+   *
+   * Equivalent to `new AgentDB(dir, opts); await db.init();` but removes the footgun
+   * of forgetting `init()`.
+   */
+  static async open(dir: string, opts?: AgentDBOptions): Promise<AgentDB> {
+    const db = new AgentDB(dir, opts);
+    await db.init();
+    return db;
+  }
+
+  /**
+   * Initialize the database directory and load metadata.
+   *
+   * **Idempotent** — subsequent calls on an already-initialized instance return immediately
+   * without re-running setup. Concurrent first calls share the same init promise so the
+   * underlying filesystem work runs exactly once.
+   *
+   * A failed init does **not** cache the rejection — the next call retries from scratch,
+   * allowing recovery from transient failures (e.g., permissions fixed after first attempt).
+   */
   async init(): Promise<void> {
+    if (this._opened) return; // already initialized — fast path
+    if (this._initPromise) return this._initPromise; // in-flight — join the existing promise
+    const p = this._doInit();
+    this._initPromise = p;
+    return p.catch(err => {
+      // Don't cache rejections — allow callers to retry after transient failures.
+      this._initPromise = null;
+      throw err;
+    });
+  }
+
+  /** Internal init body. Called exactly once per lifecycle; errors clear _initPromise for retry. */
+  private async _doInit(): Promise<void> {
     await mkdir(join(this.dir, META_DIR), { recursive: true });
     await mkdir(join(this.dir, COLLECTIONS_DIR), { recursive: true });
 
@@ -209,6 +288,16 @@ export class AgentDB {
   }
 
   /**
+   * Ensure the database is initialized before proceeding.
+   * Async public methods call this instead of the synchronous `ensureOpen()` so that
+   * callers who skipped `await db.init()` still get a working instance.
+   */
+  private async _ensureInit(): Promise<void> {
+    if (this._opened) return; // fast path — already initialized
+    return this.init();
+  }
+
+  /**
    * Get or create a named collection.
    * Accepts a name + options, or a CollectionSchema from defineSchema().
    *
@@ -222,7 +311,7 @@ export class AgentDB {
    *   or set them on `AgentDBOptions` as db-wide defaults.
    */
   async collection(nameOrSchema: string | CollectionSchema, colOpts?: CollectionOptions): Promise<Collection> {
-    this.ensureOpen();
+    await this._ensureInit();
 
     let name: string;
     let schema: CollectionSchema | undefined;
@@ -272,7 +361,22 @@ export class AgentDB {
     await mkdir(colDir, { recursive: true });
 
     const store = new Store<Record<string, unknown>>();
-    const baseOpts = this.collectionOpts.get(name);
+    const callerOpts = this.collectionOpts.get(name);
+    const configOverride = this.opts.collectionOverrides?.[name];
+
+    // Three-level merge: callerOpts (highest) > configOverride > db-wide defaults (applied below).
+    // Only defined fields from callerOpts override configOverride values; undefined caller fields
+    // fall through to configOverride, which falls through to the db-wide defaults below.
+    let baseOpts: CollectionOptions | undefined;
+    if (callerOpts || configOverride) {
+      baseOpts = { ...configOverride };
+      if (callerOpts) {
+        for (const [k, v] of Object.entries(callerOpts) as [string, unknown][]) {
+          if (v !== undefined) (baseOpts as Record<string, unknown>)[k] = v;
+        }
+      }
+    }
+
     // Apply db-wide defaults for knobs that also have per-collection overrides.
     // Per-collection value wins; db default fills in only when the collection didn't specify one.
     const mergedOpts: typeof baseOpts = {
@@ -285,6 +389,18 @@ export class AgentDB {
         ? { cacheSize: this.opts.cacheSize } : {}),
       ...(this.opts.rowGroupSize !== undefined && baseOpts?.rowGroupSize === undefined
         ? { rowGroupSize: this.opts.rowGroupSize } : {}),
+      ...(this.opts.maxFindLimit !== undefined && baseOpts?.maxFindLimit === undefined
+        ? { maxFindLimit: this.opts.maxFindLimit } : {}),
+      ...(this.opts.maxIndexCardinality !== undefined && baseOpts?.maxIndexCardinality === undefined
+        ? { maxIndexCardinality: this.opts.maxIndexCardinality } : {}),
+      ...(this.opts.filterCacheSize !== undefined && baseOpts?.filterCacheSize === undefined
+        ? { filterCacheSize: this.opts.filterCacheSize } : {}),
+      ...(this.opts.mergeParquetThreshold !== undefined && baseOpts?.mergeParquetThreshold === undefined
+        ? { mergeParquetThreshold: this.opts.mergeParquetThreshold } : {}),
+      ...(this.opts.mergeJsonlThreshold !== undefined && baseOpts?.mergeJsonlThreshold === undefined
+        ? { mergeJsonlThreshold: this.opts.mergeJsonlThreshold } : {}),
+      ...(this.opts.hnsw !== undefined && baseOpts?.hnsw === undefined
+        ? { hnsw: this.opts.hnsw } : {}),
     };
     const col = new Collection(name, store, mergedOpts);
     if (this.embeddingProvider) {
@@ -334,9 +450,14 @@ export class AgentDB {
       });
 
       const diskStore = new DiskStore(col.getBackend(), {
+        collectionName: name,
         cacheSize: mergedOpts?.cacheSize ?? 1_000,
         rowGroupSize: mergedOpts?.rowGroupSize ?? 5000,
         extractColumns: schema?.indexes ?? [],
+        maxIndexCardinality: mergedOpts?.maxIndexCardinality,
+        diskConcurrency: mergedOpts?.diskConcurrency,
+        mergeParquetThreshold: mergedOpts?.mergeParquetThreshold,
+        mergeJsonlThreshold: mergedOpts?.mergeJsonlThreshold,
       });
       await diskStore.load();
 
@@ -518,7 +639,7 @@ export class AgentDB {
 
   /** Create a collection explicitly (idempotent). */
   async createCollection(name: string): Promise<void> {
-    this.ensureOpen();
+    await this._ensureInit();
     await this.collection(name);
   }
 
@@ -527,7 +648,7 @@ export class AgentDB {
    * The collection is closed if open.
    */
   async dropCollection(name: string): Promise<void> {
-    this.ensureOpen();
+    await this._ensureInit();
 
     // Close if open (clean up listener + memory tracking like evictLru does)
     const existing = this.open.get(name);
@@ -563,7 +684,7 @@ export class AgentDB {
 
   /** Permanently delete a soft-dropped collection. */
   async purgeCollection(droppedName: string): Promise<void> {
-    this.ensureOpen();
+    await this._ensureInit();
     // Exact match on full dropped name, or match by original collection name prefix
     const match = this.meta.dropped.find((d) => d === droppedName || d.startsWith(`${DROPPED_PREFIX}${droppedName}_`));
     if (!match) {
@@ -580,7 +701,7 @@ export class AgentDB {
 
   /** List all active collections with record counts. */
   async listCollections(): Promise<CollectionInfo[]> {
-    this.ensureOpen();
+    await this._ensureInit();
     const infos: CollectionInfo[] = [];
     for (const name of this.meta.collections) {
       const col = await this.collection(name);
@@ -609,7 +730,7 @@ export class AgentDB {
    * Internal calls (auto-persist on collection open) skip the permission check.
    */
   async persistSchema(collectionName: string, schema: PersistedSchema, opts?: { agent?: string }): Promise<void> {
-    this.ensureOpen();
+    await this._ensureInit();
     if (opts?.agent) this.permissions.require(opts.agent, "admin", "persistSchema");
     validateCollectionName(collectionName);
     validatePersistedSchema(schema);
@@ -626,7 +747,7 @@ export class AgentDB {
 
   /** Load the persisted schema for a collection. Returns undefined if none stored. */
   async loadPersistedSchema(collectionName: string): Promise<PersistedSchema | undefined> {
-    this.ensureOpen();
+    await this._ensureInit();
     validateCollectionName(collectionName);
     const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
     try {
@@ -642,7 +763,7 @@ export class AgentDB {
 
   /** Delete the persisted schema for a collection. No-op if none exists. */
   async deletePersistedSchema(collectionName: string, opts?: { agent?: string }): Promise<void> {
-    this.ensureOpen();
+    await this._ensureInit();
     if (opts?.agent) this.permissions.require(opts.agent, "admin", "deletePersistedSchema");
     validateCollectionName(collectionName);
     const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
@@ -660,7 +781,7 @@ export class AgentDB {
    * Per-file isolation: one bad file never blocks the rest.
    */
   async loadSchemasFromFiles(paths: string[]): Promise<SchemaLoadResult> {
-    this.ensureOpen();
+    await this._ensureInit();
     let loaded = 0;
     let skipped = 0;
     const failed: Array<{ path: string; error: string }> = [];
@@ -740,7 +861,7 @@ export class AgentDB {
 
   /** Database-level stats. */
   async stats(): Promise<{ collections: number; totalRecords: number; textIndexBytes: number }> {
-    this.ensureOpen();
+    await this._ensureInit();
     let totalRecords = 0;
     let textIndexBytes = 0;
     for (const name of this.meta.collections) {
@@ -776,7 +897,7 @@ export class AgentDB {
    * @returns The number of documents indexed.
    */
   async rebuildTextIndex(name: string): Promise<number> {
-    this.ensureOpen();
+    await this._ensureInit();
     validateCollectionName(name);
 
     // Open without textSearch so the legacy-blob check doesn't throw.
@@ -819,7 +940,7 @@ export class AgentDB {
 
   /** Export all (or named) collections as a self-contained JSON object. */
   async export(collections?: string[]): Promise<ExportData> {
-    this.ensureOpen();
+    await this._ensureInit();
     const names = collections ?? this.meta.collections;
     const data: ExportData = {
       version: 1,
@@ -834,10 +955,12 @@ export class AgentDB {
   }
 
   /** Import collections from export data. Skips existing records by default. */
-  async import(data: ExportData, opts?: { overwrite?: boolean }): Promise<{ collections: number; records: number }> {
-    this.ensureOpen();
+  async import(data: ExportData, opts?: { overwrite?: boolean; onProgress?: ProgressCallback }): Promise<{ collections: number; records: number }> {
+    await this._ensureInit();
+    const onProgress = opts?.onProgress;
     let totalRecords = 0;
     const colNames = Object.keys(data.collections);
+    const grandTotal = colNames.reduce((n, name) => n + (data.collections[name].records.length), 0);
     for (const name of colNames) {
       const col = await this.collection(name);
       const records = data.collections[name].records;
@@ -852,6 +975,7 @@ export class AgentDB {
           }
         }
         totalRecords++;
+        try { onProgress?.({ completed: totalRecords, total: grandTotal, phase: "importing" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
       }
       // Per-record inserts already drove tl.add() — no rebuild needed.
     }
@@ -892,6 +1016,7 @@ export class AgentDB {
     this.collectionListeners.clear();
     this.lru = [];
     this._opened = false;
+    this._initPromise = null; // allow re-init if this instance is reused after close
   }
 
   // --- LRU management ---

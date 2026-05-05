@@ -406,6 +406,7 @@ export async function readRecordsByOffsets(
   backend: StorageBackend,
   jsonlPath: string,
   entries: Array<{ id: string; entry: RecordOffsetEntry }>,
+  concurrency = 20,
 ): Promise<Map<string, Record<string, unknown>>> {
   const results = new Map<string, Record<string, unknown>>();
   if (entries.length === 0) return results;
@@ -413,10 +414,9 @@ export async function readRecordsByOffsets(
   // Sort by offset for sequential I/O (better disk locality, S3 pipelining)
   const sorted = [...entries].sort((a, b) => a.entry.offset - b.entry.offset);
 
-  // Parallel reads in batches of 20 (sorted by offset for disk locality)
-  const BATCH = 20;
-  for (let i = 0; i < sorted.length; i += BATCH) {
-    const batch = sorted.slice(i, i + BATCH);
+  // Parallel reads in configurable batches (sorted by offset for disk locality)
+  for (let i = 0; i < sorted.length; i += concurrency) {
+    const batch = sorted.slice(i, i + concurrency);
     await Promise.all(batch.map(async ({ id, entry }) => {
       const record = await readRecordByOffset(backend, jsonlPath, entry);
       results.set(id, record);

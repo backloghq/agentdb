@@ -91,6 +91,33 @@ describe("write modes", () => {
   });
 
   describe("async mode", () => {
+    it("writeMode propagation: metrics().writeMode is 'async' and writes are functional end-to-end", async () => {
+      // Verifies the full chain: AgentDBOptions.writeMode → _openCollection → Collection.open →
+      // opslog Store. metrics().writeMode is the observable from Collection._writeMode which
+      // is set by Collection.open() from the same options object passed to opslog.
+      const db = new AgentDB(tmpDir, { writeMode: "async" });
+      await db.init();
+
+      const col = await db.collection("wm-async-probe");
+
+      // (1) Metric confirms mode reached Collection.open()
+      expect(col.metrics().writeMode).toBe("async");
+
+      // (2) Insert is immediately visible in memory (WAL queue, not disk yet)
+      await col.insert({ _id: "am1", v: "hello" });
+      expect(col.metrics().walRecordCount).toBe(1);
+      expect((await col.findOne("am1"))?.v).toBe("hello");
+
+      // (3) Persists after close (flushes async WAL) + reopen with default mode
+      await db.close();
+
+      const db2 = new AgentDB(tmpDir);
+      await db2.init();
+      const col2 = await db2.collection("wm-async-probe");
+      expect((await col2.findOne("am1"))?.v).toBe("hello");
+      await db2.close();
+    });
+
     it("inserts return fast and persist after close/reopen", async () => {
       const db = new AgentDB(tmpDir, { writeMode: "async" });
       await db.init();

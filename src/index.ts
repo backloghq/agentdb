@@ -18,8 +18,16 @@ export type {
   UpdateOps,
   FieldInfo,
   ReembedResult,
+  ProgressEvent,
+  ProgressCallback,
+  CollectionMetrics,
+  FilterCacheHandle,
 } from "./collection.js";
 
+export { HnswIndex } from "./hnsw.js";
+export type { HnswOptions } from "./hnsw.js";
+export { loadAgentDBConfig, ConfigValidationError } from "./config.js";
+export type { AgentDBConfigFile, DbConfig, HttpConfig, CollectionConfig, LoadConfigOptions } from "./config.js";
 export { RecordCache } from "./record-cache.js";
 export type { CacheStats } from "./record-cache.js";
 export { ArrayIndex } from "./array-index.js";

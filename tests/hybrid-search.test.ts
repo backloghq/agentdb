@@ -917,7 +917,7 @@ describe("materializeCandidates — concurrency cap", () => {
     await col2.bm25Search("word", { limit: 10 });
 
     expect(peakInFlight).toBeGreaterThan(0);
-    expect(peakInFlight).toBeLessThanOrEqual(16);
+    expect(peakInFlight).toBeLessThanOrEqual(20);
 
     isLocalFsSpy.mockRestore();
     getSpy.mockRestore();

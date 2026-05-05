@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "@backloghq/opslog";
 import { Collection } from "../src/collection.js";
+import { makeFilterCache } from "../src/collection-helpers.js";
 
 describe("Collection", () => {
   let tmpDir: string;
@@ -1682,6 +1683,226 @@ describe("Collection", () => {
 
     it("$text throws without textSearch enabled", async () => {
       await expect(col.find({ filter: { $text: "test" } })).rejects.toThrow("Text search not enabled");
+    });
+  });
+
+  describe("maxFindLimit", () => {
+    async function makeCol(name: string, maxFindLimit: number): Promise<{ col: Collection; dir: string }> {
+      const { mkdtemp: mkd } = await import("node:fs/promises");
+      const dir = await mkd(join(tmpdir(), `agentdb-mfl-${name}-`));
+      const s = new Store<Record<string, unknown>>();
+      const c = new Collection(name, s, { maxFindLimit });
+      await c.open(dir, { checkpointThreshold: 100000 });
+      return { col: c, dir };
+    }
+
+    it("truncates at maxFindLimit and emits console.warn", async () => {
+      const { col: c, dir } = await makeCol("cap5", 5);
+      for (let i = 0; i < 10; i++) await c.insert({ idx: i });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const result = await c.find({ limit: 10 });
+        expect(result.records).toHaveLength(5);
+        expect(result.truncated).toBe(true);
+        expect(warnSpy).toHaveBeenCalledOnce();
+        expect(warnSpy.mock.calls[0][0]).toContain("maxFindLimit=5");
+      } finally {
+        warnSpy.mockRestore();
+        await c.close();
+        const { rm } = await import("node:fs/promises");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not warn when requestedLimit equals maxFindLimit (cap boundary)", async () => {
+      // limit=5 = cap=5 → requestedLimit(5) is not > limit(5) → no warn
+      // This exercises the exact boundary: the check is requestedLimit > limit, not >=
+      const { col: c, dir } = await makeCol("cap5b", 5);
+      for (let i = 0; i < 10; i++) await c.insert({ idx: i });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const result = await c.find({ limit: 5 });
+        expect(result.records).toHaveLength(5);
+        expect(result.truncated).toBe(true); // 10 records total, only 5 returned
+        expect(warnSpy).not.toHaveBeenCalled(); // limit == cap, not > cap → no warn
+      } finally {
+        warnSpy.mockRestore();
+        await c.close();
+        const { rm } = await import("node:fs/promises");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("warns when requestedLimit exceeds maxFindLimit (cap+1 case)", async () => {
+      // limit=6 > cap=5 → requestedLimit(6) > limit(5) → warn fires
+      const { col: c, dir } = await makeCol("cap5c", 5);
+      for (let i = 0; i < 10; i++) await c.insert({ idx: i });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const result = await c.find({ limit: 6 });
+        expect(result.records).toHaveLength(5); // capped at 5
+        expect(result.truncated).toBe(true);
+        expect(warnSpy).toHaveBeenCalledOnce();
+        expect(warnSpy.mock.calls[0][0]).toContain("maxFindLimit=5");
+      } finally {
+        warnSpy.mockRestore();
+        await c.close();
+        const { rm } = await import("node:fs/promises");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("allows maxFindLimit above default 10000", async () => {
+      const { col: c, dir } = await makeCol("big", 20000);
+      for (let i = 0; i < 200; i++) await c.insert({ idx: i });
+
+      const result = await c.find({ limit: 200 });
+      expect(result.records).toHaveLength(200);
+      expect(result.truncated).toBe(false);
+
+      await c.close();
+      const { rm } = await import("node:fs/promises");
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("AgentDB-level maxFindLimit propagates to all collections (regression T8)", async () => {
+      // Guards against the propagation path: AgentDBOptions.maxFindLimit → CollectionOptions
+      const { AgentDB } = await import("../src/agentdb.js");
+      const dir = await mkdtemp(join(tmpdir(), "agentdb-mfl-t8-"));
+      try {
+        const db = new AgentDB(dir, { maxFindLimit: 5 });
+        await db.init();
+        const col = await db.collection("t8-col");
+        for (let i = 0; i < 10; i++) await col.insert({ idx: i });
+
+        const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          const result = await col.find({ limit: 100 });
+          expect(result.records).toHaveLength(5);
+          expect(result.truncated).toBe(true);
+          expect(warnSpy).toHaveBeenCalledOnce();
+          expect(warnSpy.mock.calls[0][0]).toContain("maxFindLimit=5");
+        } finally {
+          warnSpy.mockRestore();
+        }
+        await db.close();
+      } finally {
+        const { rm } = await import("node:fs/promises");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("filterCacheSize", () => {
+    it("makeFilterCache evicts LRU entry once maxSize is reached", () => {
+      // Use a spy to count actual compile calls
+      const spy = vi.fn().mockReturnValue(() => true);
+      const cache = makeFilterCache(2, spy);
+
+      // Fill cache: A and B compile once each. LRU order (oldest→newest): [A, B]
+      cache.compile({ v: "A" });
+      cache.compile({ v: "B" });
+      expect(spy).toHaveBeenCalledTimes(2);
+
+      // Hit B — bumps B to newest. LRU order: [A, B]
+      cache.compile({ v: "B" });
+      expect(spy).toHaveBeenCalledTimes(2);
+
+      // Miss C — evicts oldest (A). LRU order: [B, C]
+      cache.compile({ v: "C" });
+      expect(spy).toHaveBeenCalledTimes(3);
+
+      // Hit B — still in cache (B was bumped, never evicted)
+      cache.compile({ v: "B" });
+      expect(spy).toHaveBeenCalledTimes(3);
+
+      // Miss A — was evicted; recompiles. Evicts oldest (C). LRU order: [B, A]
+      cache.compile({ v: "A" });
+      expect(spy).toHaveBeenCalledTimes(4);
+
+      // Hit B — still in cache
+      cache.compile({ v: "B" });
+      expect(spy).toHaveBeenCalledTimes(4);
+    });
+
+    it("two makeFilterCache instances are independent (no cross-eviction)", () => {
+      const spyA = vi.fn().mockReturnValue(() => true);
+      const spyB = vi.fn().mockReturnValue(() => true);
+      const cacheA = makeFilterCache(2, spyA);
+      const cacheB = makeFilterCache(2, spyB);
+
+      // Fill both caches
+      cacheA.compile({ a: 1 });
+      cacheA.compile({ a: 2 });
+      cacheB.compile({ b: 1 });
+      cacheB.compile({ b: 2 });
+      expect(spyA).toHaveBeenCalledTimes(2);
+      expect(spyB).toHaveBeenCalledTimes(2);
+
+      // Evict from B (add a third entry to B — evicts b:1)
+      cacheB.compile({ b: 3 });
+      expect(spyB).toHaveBeenCalledTimes(3);
+
+      // A's cache is unaffected — both entries still present
+      cacheA.compile({ a: 1 });
+      cacheA.compile({ a: 2 });
+      expect(spyA).toHaveBeenCalledTimes(2); // no new A compilations
+    });
+
+    it("Collection.filterCacheSize getter returns configured value (default 64)", async () => {
+      const s = new Store<Record<string, unknown>>();
+      const dir = await mkdtemp(join(tmpdir(), "agentdb-fcs-"));
+      const col = new Collection("test", s, {});
+      await col.open(dir, { checkpointThreshold: 100000 });
+      expect(col.filterCacheSize).toBe(64);
+      await col.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("Collection.filterCacheSize getter reflects custom filterCacheSize option", async () => {
+      const s = new Store<Record<string, unknown>>();
+      const dir = await mkdtemp(join(tmpdir(), "agentdb-fcs-"));
+      const col = new Collection("test", s, { filterCacheSize: 8 });
+      await col.open(dir, { checkpointThreshold: 100000 });
+      expect(col.filterCacheSize).toBe(8);
+      await col.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("AgentDB-level filterCacheSize propagates to all collections (regression T13a)", async () => {
+      const { AgentDB } = await import("../src/agentdb.js");
+      const dir = await mkdtemp(join(tmpdir(), "agentdb-t13a-"));
+      try {
+        const db = new AgentDB(dir, { filterCacheSize: 8 });
+        await db.init();
+        const col = await db.collection("t13a-col");
+        expect(col.filterCacheSize).toBe(8);
+        await db.close();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("AgentDB option propagation regression (T13)", () => {
+    it("mergeParquetThreshold and mergeJsonlThreshold propagate from AgentDB to DiskStore", async () => {
+      const { AgentDB } = await import("../src/agentdb.js");
+      const dir = await mkdtemp(join(tmpdir(), "agentdb-t13b-"));
+      try {
+        const db = new AgentDB(dir, { storageMode: "disk", mergeParquetThreshold: 4, mergeJsonlThreshold: 3 });
+        await db.init();
+        const col = await db.collection("t13b-col");
+        const ds = col.getDiskStore();
+        expect(ds).not.toBeNull();
+        expect(ds!.mergeParquetThreshold).toBe(4);
+        expect(ds!.mergeJsonlThreshold).toBe(3);
+        await db.close();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     });
   });
 });

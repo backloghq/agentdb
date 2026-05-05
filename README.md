@@ -16,8 +16,8 @@ npm install @backloghq/agentdb
 ```typescript
 import { AgentDB } from "@backloghq/agentdb";
 
-const db = new AgentDB("./data");
-await db.init();
+// Recommended: one-call factory that constructs and initializes
+const db = await AgentDB.open("./data");
 
 const tasks = await db.collection("tasks");
 
@@ -49,8 +49,7 @@ Define typed, validated collections in one place:
 ```typescript
 import { AgentDB, defineSchema } from "@backloghq/agentdb";
 
-const db = new AgentDB("./data");
-await db.init();
+const db = await AgentDB.open("./data");
 
 const tasks = await db.collection(defineSchema({
   name: "tasks",
@@ -118,8 +117,7 @@ Full programmatic access. Use `AgentDB` to manage collections, `Collection` for 
 import { AgentDB } from "@backloghq/agentdb";
 import { getTools } from "@backloghq/agentdb/tools";
 
-const db = new AgentDB("./data");
-await db.init();
+const db = await AgentDB.open("./data");
 
 const tools = getTools(db);
 // → Array of { name, description, schema, annotations, execute }
@@ -603,6 +601,26 @@ startHttp(dir, {
 });
 ```
 
+### Auth priority when multiple mechanisms are configured
+
+If more than one mechanism is set in the same config, the CLI enforces a fixed priority and emits a warning at startup:
+
+```
+jwt > multi-token > bearer
+```
+
+| What you configured | What is enforced |
+|---|---|
+| `AGENTDB_HTTP_JWT_SECRET` only | JWT |
+| `AGENTDB_HTTP_MULTI_TOKEN` only | multi-token |
+| `AGENTDB_AUTH_TOKEN` only | bearer |
+| JWT + multi-token (or bearer) | JWT wins; others are silently ignored after warning |
+| multi-token + bearer | multi-token wins; bearer is silently ignored after warning |
+
+The warning is emitted to stderr and names the active mechanisms, the winner, and the priority order.
+
+**JWT secret minimum length:** use at least 32 characters (256 bits) for HMAC-SHA256 secrets. Shorter keys are cryptographically weak and may be rejected by strict JWT libraries. A good default: `openssl rand -hex 32`.
+
 ### Group commit (faster writes)
 
 Buffer writes in memory and flush as a single disk write. ~12x faster for sustained writes. Single-writer only — auto-disabled when `agentId` is set.
@@ -783,7 +801,7 @@ const col = await db.collection("articles", { embeddingBatchSize: 64 });
 
 Smaller batches reduce peak memory and provider timeout risk; larger batches reduce round-trips. Most hosted providers cap at 512–2048 texts per call — stay below their limit. All embedding providers (OpenAI, Voyage, Cohere, Gemini, Ollama, HTTP) automatically chunk each `embed()` call into provider-safe batches, so `embeddingBatchSize` can be set independently of API limits.
 
-**`diskConcurrency`** — maximum number of concurrent `DiskStore.get()` calls when materializing BM25/vector candidates in disk mode. Default: `16` for non-local-filesystem backends (e.g. S3); local filesystem is unbounded.
+**`diskConcurrency`** — maximum number of concurrent `DiskStore.get()` calls when materializing BM25/vector candidates in disk mode. Default: `20` for non-local-filesystem backends (e.g. S3); local filesystem is unbounded.
 
 ```typescript
 // db-wide default (applied to every disk-mode collection)
@@ -793,7 +811,7 @@ const db = new AgentDB("./data", { diskConcurrency: 32 });
 const col = await db.collection("embeddings", { diskConcurrency: 8 });
 ```
 
-S3 sizing guidance: the default of `16` prevents per-prefix request throttling at typical QPS. If you are running at very high query concurrency (dozens of simultaneous `hybridSearch` calls) and observe `SlowDown` errors, raise to `32`. If you share an S3 prefix with other workloads, lower to `8` to leave headroom.
+S3 sizing guidance: the default of `20` prevents per-prefix request throttling at typical QPS. If you are running at very high query concurrency (dozens of simultaneous `hybridSearch` calls) and observe `SlowDown` errors, raise to `32`. If you share an S3 prefix with other workloads, lower to `8` to leave headroom.
 
 ### Rate limiting and CORS
 
@@ -813,6 +831,12 @@ docker run -p 3000:3000 -v ./data:/data agentdb --path /data --http --host 0.0.0
 
 # With auth:
 docker run -p 3000:3000 -e AGENTDB_AUTH_TOKEN=secret -v ./data:/data agentdb --path /data --http --host 0.0.0.0
+
+# With a config file (mount the file and point --config at it):
+docker run -p 3000:3000 \
+  -v ./data:/data \
+  -v ./agentdb.config.json:/etc/agentdb/config.json:ro \
+  agentdb --path /data --http --host 0.0.0.0 --config /etc/agentdb/config.json
 
 # With S3:
 docker run -p 3000:3000 \
@@ -856,6 +880,258 @@ col.find({ filter: { status: "active" }, summary: true });
 
 **Default recommendation:** Use `memory` for small datasets, `disk` or `auto` for anything that might grow.
 
+## Configuration
+
+The MCP CLI accepts configuration from three sources. Precedence (highest first):
+
+1. **CLI flags** — passed directly to `npx @backloghq/agentdb`
+2. **Environment variables** — `AGENTDB_*` prefixed vars
+3. **Config file** — `agentdb.config.json` in the working directory, or the path from `--config` / `AGENTDB_CONFIG`
+
+### 1. CLI flags
+
+Every option has a flag. Flags win over env vars and the config file:
+
+```bash
+npx @backloghq/agentdb \
+  --path ./data \
+  --http --port 3000 \
+  --backend s3 --bucket my-bucket \
+  --write-mode group \
+  --embeddings openai \
+  --schemas "schemas/*.json" \
+  --auth-token secret \
+  --tenant-id org-123
+```
+
+Run `npx @backloghq/agentdb --help` for the full flag list.
+
+### 2. Environment variables
+
+All flags have an `AGENTDB_` equivalent. Useful for container deployments and secrets managers:
+
+```bash
+AGENTDB_PATH=./data
+AGENTDB_WRITE_MODE=group
+AGENTDB_BACKEND=s3
+AGENTDB_S3_BUCKET=my-bucket
+AGENTDB_S3_REGION=us-east-1
+AGENTDB_HTTP_AUTH=secret
+AGENTDB_TENANT_ID=org-123
+AGENTDB_EMBEDDINGS_PROVIDER=openai
+AGENTDB_EMBEDDINGS_API_KEY=sk-...
+```
+
+Full reference:
+
+| Variable | Type | Description |
+|---|---|---|
+| `AGENTDB_CONFIG` | string | Path to config file (overrides auto-discovery) |
+| `AGENTDB_PATH` | string | Data directory |
+| `AGENTDB_WRITE_MODE` | `immediate`\|`group`\|`async` | Write durability mode |
+| `AGENTDB_GROUP_COMMIT_SIZE` | number | Batch size for group/async mode |
+| `AGENTDB_GROUP_COMMIT_MS` | number | Max latency (ms) for group commit |
+| `AGENTDB_MAX_FIND_LIMIT` | number | Cap on records returned by `find()` |
+| `AGENTDB_MAX_INDEX_CARDINALITY` | number | B-tree index cardinality threshold |
+| `AGENTDB_CACHE_SIZE` | number | Disk LRU record cache size |
+| `AGENTDB_DISK_CONCURRENCY` | number | Parallel JSONL reads |
+| `AGENTDB_EMBEDDING_BATCH_SIZE` | number | Records per embedding batch |
+| `AGENTDB_FILTER_CACHE_SIZE` | number | Compiled-filter LRU cache size |
+| `AGENTDB_MERGE_PARQUET_THRESHOLD` | number | Parquet file compaction trigger |
+| `AGENTDB_MERGE_JSONL_THRESHOLD` | number | JSONL file compaction trigger |
+| `AGENTDB_MEMORY_BUDGET` | number | Memory budget in bytes (0 = unlimited) |
+| `AGENTDB_ROW_GROUP_SIZE` | number | Parquet row group size |
+| `AGENTDB_HNSW_M` | number | HNSW M parameter |
+| `AGENTDB_HNSW_EF_CONSTRUCTION` | number | HNSW efConstruction |
+| `AGENTDB_HNSW_EF_SEARCH` | number | HNSW efSearch |
+| `AGENTDB_HNSW_MAX_LEVEL` | number | HNSW max level cap |
+| `AGENTDB_EMBEDDINGS_PROVIDER` | string | Embedding provider: `ollama`, `openai`, `voyage`, `cohere`, `gemini`, `http` |
+| `AGENTDB_EMBEDDINGS_API_KEY` | string | API key for the embedding provider |
+| `AGENTDB_EMBEDDINGS_MODEL` | string | Model name |
+| `AGENTDB_EMBEDDINGS_BATCH_LIMIT` | number | Max texts per API call (HTTP provider) |
+| `AGENTDB_EMBEDDINGS_URL` | string | HTTP embedding provider URL |
+| `AGENTDB_EMBEDDINGS_BASE_URL` | string | Ollama base URL (same as `AGENTDB_OLLAMA_URL`) |
+| `AGENTDB_EMBEDDINGS_DIMENSIONS` | number | Embedding vector dimensions (HTTP provider) |
+| `AGENTDB_OLLAMA_URL` | string | Ollama base URL (alias for `AGENTDB_EMBEDDINGS_BASE_URL`) |
+| `AGENTDB_DISK_THRESHOLD` | number | Record count at which `auto` mode switches to disk |
+| `AGENTDB_BACKEND` | `fs`\|`s3` | Storage backend |
+| `AGENTDB_S3_BUCKET` | string | S3 bucket name |
+| `AGENTDB_S3_REGION` | string | AWS region |
+| `AGENTDB_S3_PREFIX` | string | S3 key prefix |
+| `AGENTDB_AGENT_ID` | string | Agent ID for multi-writer mode |
+| `AGENTDB_TENANT_ID` | string | Tenant binding |
+| `AGENTDB_SCHEMA_PATHS` | comma-list | Schema JSON files to load on startup |
+| `AGENTDB_STORAGE_MODE` | `memory`\|`disk`\|`auto` | Storage mode |
+| `AGENTDB_READ_ONLY` | boolean | Open collections read-only |
+| `AGENTDB_HTTP_PORT` | number | HTTP port |
+| `AGENTDB_HTTP_HOST` | string | HTTP bind address |
+| `AGENTDB_HTTP_AUTH` | string | Bearer token |
+| `AGENTDB_HTTP_MULTI_TOKEN` | JSON array | Multiple bearer tokens (JSON) |
+| `AGENTDB_HTTP_JWT_SECRET` | string | JWT signing secret |
+| `AGENTDB_HTTP_JWT_AUDIENCE` | string | JWT audience |
+| `AGENTDB_HTTP_JWT_ISSUER` | string | JWT issuer |
+| `AGENTDB_HTTP_MAX_SESSIONS` | number | Max concurrent MCP sessions |
+| `AGENTDB_HTTP_SESSION_IDLE_MS` | number | Session idle timeout (ms) |
+| `AGENTDB_HTTP_AUDIT_BUFFER_SIZE` | number | Audit log ring-buffer size |
+| `AGENTDB_HTTP_AUDIT_MAX_LIMIT` | number | Audit query max page size |
+| `AGENTDB_HTTP_AUDIT_DEFAULT_LIMIT` | number | Audit query default page size |
+| `AGENTDB_HTTP_RATE_LIMIT` | number | Max requests/minute per IP |
+| `AGENTDB_HTTP_RATE_LIMIT_WINDOW` | number | Rate limit window (ms) |
+| `AGENTDB_HTTP_CORS` | comma-list | Allowed CORS origins |
+| `AWS_REGION` | string | AWS region fallback (standard SDK var) |
+
+> **Security note:** environment variables set in a process are readable from `/proc/<pid>/environ` on Linux by any user with access to that file (root, or the process owner). For long-lived server processes, prefer injecting secrets via a secrets manager, a read-protected config file (`chmod 600 agentdb.config.json`), or systemd `EnvironmentFile=` with appropriate permissions — rather than exporting tokens directly in shell startup scripts.
+
+### 3. Config file
+
+`agentdb.config.json` in the working directory is loaded automatically when present. Use `--config <path>` or `AGENTDB_CONFIG=<path>` to point at a different file.
+
+**Note:** if you pass `--config` explicitly and the file does not exist, the CLI exits 1. The auto-discovered `./agentdb.config.json` silently produces an empty config when absent (no error), so you can safely omit it in development.
+
+```json
+{
+  "db": {
+    "path": "./data",
+    "writeMode": "group",
+    "maxFindLimit": 5000,
+    "memoryBudget": 1073741824,
+    "hnsw": { "M": 32, "efSearch": 100 },
+    "embeddings": {
+      "provider": "openai",
+      "model": "text-embedding-3-small"
+    }
+  },
+  "http": {
+    "port": 3000,
+    "host": "0.0.0.0",
+    "auth": "change-me",
+    "maxSessions": 200,
+    "sessionIdleMs": 600000,
+    "cors": ["https://myapp.example.com"]
+  },
+  "collections": {
+    "notes": {
+      "maxFindLimit": 500,
+      "mergeParquetThreshold": 5,
+      "hnsw": { "efSearch": 200 }
+    }
+  }
+}
+```
+
+The `collections` key supports per-collection overrides for most storage and search knobs. Any key omitted falls back to the db-wide value.
+
+### Library API
+
+The config pipeline is also available as a library function. The CLI uses it internally; library users are not affected by any of the above:
+
+```typescript
+import { loadAgentDBConfig, ConfigValidationError } from "@backloghq/agentdb";
+
+try {
+  const config = loadAgentDBConfig({
+    configPath: "./my-config.json", // optional; auto-discovers agentdb.config.json by default
+    requireConfigFile: true,        // error if configPath is missing (default: false)
+    env: process.env,               // injectable for testing
+    cli: { db: { path: "./data" } }, // highest precedence
+  });
+  console.log(config.db?.path);
+} catch (e) {
+  if (e instanceof ConfigValidationError) {
+    console.error(`Config error (${e.source}): ${e.message}`);
+  }
+}
+```
+
+`ConfigValidationError` carries `.source` (`"file"` | `"env"` | `"cli"`), `.path[]` (the field path that failed), and `.message`.
+
+### Restart required
+
+Configuration is read once at startup. Changing env vars, the config file, or CLI flags takes effect only after restarting the process. There is no hot-reload.
+
+## Production Tuning
+
+Every configurable knob, its location, default, and the workload signal that should prompt you to change it.
+
+`AgentDB` options propagate as defaults to every collection; per-collection `CollectionOptions` override them.
+
+### Storage and query knobs
+
+| Option | Location | Default | Tune when… | Recommended range |
+|--------|----------|---------|-----------|-------------------|
+| `maxFindLimit` | `AgentDB` / `Collection` | `10_000` | batch exports need >10K records per page, or you want to enforce a lower cap | 1K – unlimited |
+| `maxIndexCardinality` | `AgentDB` / `Collection` | `1_000` | `console.warn` fires at collection open naming a field that exceeds the threshold; queries on that field fall back to full Parquet scan | 100 – 100K |
+| `filterCacheSize` | `AgentDB` / `Collection` | `64` | a collection has many distinct query shapes (>64 unique filters in a session) | 32 – 256 |
+| `cacheSize` | `AgentDB` / `Collection` | `1_000` | `metrics().recordCacheHits / recordCacheFetches` hit rate is low (<50%) on a hot collection | 100 – 100K |
+| `rowGroupSize` | `AgentDB` / `Collection` | `5_000` | column scan performance is slow (lower = smaller seek range, higher = fewer S3 requests) | 1K – 20K |
+| `mergeParquetThreshold` | `AgentDB` / `Collection` | `10` | S3 per-request cost is high (raise), or local read amplification is high (lower) | 4 – 50 |
+| `mergeJsonlThreshold` | `AgentDB` / `Collection` | `8` | same as `mergeParquetThreshold` — controls JSONL delta file accumulation before full merge | 4 – 40 |
+| `diskConcurrency` | `AgentDB` / `Collection` | `20` | S3 point-lookup latency is high (raise to overlap more requests); has no effect on local FS | 4 – 64 |
+| `embeddingBatchSize` | `AgentDB` / `Collection` | `256` | embedding provider rate-limit errors or timeouts on large batch runs | 8 – 512 |
+| `hnsw.M` | `AgentDB` / `Collection` | `16` | recall is low (raise) or index build is slow and you accept lower recall (lower) | 4 – 64 |
+| `hnsw.efConstruction` | `AgentDB` / `Collection` | `200` | index build time is too slow (lower) or initial recall on a fresh dataset is unsatisfactory (raise) | 50 – 500 |
+| `hnsw.efSearch` | `AgentDB` / `Collection` | `50` | `semanticSearch` / `hybridSearch` recall is insufficient (raise) or query latency is high (lower) | 10 – 500 |
+
+### Write mode and commit knobs
+
+| Option | Location | Default | Tune when… | Notes |
+|--------|----------|---------|-----------|-------|
+| `writeMode` | `AgentDB` | `"immediate"` | write throughput is the bottleneck (switch to `"group"` for ~12x, `"async"` for ~50x) | `"group"` / `"async"` require single-writer; `"async"` loses unflushed ops on crash |
+| `groupCommitSize` | `AgentDB` | `50` | group-commit batches are too small (raise) or latency per op is too high (lower) | Only effective when `writeMode: "group"` |
+| `groupCommitMs` | `AgentDB` | `100` | you need lower write latency at the cost of smaller batches (lower) or higher throughput at higher latency (raise) | Only effective when `writeMode: "group"` |
+
+### Memory and budget knobs
+
+| Option | Location | Default | Tune when… | Notes |
+|--------|----------|---------|-----------|-------|
+| `memoryBudget` | `AgentDB` | `0` (unlimited) | you want a `console.warn` when total collection memory exceeds a threshold | Set in bytes; `0` disables the check; check fires at mutation time via the memory monitor |
+
+### HTTP / MCP server knobs
+
+| Option | Location | Default | Tune when… | Recommended range |
+|--------|----------|---------|-----------|-------------------|
+| `maxSessions` | `HttpOptions` | `100` | multi-agent orchestrators fan out more than 100 concurrent connections | 10 – 1000 |
+| `sessionIdleMs` | `HttpOptions` | `1_800_000` (30 min) | agents hold long-lived idle connections (raise) or session memory is expensive (lower) | 60K – 86_400_000 |
+| `auditBufferSize` | `HttpOptions` | `10_000` | audit entries are silently dropped (observable via log volume drops) | 1K – 100K |
+
+### Observability
+
+Use `col.metrics()` to read live counters without any instrumentation cost:
+
+```typescript
+const m = col.metrics();
+// Filter cache hit rate — low values mean filterCacheSize should be raised
+console.log(m.filterCacheHits / (m.filterCacheHits + m.filterCompilations));
+// Disk LRU hit rate — low values mean cacheSize should be raised
+console.log(m.recordCacheHits / m.recordCacheFetches);
+// findTruncations — non-zero means some queries hit the maxFindLimit cap
+console.log(m.findTruncations);
+// Index sizes
+console.log(m.bm25SegmentCount, m.hnswNodeCount, m.walRecordCount, m.parquetRowGroups);
+// BM25 detail — doc count (flushed) and whether a merge pass would reduce segment count
+console.log(m.bm25DocCount, m.bm25NeedsMerge);
+// Write mode this collection is running under
+console.log(m.writeMode);
+```
+
+**Verifying configuration changes:** after adjusting a knob (e.g. raising `cacheSize` or `filterCacheSize`), call `col.metrics()` after a warm-up period of representative traffic. Compare `recordCacheHits / recordCacheFetches` or `filterCacheHits / (filterCacheHits + filterCompilations)` before and after to confirm the new limit is having the intended effect. All counters are lifetime values since the collection was opened.
+
+## Limits and Ceilings
+
+Every hard cap in the system, what triggers it, and how to change it.
+
+| Cap | Default | What triggers it | Effect | How to change |
+|-----|---------|-----------------|--------|---------------|
+| `maxFindLimit` | `10_000` | `find()` called with `limit` exceeding the cap | Result is truncated (`truncated: true`); `console.warn` printed; `metrics().findTruncations` incremented | `CollectionOptions.maxFindLimit` or `AgentDBOptions.maxFindLimit` |
+| `maxIndexCardinality` | `1_000` | Field cardinality exceeds threshold at index load | B-tree index for that field is skipped; queries fall back to full Parquet scan; `console.warn` printed once per field | `CollectionOptions.maxIndexCardinality` or `AgentDBOptions.maxIndexCardinality` |
+| `maxSessions` | `100` | 101st concurrent MCP HTTP session arrives | HTTP 503 returned | `HttpOptions.maxSessions` |
+| `auditBufferSize` | `10_000` | 10,001st audit log entry recorded | Oldest entry silently dropped (ring buffer) | `HttpOptions.auditBufferSize` |
+| `auditMaxLimit` | `10_000` | `/audit?limit=N` with N exceeding cap | `limit` silently capped at maximum | `HttpOptions.auditMaxLimit` |
+| `mergeParquetThreshold` | `10` | 10 incremental Parquet files accumulate before compaction | Full merge triggered on next close | `AgentDB/CollectionOptions.mergeParquetThreshold` |
+| `mergeJsonlThreshold` | `8` | 8 incremental JSONL delta files accumulate | Full merge triggered on next close | `AgentDB/CollectionOptions.mergeJsonlThreshold` |
+
+**Removed in v2.0:** the 256 MB per-collection text index cap (~25–30K document ceiling) is gone. termlog uses a segment-based LSM with no in-memory size limit.
+
 ## Migration from v1.4
 
 v2.0 replaces the in-house `TextIndex` JSON blob with `@backloghq/termlog` (segment-based LSM). The change is automatic for new collections. Existing collections that have a v1.4 BM25 index on disk require a one-time rebuild.
@@ -868,18 +1144,21 @@ v2.0 replaces the in-house `TextIndex` JSON blob with `@backloghq/termlog` (segm
 import { AgentDB, LegacyTextIndexError, defineSchema } from "@backloghq/agentdb";
 
 const schema = defineSchema({ name: "notes", textSearch: true, fields: { ... } });
-const db = new AgentDB("./data");
-await db.init();
+const db = await AgentDB.open("./data");
 
 try {
   await db.collection(schema);
 } catch (e) {
   if (e instanceof LegacyTextIndexError) {
-    await db.rebuildTextIndex("notes");  // wipes old index, re-indexes all records
+    await db.rebuildTextIndex("notes");  // re-indexes all records into a fresh TermLog
     await db.collection(schema);         // succeeds now
   }
 }
 ```
+
+**Disk space:** in FS mode, `rebuildTextIndex` builds the new index in `text.new/` while the original `text/` remains intact and queryable. Both directories coexist until the atomic rename swap completes — plan for ~2× your current text-index size in free disk space during the rebuild. In S3 mode, the old index is wiped before rebuilding (no rename is possible for blob stores).
+
+**Write safety:** records inserted, updated, or deleted during an in-flight rebuild are captured in the new index. Concurrent `bm25Search` calls during a rebuild are safe — they read from the old index until the swap completes.
 
 **Rebuild via MCP tool** (no code change required):
 
@@ -888,6 +1167,18 @@ try {
 ```
 
 Returns `{ rebuiltDocCount: N }`. Requires admin permission.
+
+**What's new in v2.1:**
+- `AgentDB.open(dir, opts)` static factory — async one-call entry point; replaces the `new AgentDB(...); await db.init()` two-step
+- Lazy auto-init — calling `db.collection(...)` without explicit `init()` now Just Works
+- Configuration: optional `agentdb.config.json` + 47 `AGENTDB_*` env vars for the MCP CLI (precedence CLI > env > file > defaults)
+- Per-collection overrides via `collectionOverrides` (db-wide) or the config file's `collections` block
+- Production-readiness knobs: `maxFindLimit`, `maxIndexCardinality`, `mergeParquetThreshold`, `mergeJsonlThreshold`, `filterCacheSize`, HNSW `M`/`efConstruction`/`efSearch`/`maxLevel`, `maxSessions`/`sessionIdleMs`, audit buffer/limits
+- Ergonomics: `onProgress` callbacks for `reembedAll`/`rebuildTextIndex`/`db_import`; `AbortSignal` for `find`, `reembedAll`, `rebuildTextIndex`; `col.metrics()` for cache hit-rate / index usage / BM25 segment count / write mode
+- Auth hardening: JWT secret minimum 32 bytes (HS256 RFC 7518); auth precedence (JWT > multi-token > bearer) with conflict warn
+- `rebuildTextIndex` now uses snapshot-then-swap with concurrent-write capture and crash recovery — runs safely against live collections (FS mode)
+
+See [MIGRATION-2.0.md](./MIGRATION-2.0.md#new-in-v21) for the full v2.1 list and [CHANGELOG.md](./CHANGELOG.md) for the detailed entry.
 
 **What's new in v2.0:**
 - No per-collection document cap (256 MB / ~25–30K doc ceiling is gone)

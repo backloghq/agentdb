@@ -33,12 +33,22 @@ import { FsBackend } from "@backloghq/opslog";
 import type { StorageBackend } from "@backloghq/opslog";
 
 export interface DiskStoreOptions {
+  /** Collection name — included in diagnostic warn messages to identify the source. */
+  collectionName?: string;
   /** Max records in LRU cache (default: 1000). */
   cacheSize?: number;
   /** Parquet row group size (default: 5000). */
   rowGroupSize?: number;
   /** Columns to extract for Parquet skip-scanning. */
   extractColumns?: string[];
+  /** Max unique values a field may have before its B-tree index is skipped (default: 1000). */
+  maxIndexCardinality?: number;
+  /** Parallel batch size for JSONL record reads (default: 20). Ties to diskConcurrency on CollectionOptions/AgentDBOptions. */
+  diskConcurrency?: number;
+  /** Number of incremental Parquet files before triggering a full merge (default: 10). */
+  mergeParquetThreshold?: number;
+  /** Number of incremental JSONL delta files before triggering a full merge (default: 8). */
+  mergeJsonlThreshold?: number;
 }
 
 export class DiskStore {
@@ -56,12 +66,23 @@ export class DiskStore {
   /** Pending index files for lazy loading — loaded on first query. */
   private _pendingIndexFiles: Map<string, string> = new Map(); // field → filename
   private _indexManager: IndexManager | null = null;
+  private maxIndexCardinality: number;
+  private _warnedCardinalityFields: Set<string> = new Set();
+  private diskConcurrency: number;
+  private _mergeParquetThreshold: number;
+  private _mergeJsonlThreshold: number;
+  private _collectionName: string;
 
   constructor(backend: StorageBackend, options?: DiskStoreOptions) {
     this.backend = backend;
+    this._collectionName = options?.collectionName ?? "<unknown>";
     this.cache = new RecordCache(options?.cacheSize ?? 1_000);
     this.rowGroupSize = options?.rowGroupSize ?? 5000;
     this.extractColumns = options?.extractColumns ?? [];
+    this.maxIndexCardinality = options?.maxIndexCardinality ?? DiskStore.MAX_INDEX_CARDINALITY;
+    this.diskConcurrency = options?.diskConcurrency ?? 20;
+    this._mergeParquetThreshold = options?.mergeParquetThreshold ?? DiskStore.MERGE_THRESHOLD;
+    this._mergeJsonlThreshold = options?.mergeJsonlThreshold ?? DiskStore.MERGE_JSONL_THRESHOLD;
   }
 
   /** Load persisted state: offset index + compaction metadata + JSONL offsets. */
@@ -90,6 +111,15 @@ export class DiskStore {
   /** Max cardinality for in-memory index (above this, use Parquet column scan). Default: 1000. */
   static readonly MAX_INDEX_CARDINALITY = 1000;
 
+  /** Configured Parquet file merge threshold for this store. */
+  get mergeParquetThreshold(): number { return this._mergeParquetThreshold; }
+  /** Configured JSONL file merge threshold for this store. */
+  get mergeJsonlThreshold(): number { return this._mergeJsonlThreshold; }
+  /** Number of Parquet row groups from the last compaction, or null if no compaction has run. */
+  get parquetRowGroups(): number | null { return this.compactionMeta?.rowGroups ?? null; }
+  /** LRU cache stats (hits, misses, hit rate, size, evictions). */
+  getCacheStats() { return this.cache.stats(); }
+
   /** Check if a field should use in-memory index (low cardinality) or Parquet scan (high cardinality). */
   shouldUseInMemoryIndex(field: string): boolean {
     // No compaction data yet (first session) — default to in-memory
@@ -97,12 +127,24 @@ export class DiskStore {
     const cardinality = this.compactionMeta.columnCardinality[field];
     // Field not in extracted columns — default to Parquet scan (unknown = assume high)
     if (cardinality === undefined) return false;
-    return cardinality <= DiskStore.MAX_INDEX_CARDINALITY;
+    if (cardinality <= this.maxIndexCardinality) return true;
+    if (!this._warnedCardinalityFields.has(field)) {
+      this._warnedCardinalityFields.add(field);
+      console.warn(
+        `agentdb [${this._collectionName}]: B-tree index on field "${field}" skipped — cardinality ${cardinality} exceeds maxIndexCardinality=${this.maxIndexCardinality}. Queries on this field will full-scan. Raise CollectionOptions.maxIndexCardinality to index high-cardinality fields.`,
+      );
+    }
+    return false;
   }
 
   /** Whether there are unsaved writes since last compaction. */
   get isDirty(): boolean {
     return this._dirty;
+  }
+
+  /** Parallel batch size used for JSONL record reads. */
+  get jsonlConcurrency(): number {
+    return this.diskConcurrency;
   }
 
   /** Number of records in the offset index. */
@@ -170,7 +212,7 @@ export class DiskStore {
         .map((id) => ({ id, entry: this.recordOffsetIndex.get(id)! }))
         .filter((e) => e.entry);
       if (entries.length > 0) {
-        const fromJsonl = await readRecordsByOffsets(this.backend, this.compactionMeta.jsonlFile, entries);
+        const fromJsonl = await readRecordsByOffsets(this.backend, this.compactionMeta.jsonlFile, entries, this.diskConcurrency);
         for (const [id, record] of fromJsonl) {
           this.cache.set(id, record);
           results.set(id, record);
@@ -337,7 +379,7 @@ export class DiskStore {
   /** True when accumulated JSONL files exceed the merge threshold. */
   shouldCompact(): boolean {
     const jsonlFileCount = (this.compactionMeta?.jsonlFiles?.length ?? 0) + 1;
-    return jsonlFileCount >= DiskStore.MERGE_JSONL_THRESHOLD;
+    return jsonlFileCount >= this._mergeJsonlThreshold;
   }
 
   /**
@@ -364,7 +406,7 @@ export class DiskStore {
   ): Promise<void> {
     const parquetFileCount = (this.compactionMeta?.parquetFiles?.length ?? 0) + 1;
     const jsonlFileCount = (this.compactionMeta?.jsonlFiles?.length ?? 0) + 1;
-    const shouldMerge = !this.compactionMeta || parquetFileCount >= DiskStore.MERGE_THRESHOLD || jsonlFileCount >= DiskStore.MERGE_JSONL_THRESHOLD || !newRecords;
+    const shouldMerge = !this.compactionMeta || parquetFileCount >= this._mergeParquetThreshold || jsonlFileCount >= this._mergeJsonlThreshold || !newRecords;
 
     if (shouldMerge) {
       await this._compactFull(allRecords);

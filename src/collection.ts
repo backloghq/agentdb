@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rm, mkdir } from "node:fs/promises";
+import { rm, mkdir, rename as fsRename, access } from "node:fs/promises";
 import { join as pathJoin } from "node:path";
 import { Store, FsBackend } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
@@ -11,7 +11,7 @@ import { rrf } from "./rrf.js";
 import { ViewManager } from "./view.js";
 import type { ViewDefinition } from "./view.js";
 import { EventEmitter } from "node:events";
-import { HnswIndex } from "./hnsw.js";
+import { HnswIndex, type HnswOptions } from "./hnsw.js";
 import { IndexManager } from "./collection-indexes.js";
 import type { EmbeddingProvider } from "./embeddings/types.js";
 import { quantize, serializeQuantized, deserializeQuantized } from "./embeddings/quantize.js";
@@ -23,11 +23,13 @@ import {
   META_AGENT, META_REASON, META_EXPIRES, META_EMBEDDING, META_VERSION,
   resolveFilter, stripMeta, isExpired, summarize, estimateTokens,
   applyUpdate, extractTextFromRecord, summarizeValue,
+  makeFilterCache, FILTER_CACHE_MAX,
+  type FilterCacheHandle,
 } from "./collection-helpers.js";
 
 // Re-export types and helpers that external consumers depend on
 export type { StoredRecord, Filter, UpdateOps } from "./collection-helpers.js";
-export type { ComputedFn, VirtualFilterFn } from "./collection-helpers.js";
+export type { ComputedFn, VirtualFilterFn, FilterCacheHandle } from "./collection-helpers.js";
 
 /** Options for mutation operations. */
 export interface MutationOpts {
@@ -55,6 +57,8 @@ export interface FindOpts {
   maxTokens?: number;
   /** Sort by field. Prefix with "-" for descending. E.g. "name" or "-score". */
   sort?: string;
+  /** Cancellation signal. When aborted, returns a partial result with `aborted: true` and an empty or partial records array. Works in both memory and disk storage modes. */
+  signal?: AbortSignal;
 }
 
 /** Result of a find query. */
@@ -62,9 +66,24 @@ export interface FindResult {
   records: Record<string, unknown>[];
   total: number;
   truncated: boolean;
+  /** True when a find() was cut short by an AbortSignal rather than by a hard limit or token budget. */
+  aborted?: boolean;
   /** Approximate token count of the returned records (4 chars/token heuristic). */
   estimatedTokens?: number;
 }
+
+/** Progress event emitted during long-running operations. */
+export interface ProgressEvent {
+  /** Records processed so far in the current phase. */
+  completed: number;
+  /** Total records in this phase, or `null` when total is not yet known (e.g. disk streaming). */
+  total: number | null;
+  /** Current operation phase. */
+  phase: "wal" | "disk" | "indexing" | "importing" | "rebuilding";
+}
+
+/** Callback invoked periodically during long-running operations. */
+export type ProgressCallback = (event: ProgressEvent) => void;
 
 /** Structured result returned by {@link Collection.reembedAll}. */
 export interface ReembedResult {
@@ -74,6 +93,42 @@ export interface ReembedResult {
   failed: number;
   /** Per-batch error details. Empty when `failed === 0`. */
   errors: Array<{ batchIndex: number; recordIds: string[]; reason: string }>;
+  /** True when the operation was cancelled via AbortSignal before completing. */
+  aborted?: boolean;
+}
+
+/** Live performance counters and index sizes for a collection. */
+export interface CollectionMetrics {
+  /** Number of compiled-filter cache misses (full compilations) since collection was opened. */
+  filterCompilations: number;
+  /** Number of compiled-filter cache hits since collection was opened. */
+  filterCacheHits: number;
+  /** Number of times a record was fetched from the disk LRU cache (hits + misses). null when not in disk mode. */
+  recordCacheFetches: number | null;
+  /** Number of disk LRU cache hits since collection was opened. null when not in disk mode. */
+  recordCacheHits: number | null;
+  /** Number of times find() returned a truncated result (maxFindLimit cap reached). */
+  findTruncations: number;
+  /** Number of BM25 segments in the text index. null when text search is not enabled. */
+  bm25SegmentCount: number | null;
+  /** Total indexed documents across all flushed BM25 segments. null when text search is not enabled. */
+  bm25DocCount: number | null;
+  /**
+   * Whether the BM25 text index currently has more than one segment, meaning a merge pass
+   * would reduce them. This reflects termlog's internal LSM compaction state — it is NOT
+   * tied to `mergeParquetThreshold` or `mergeJsonlThreshold`. `true` = multiple segments
+   * exist and compaction would help; `false` = fully merged (single segment); `null` = text
+   * search not enabled for this collection.
+   */
+  bm25NeedsMerge: boolean | null;
+  /** Number of nodes in the HNSW index. null when no embedding provider is configured. */
+  hnswNodeCount: number | null;
+  /** Number of records in the WAL (current session writes). */
+  walRecordCount: number;
+  /** Number of Parquet row groups from last compaction. null when not in disk mode or no compaction yet. */
+  parquetRowGroups: number | null;
+  /** Write mode this collection was opened with ("immediate", "group", or "async"). */
+  writeMode: "immediate" | "group" | "async";
 }
 
 /** Options for configuring collection middleware. */
@@ -96,7 +151,7 @@ export interface CollectionOptions {
   bm25K1?: number;
   /** BM25 b length normalization parameter (default: 0.75). */
   bm25B?: number;
-  /** Max concurrent disk fetches in materializeCandidates for non-FS backends (default: 16). Has no effect on local FS. */
+  /** Max concurrent disk fetches in materializeCandidates for non-FS backends (default: 20). Has no effect on local FS. */
   diskConcurrency?: number;
   /** Number of records per embedding provider call in embedUnembedded (default: 256). */
   embeddingBatchSize?: number;
@@ -104,6 +159,18 @@ export interface CollectionOptions {
   cacheSize?: number;
   /** Parquet row group size for disk mode (default: 5000). Overrides AgentDBOptions.rowGroupSize for this collection. */
   rowGroupSize?: number;
+  /** Maximum records returned by find() (default: 10_000). A console.warn is emitted on truncation. Overrides AgentDBOptions.maxFindLimit for this collection. */
+  maxFindLimit?: number;
+  /** Max unique values a field may have before its disk B-tree index is skipped (default: 1000). A console.warn fires once per field when exceeded. Overrides AgentDBOptions.maxIndexCardinality for this collection. */
+  maxIndexCardinality?: number;
+  /** Per-collection compiled-filter LRU cache size (default: 64). Raise for collections with many distinct query shapes; lower for memory-constrained collections with few patterns. Overrides AgentDBOptions.filterCacheSize for this collection. */
+  filterCacheSize?: number;
+  /** Number of incremental Parquet files before triggering a full merge (default: 10). Overrides AgentDBOptions.mergeParquetThreshold for this collection. */
+  mergeParquetThreshold?: number;
+  /** Number of incremental JSONL delta files before triggering a full merge (default: 8). Overrides AgentDBOptions.mergeJsonlThreshold for this collection. */
+  mergeJsonlThreshold?: number;
+  /** HNSW index parameters for approximate nearest neighbor search. Overrides AgentDBOptions.hnsw for this collection. */
+  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number };
 }
 
 /** Change event emitted after mutations. */
@@ -145,6 +212,18 @@ export class Collection {
   private _opened = false;
   private opts: CollectionOptions;
   private textIdx: TermLog | null = null;
+  /** During an FS-mode rebuildTextIndex run, this is the new index being built.
+   *  All live writes (insert/update/delete) shadow-write here so concurrent mutations
+   *  are captured. Null when no rebuild is in progress. */
+  private _rebuildingIdx: TermLog | null = null;
+  /** True while any rebuildTextIndex call is in flight (guards against concurrent rebuilds). */
+  private _rebuilding = false;
+  /** AbortController for the in-flight FS-mode rebuild; null otherwise.
+   *  close() uses this to interrupt a running rebuild before closing the store. */
+  private _rebuildAbortCtrl: AbortController | null = null;
+  /** Resolves when the current rebuild finishes (success or error). Used by close() to await
+   *  teardown after signalling _rebuildAbortCtrl. */
+  private _rebuildSettled: Promise<void> | null = null;
   private _dir = "";
   private views = new ViewManager();
   private hnswIdx: HnswIndex | null = null;
@@ -160,6 +239,12 @@ export class Collection {
   private _textIdxLoaded = false;
   // Optional termlog StorageBackend — set to S3Backend when running in S3 mode.
   private _termlogBackend: import("@backloghq/termlog").StorageBackend | undefined = undefined;
+  // Per-collection compiled-filter LRU cache — initialised in constructor.
+  private _filterCache!: FilterCacheHandle;
+  // findTruncations counter — incremented each time find() hits the maxFindLimit cap.
+  private _findTruncations = 0;
+  // Write mode captured from open() options for metrics() reporting.
+  private _writeMode: "immediate" | "group" | "async" = "immediate";
 
   /** Set disk store for disk-backed mode. Called by AgentDB during open. */
   setDiskStore(ds: DiskStore): void { this._diskStore = ds; }
@@ -178,12 +263,10 @@ export class Collection {
     if (this._textIdxLoaded) return;
     await this._diskStore.ensureIndexesLoaded();
     // Replay in-memory (WAL) entries into text index — these may predate this load call
-    if (this.textIdx) {
-      for (const [id, record] of this.store.entries()) {
-        if (!isExpired(record)) {
-          const clean = stripMeta(record);
-          await this.textIdx.add(id, extractTextFromRecord(this.textRecord(clean)));
-        }
+    for (const [id, record] of this.store.entries()) {
+      if (!isExpired(record)) {
+        const clean = stripMeta(record);
+        await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(clean)));
       }
     }
     this._textIdxLoaded = true;
@@ -199,7 +282,7 @@ export class Collection {
       const q = deserializeQuantized(stored);
       const vec = Array.from(q.data).map((v) => v / q.scale);
       if (this.hnswIdx.dims === 0) {
-        this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+        this.hnswIdx = new HnswIndex(this.hnswOpts(vec.length));
       }
       this.hnswIdx.add(id, vec);
     }
@@ -214,6 +297,9 @@ export class Collection {
   /** Get the text index (TermLog handle). */
   getTextIndex(): TermLog | null { return this.textIdx; }
 
+  /** Get the HNSW index (if an embedding provider is configured). */
+  getHnswIndex(): HnswIndex | null { return this.hnswIdx; }
+
   /** Field names restricted to BM25/text indexing. Empty means all-strings fallback. */
   searchableFields(): string[] { return this.opts.searchableFields ?? []; }
 
@@ -223,10 +309,37 @@ export class Collection {
   /** Get the opslog store (for accessing session writes in disk mode). */
   getStore(): Store<StoredRecord> { return this.store; }
 
+  /** Configured filter cache size for this collection (default: 64). */
+  get filterCacheSize(): number { return this.opts.filterCacheSize ?? FILTER_CACHE_MAX; }
+
+  /**
+   * Return live performance counters and index sizes for this collection.
+   * Counters reset when the collection is closed and reopened.
+   */
+  metrics(): CollectionMetrics {
+    const cacheStats = this._diskStore?.getCacheStats() ?? null;
+    const segCount = this.textIdx?.segmentCount() ?? null;
+    return {
+      filterCompilations: this._filterCache.compilations(),
+      filterCacheHits: this._filterCache.hits(),
+      recordCacheFetches: cacheStats !== null ? cacheStats.hits + cacheStats.misses : null,
+      recordCacheHits: cacheStats !== null ? cacheStats.hits : null,
+      findTruncations: this._findTruncations,
+      bm25SegmentCount: segCount,
+      bm25DocCount: this.textIdx?.docCount() ?? null,
+      bm25NeedsMerge: segCount !== null ? segCount > 1 : null,
+      hnswNodeCount: this.hnswIdx?.size ?? null,
+      walRecordCount: this.store.count(),
+      parquetRowGroups: this._diskStore?.parquetRowGroups ?? null,
+      writeMode: this._writeMode,
+    };
+  }
+
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
     this.store = store;
     this.opts = opts ?? {};
+    this._filterCache = makeFilterCache(opts?.filterCacheSize ?? FILTER_CACHE_MAX);
     // TermLog is opened in open() once the directory is known; textIdx stays null until then.
   }
 
@@ -310,50 +423,214 @@ export class Collection {
    *
    * @returns The number of documents indexed during the rebuild.
    */
-  async rebuildTextIndex(): Promise<number> {
+  async rebuildTextIndex(opts?: { onProgress?: ProgressCallback; signal?: AbortSignal }): Promise<number> {
     if (!this._dir) return 0;
-    // Close existing TermLog if open, then wipe and recreate the text directory.
-    if (this.textIdx) await this.textIdx.close();
+    // B: single-flight guard — concurrent callers get a clear error rather than racing into
+    // the same temp directory and rename sequence.
+    if (this._rebuilding) throw new Error("agentdb: rebuildTextIndex already in progress");
+    this._rebuilding = true;
+
+    const onProgress = opts?.onProgress;
+    const signal = opts?.signal;
     const textDir = pathJoin(this._dir, "text");
+
     if (this._termlogBackend) {
-      // S3 mode: delete all blobs under the termlog prefix so TermLog.open starts clean.
-      // Use a 16-parallel batch loop to avoid unbounded fan-out on large indexes.
-      const blobs = await this._termlogBackend.listBlobs("").catch(() => [] as string[]);
-      const CONCURRENCY = 16;
-      for (let i = 0; i < blobs.length; i += CONCURRENCY) {
-        const batch = blobs.slice(i, i + CONCURRENCY);
-        await Promise.all(batch.map((b) => this._termlogBackend!.deleteBlob(b).catch(() => {})));
+      // S3 mode: no atomic rename is possible for blob stores. Use the original
+      // destructive approach (wipe then rebuild). An abort here leaves textIdx=null
+      // and the S3 prefix empty — the caller must retry rebuildTextIndex to restore search.
+      try {
+        if (this.textIdx) await this.textIdx.close();
+        const blobs = await this._termlogBackend.listBlobs("").catch(() => [] as string[]);
+        const CONCURRENCY = 16;
+        for (let i = 0; i < blobs.length; i += CONCURRENCY) {
+          const batch = blobs.slice(i, i + CONCURRENCY);
+          await Promise.all(batch.map((b) => this._termlogBackend!.deleteBlob(b).catch(() => {})));
+        }
+        this.textIdx = await TermLog.open({
+          dir: textDir,
+          backend: this._termlogBackend,
+          k1: this.opts.bm25K1 ?? 1.2,
+          b: this.opts.bm25B ?? 0.75,
+        });
+        let count = 0;
+        const records = this._diskStore
+          ? await (async () => {
+              const out: Array<[string, StoredRecord]> = [];
+              for await (const [id, record] of this._diskStore!.entries()) {
+                out.push([id, record as StoredRecord]);
+              }
+              return out;
+            })()
+          : Array.from(this.store.entries());
+        const total = records.length;
+        for (const [id, record] of records) {
+          if (signal?.aborted) {
+            await this.textIdx.close();
+            this.textIdx = null;
+            console.warn(
+              `agentdb [${this.name}]: rebuildTextIndex aborted in S3 mode — ` +
+              `text index wiped, indexed ${count}/${total}. Call rebuildTextIndex() again to restore search.`,
+            );
+            throw new DOMException("The operation was aborted.", "AbortError");
+          }
+          if (!isExpired(record)) {
+            await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+            count++;
+            try { onProgress?.({ completed: count, total, phase: "rebuilding" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
+          }
+        }
+        await this.textIdx.flush();
+        await this.backend.deleteBlob("indexes/text-index.json").catch(() => {});
+        return count;
+      } finally {
+        this._rebuilding = false;
       }
-    } else {
-      await rm(textDir, { recursive: true, force: true });
-      await mkdir(textDir, { recursive: true });
     }
-    this.textIdx = await TermLog.open({
-      dir: textDir,
-      backend: this._termlogBackend,
+
+    // FS mode: snapshot-then-swap.
+    // Build the new index into text.new/ while the existing text/ (and this.textIdx) remain
+    // untouched and queryable. On abort, discard text.new/ and leave the original intact.
+    // On success: rename text/→text.old/ → rename text.new/→text/ → rm text.old/ (atomic).
+    const textNewDir = pathJoin(this._dir, "text.new");
+    await rm(textNewDir, { recursive: true, force: true }); // clean up any previous stale temp dir
+    await mkdir(textNewDir, { recursive: true });
+    const newIdx = await TermLog.open({
+      dir: textNewDir,
       k1: this.opts.bm25K1 ?? 1.2,
       b: this.opts.bm25B ?? 0.75,
     });
+
+    // C: close() interlock — create an AbortController for this rebuild so close() can
+    // interrupt it. Also create a promise that resolves when the rebuild finishes so
+    // close() can await teardown before proceeding.
+    const rebuildCtrl = new AbortController();
+    this._rebuildAbortCtrl = rebuildCtrl;
+    let settleRebuild!: () => void;
+    this._rebuildSettled = new Promise<void>((res) => { settleRebuild = res; });
+
+    // Shadow-write: all live writes (insert/update/delete) that arrive during the rebuild
+    // window will call textIndexAdd/textIndexRemove, which forward to _rebuildingIdx as well.
+    // This ensures concurrent mutations land in the new index before the swap.
+    this._rebuildingIdx = newIdx;
+
     let count = 0;
-    const records = this._diskStore
-      ? await (async () => {
-          const out: Array<[string, StoredRecord]> = [];
-          for await (const [id, record] of this._diskStore!.entries()) {
-            out.push([id, record as StoredRecord]);
-          }
-          return out;
-        })()
-      : Array.from(this.store.entries());
-    for (const [id, record] of records) {
-      if (!isExpired(record)) {
-        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
-        count++;
+    try {
+      const records = this._diskStore
+        ? await (async () => {
+            const out: Array<[string, StoredRecord]> = [];
+            for await (const [id, record] of this._diskStore!.entries()) {
+              out.push([id, record as StoredRecord]);
+            }
+            return out;
+          })()
+        : Array.from(this.store.entries());
+      const total = records.length;
+
+      for (const [id, record] of records) {
+        // Check both caller signal and the internal close() abort signal.
+        if (signal?.aborted || rebuildCtrl.signal.aborted) {
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
+        if (!isExpired(record)) {
+          await newIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+          count++;
+          try { onProgress?.({ completed: count, total, phase: "rebuilding" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
+        }
       }
+
+      // Post-loop delta reconciliation (in-memory mode only):
+      // opslog's _set() updates the in-memory Map synchronously inside its serialize chain,
+      // before the WAL write resolves. So a concurrent insert's record IS in this.store.entries()
+      // after the first yield point following the store.set() call — even if col.insert() is
+      // still awaiting the WAL flush. We scan for IDs not in the original snapshot and replay
+      // them into newIdx. Shadow-write (_rebuildingIdx) covers cases where textIndexAdd ran
+      // during the loop; this delta scan covers the complement.
+      if (!this._diskStore) {
+        const snapshotIds = new Set(records.map(([id]) => id));
+        for (const [id, record] of this.store.entries()) {
+          if (!snapshotIds.has(id) && !isExpired(record)) {
+            await newIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+            count++;
+          }
+        }
+        for (const [id] of records) {
+          if (!this.store.get(id)) {
+            // Record deleted during rebuild — remove from new index
+            await newIdx.remove(id);
+          }
+        }
+      }
+
+      // Clear shadow before flush+swap. Any writes from this point route to textIdx (old) only
+      // until the swap completes — the window is negligible (close + rename + reopen).
+      this._rebuildingIdx = null;
+      await newIdx.flush();
+
+      // Atomic swap: rename text/→text.old/ → rename text.new/→text/ → rm text.old/.
+      // text/ is absent for at most one rename syscall (vs the previous rm-then-rename which
+      // left it absent across two separate calls). On rollback, text.old/ is renamed back to
+      // text/ so the collection remains queryable. Stale text.old/ from a previous crashed
+      // swap is removed before step 1; open() also does crash-recovery on next startup.
+      // Step 1 is skipped when text/ does not exist (first-time build or text search disabled).
+      if (this.textIdx) await this.textIdx.close();
+      this.textIdx = null;
+      await newIdx.close();
+      const textOldDir = pathJoin(this._dir, "text.old");
+      const hadExistingIndex = await access(textDir).then(() => true, () => false);
+      if (hadExistingIndex) {
+        await rm(textOldDir, { recursive: true, force: true }); // remove any stale backup
+        await fsRename(textDir, textOldDir);                    // step 1: backup old
+      }
+      try {
+        await fsRename(textNewDir, textDir);                    // step 2: promote new
+      } catch (swapErr) {
+        // Rollback: restore old index on disk so the collection remains queryable.
+        if (hadExistingIndex) await fsRename(textOldDir, textDir).catch(() => {});
+        await rm(textNewDir, { recursive: true, force: true }).catch(() => {});
+        // Re-open textIdx from the restored directory so bm25Search works again.
+        // Without this, this.textIdx would remain null after the throw and every
+        // subsequent bm25Search call would fail with "BM25 search not enabled".
+        if (hadExistingIndex) {
+          this.textIdx = await TermLog.open({
+            dir: textDir,
+            k1: this.opts.bm25K1 ?? 1.2,
+            b: this.opts.bm25B ?? 0.75,
+          }).catch((reopenErr: unknown) => {
+            console.error(
+              `agentdb [${this.name}]: rollback reopen failed after rebuildTextIndex swap error — ` +
+              `text index unavailable until next rebuild: ${(reopenErr as Error).message}`,
+            );
+            return null;
+          });
+        }
+        throw swapErr;
+      }
+      if (hadExistingIndex) {
+        await rm(textOldDir, { recursive: true, force: true }); // step 3: drop backup
+      }
+      this.textIdx = await TermLog.open({
+        dir: textDir,
+        k1: this.opts.bm25K1 ?? 1.2,
+        b: this.opts.bm25B ?? 0.75,
+      });
+
+      // Delete any legacy v1.4 blob so subsequent opens don't re-throw LegacyTextIndexError.
+      await this.backend.deleteBlob("indexes/text-index.json").catch(() => {});
+      return count;
+
+    } finally {
+      // A: always clear _rebuildingIdx — guards against dangling shadow-writes if newIdx.add()
+      // or any later step threw an unexpected exception mid-rebuild.
+      this._rebuildingIdx = null;
+      this._rebuilding = false;
+      this._rebuildAbortCtrl = null;
+      this._rebuildSettled = null;
+      settleRebuild(); // unblock any close() waiting for the rebuild to finish
+      // Clean up temp state. rm is a no-op if textNewDir was already renamed (success path).
+      // newIdx.close() is a no-op / suppressed if already closed in the success path.
+      await newIdx.close().catch(() => {});
+      await rm(textNewDir, { recursive: true, force: true }).catch(() => {});
     }
-    await this.textIdx.flush();
-    // Delete any legacy v1.4 blob so subsequent opens don't re-throw LegacyTextIndexError.
-    await this.backend.deleteBlob("indexes/text-index.json").catch(() => {});
-    return count;
   }
 
   /** Rebuild all indexes from current store contents. Delegates to IndexManager. */
@@ -368,12 +645,29 @@ export class Collection {
    */
   private async incrementalIndexUpdate(affectedIds: string[]): Promise<void> {
     const cleanRecords = this.indexes.incrementalUpdate(affectedIds, (id) => this.store.get(id));
-    if (this.textIdx) {
-      for (const [id, clean] of cleanRecords) {
-        if (clean) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(clean)));
-        else await this.textIdx.remove(id);
-      }
+    for (const [id, clean] of cleanRecords) {
+      if (clean) await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(clean)));
+      else await this.textIndexRemove(id);
     }
+  }
+
+  /**
+   * Write text for `id` to the active text index (and the rebuild shadow index when a rebuild
+   * is in progress). All live-write paths must call this rather than `this.textIdx.add` directly
+   * so concurrent inserts/updates are captured in the new index during a rebuildTextIndex run.
+   */
+  private async textIndexAdd(id: string, text: string): Promise<void> {
+    if (this.textIdx) await this.textIdx.add(id, text);
+    if (this._rebuildingIdx) await this._rebuildingIdx.add(id, text);
+  }
+
+  /**
+   * Remove `id` from the active text index (and the rebuild shadow index when a rebuild is in
+   * progress). See `textIndexAdd` for rationale.
+   */
+  private async textIndexRemove(id: string): Promise<void> {
+    if (this.textIdx) await this.textIdx.remove(id);
+    if (this._rebuildingIdx) await this._rebuildingIdx.remove(id);
   }
 
   /** Run the validate hook on a clean record (meta stripped). Throws on invalid. */
@@ -436,9 +730,14 @@ export class Collection {
     this.indexes.trackQueryFields(filter);
   }
 
+  /** Build HnswOptions from collection-level hnsw config + the given dimensions. */
+  private hnswOpts(dimensions: number): HnswOptions {
+    return { dimensions, ...this.opts.hnsw };
+  }
+
   /** Resolve a filter with virtual filter support. */
   private resolve(filter: Filter): (record: Record<string, unknown>) => boolean {
-    return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter(), this.opts.tagField);
+    return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter(), this.opts.tagField, this._filterCache.compile);
   }
 
   /** Whether the underlying store is open. */
@@ -449,14 +748,14 @@ export class Collection {
   /** Set the embedding provider for semantic search. Called by AgentDB. */
   setEmbeddingProvider(provider: EmbeddingProvider): void {
     this.embeddingProvider = provider;
-    this.hnswIdx = new HnswIndex({ dimensions: provider.dimensions });
+    this.hnswIdx = new HnswIndex(this.hnswOpts(provider.dimensions));
   }
 
   /** Lazily initialize HNSW to the real vector size on the first embed call.
    * Needed when the provider has dimensions=0 at construction (e.g. Ollama auto-detect). */
   private ensureHnswDims(vec: number[]): void {
     if (this.hnswIdx && this.hnswIdx.dims === 0) {
-      this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+      this.hnswIdx = new HnswIndex(this.hnswOpts(vec.length));
     }
   }
 
@@ -465,6 +764,7 @@ export class Collection {
     await this.store.open(dir, options);
     this._opened = true;
     this._dir = dir;
+    if (options?.writeMode) this._writeMode = options.writeMode;
     if (options?.backend) {
       this.backend = options.backend;
     } else {
@@ -515,7 +815,24 @@ export class Collection {
     let termlogAlreadyIndexed = false;
     if (this.opts.textSearch) {
       const textDir = pathJoin(dir, "text");
-      if (!this._termlogBackend) await mkdir(textDir, { recursive: true });
+      if (!this._termlogBackend) {
+        // Crash recovery for an interrupted atomic swap in rebuildTextIndex:
+        //   After step 1 (rename text/→text.old/), before step 2 (rename text.new/→text/):
+        //     text.old/ exists, text/ absent → restore text.old/→text/.
+        //   After step 2, before step 3 (rm text.old/):
+        //     text.old/ exists, text/ present → delete stale backup.
+        const textOldDir = pathJoin(dir, "text.old");
+        const oldExists = await access(textOldDir).then(() => true, () => false);
+        if (oldExists) {
+          const canonExists = await access(textDir).then(() => true, () => false);
+          if (canonExists) {
+            await rm(textOldDir, { recursive: true, force: true });
+          } else {
+            await fsRename(textOldDir, textDir);
+          }
+        }
+        await mkdir(textDir, { recursive: true });
+      }
       this.textIdx = await TermLog.open({
         dir: textDir,
         backend: this._termlogBackend,
@@ -528,8 +845,8 @@ export class Collection {
     // Single pass: detect TTL, build text index, load HNSW embeddings
     for (const [id, record] of this.store.entries()) {
       if (record[META_EXPIRES]) this._hasTTL = true;
-      if (this.textIdx && !termlogAlreadyIndexed && !isExpired(record)) {
-        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+      if (!termlogAlreadyIndexed && !isExpired(record)) {
+        await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
       }
       if (!isExpired(record)) {
         const stored = record[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
@@ -537,7 +854,7 @@ export class Collection {
           const q = deserializeQuantized(stored);
           const vec = Array.from(q.data).map((v) => v / q.scale);
           if (!this.hnswIdx || this.hnswIdx.dims === 0) {
-            this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+            this.hnswIdx = new HnswIndex(this.hnswOpts(vec.length));
           }
           this.hnswIdx.add(id, vec);
         }
@@ -546,8 +863,17 @@ export class Collection {
     if (this.textIdx) await this.textIdx.flush();
   }
 
-  /** Close the underlying store. */
+  /** Close the underlying store. Idempotent — calling twice is a no-op. */
   async close(): Promise<void> {
+    if (!this._opened) return;
+    // C: interlock with an in-flight FS-mode rebuild. Capture the settled promise BEFORE
+    // aborting (the finally block clears _rebuildSettled before resolving it, so we must
+    // hold a local reference). Abort causes the rebuild loop to throw AbortError; the
+    // finally block resolves settleRebuild, unblocking the await below.
+    const waitForRebuild = this._rebuildSettled;
+    if (this._rebuildAbortCtrl) this._rebuildAbortCtrl.abort();
+    if (waitForRebuild) await waitForRebuild;
+
     if (this.textIdx) {
       await this.textIdx.close();
       this.textIdx = null;
@@ -570,7 +896,7 @@ export class Collection {
     this.stampVersion(stored, id);
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
-    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
+    await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("insert", [id], opts?.agent);
     return id;
@@ -599,10 +925,8 @@ export class Collection {
         this.store.set(id, stored);
       }
     });
-    if (this.textIdx) {
-      for (const { id, stored } of prepared) {
-        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
-      }
+    for (const { id, stored } of prepared) {
+      await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     }
     for (const { id, stored } of prepared) {
       this.updateBTreeIndexes(id, undefined, stored);
@@ -697,11 +1021,18 @@ export class Collection {
   }
 
   async find(opts?: FindOpts): Promise<FindResult> {
-    const MAX_LIMIT = 10000;
-    const limit = Math.min(opts?.limit ?? 50, MAX_LIMIT);
+    const MAX_LIMIT = this.opts.maxFindLimit ?? 10_000;
+    const requestedLimit = opts?.limit ?? 50;
+    const limit = Math.min(requestedLimit, MAX_LIMIT);
     const offset = opts?.offset ?? 0;
     const useSummary = opts?.summary ?? false;
     const maxTokens = opts?.maxTokens;
+    const signal = opts?.signal;
+
+    // Pre-abort: signal was already cancelled before find() was called — skip all work.
+    if (signal?.aborted) {
+      return { records: [], total: 0, truncated: false, aborted: true };
+    }
 
     // Extract $text from filter for combined text + attribute search
     let textQuery: string | undefined;
@@ -732,6 +1063,7 @@ export class Collection {
 
     const candidateIds = this.indexedCandidates(attrFilter);
     let records: StoredRecord[];
+    let abortedEarly = false;
 
     if (this._diskStore?.hasParquetData) {
       // Disk mode with Parquet: merge DiskStore (Parquet) + Map (session writes)
@@ -762,6 +1094,7 @@ export class Collection {
       if (candidateSource) {
         const BATCH = Math.max(needed * 2, 50); // fetch 2x needed or at least 50
         for (let i = 0; i < candidateSource.length && records.length < needed; i += BATCH) {
+          if (signal?.aborted) { abortedEarly = true; break; }
           const batch = candidateSource.slice(i, i + BATCH);
           const fetched = await this._diskStore.getMany(batch);
           for (const [, r] of fetched) {
@@ -777,6 +1110,7 @@ export class Collection {
           console.warn(`agentdb: full scan on disk-backed collection '${this.name}' (${this._diskStore.recordCount} records). Consider creating an index.`);
         }
         for await (const [id, record] of this._diskStore.entries()) {
+          if (signal?.aborted) { abortedEarly = true; break; }
           if (seen.has(id)) continue;
           const r = record as StoredRecord;
           if (!isExpired(r) && predicate(r)) {
@@ -869,10 +1203,20 @@ export class Collection {
       mapped.push(result);
     }
 
+    const truncated = total > offset + limit || tokenTruncated || abortedEarly;
+    // Only count and warn for the maxFindLimit cap — not for token budget or abort truncations.
+    const capCaused = (total > offset + limit) && requestedLimit > limit && !tokenTruncated && !abortedEarly;
+    if (capCaused) {
+      this._findTruncations++;
+      console.warn(
+        `agentdb [${this.name}]: find() truncated at maxFindLimit=${MAX_LIMIT} — set CollectionOptions.maxFindLimit to raise or lower this cap`,
+      );
+    }
     return {
       records: mapped,
       total,
-      truncated: total > offset + limit || tokenTruncated,
+      truncated,
+      ...(abortedEarly ? { aborted: true } : {}),
       estimatedTokens: maxTokens ? tokenCount : undefined,
     };
   }
@@ -1025,10 +1369,8 @@ export class Collection {
       }
     });
     // Incremental re-index for text and B-tree (only affected records)
-    if (this.textIdx) {
-      for (const { id, updated } of updates) {
-        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(updated))));
-      }
+    for (const { id, updated } of updates) {
+      await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(updated))));
     }
     for (const { id, old, updated } of updates) {
       this.updateBTreeIndexes(id, old, updated);
@@ -1047,7 +1389,7 @@ export class Collection {
     const record = this.store.get(id);
     if (!record || isExpired(record)) return false;
     this.store.delete(id);
-    if (this.textIdx) await this.textIdx.remove(id);
+    await this.textIndexRemove(id);
     this.updateBTreeIndexes(id, record, undefined);
     if (record._blobs) this.deleteBlobsForRecord(id).catch(() => {});
     this.emitChange("delete", [id], opts?.agent);
@@ -1074,7 +1416,7 @@ export class Collection {
     this.validateRecord(stored);
     this.stampVersion(stored, id);
     await this.store.set(id, stored);
-    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
+    await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("upsert", [id], opts?.agent);
     return { id, action: existing ? "updated" : "inserted" };
@@ -1112,7 +1454,7 @@ export class Collection {
     });
 
     for (const { id, stored, oldRecord, existing } of prepared) {
-      if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
+      await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
       this.updateBTreeIndexes(id, oldRecord, stored);
       results.push({ id, action: existing ? "updated" : "inserted" });
     }
@@ -1161,9 +1503,7 @@ export class Collection {
         this.store.delete(id);
       }
     });
-    if (this.textIdx) {
-      for (const id of toDelete) await this.textIdx.remove(id);
-    }
+    for (const id of toDelete) await this.textIndexRemove(id);
     for (const { id, record } of oldRecords) {
       if (record) this.updateBTreeIndexes(id, record, undefined);
       if (record?._blobs) this.deleteBlobsForRecord(id).catch(() => {});
@@ -1290,7 +1630,7 @@ export class Collection {
       }
     });
     for (const { id, record } of expired) {
-      if (this.textIdx) await this.textIdx.remove(id);
+      await this.textIndexRemove(id);
       this.updateBTreeIndexes(id, record, undefined);
     }
     const ids = expired.map((e) => e.id);
@@ -1411,7 +1751,7 @@ export class Collection {
           candidates.map(async (c) => ((await ds.get(c.id)) ?? walFallback(c.id)) as StoredRecord | undefined),
         );
       } else {
-        const cap = this.opts.diskConcurrency ?? 16;
+        const cap = this.opts.diskConcurrency ?? 20;
         hydrated = new Array(candidates.length);
         let next = 0;
         const workers = Array.from({ length: Math.min(cap, candidates.length) }, async () => {
@@ -1759,14 +2099,16 @@ export class Collection {
    * Per-batch provider failures are recorded in the returned {@link ReembedResult} rather than
    * thrown, so the caller can distinguish partial success from total failure.
    */
-  async reembedAll(): Promise<ReembedResult> {
+  async reembedAll(opts?: { onProgress?: ProgressCallback; signal?: AbortSignal }): Promise<ReembedResult> {
     if (!this.embeddingProvider || !this.hnswIdx) {
       throw new Error("reembedAll requires an embedding provider to be configured");
     }
 
     const batchSize = this.opts.embeddingBatchSize ?? 256;
+    const onProgress = opts?.onProgress;
+    const signal = opts?.signal;
     // Reset HNSW so stale vectors don't persist
-    this.hnswIdx = new HnswIndex({ dimensions: this.embeddingProvider.dimensions });
+    this.hnswIdx = new HnswIndex(this.hnswOpts(this.embeddingProvider.dimensions));
     let embedded = 0;
     let failed = 0;
     const errors: ReembedResult["errors"] = [];
@@ -1781,8 +2123,10 @@ export class Collection {
       const text = extractTextFromRecord(clean);
       if (text) walToEmbed.push({ id, text, record });
     }
+    const walTotal = walToEmbed.length;
 
     for (let i = 0; i < walToEmbed.length; i += batchSize) {
+      if (signal?.aborted) { console.warn(`agentdb [${this.name}]: reembedAll aborted — embedded=${embedded}, failed=${failed}`); return { embedded, failed, errors, aborted: true }; }
       const batch = walToEmbed.slice(i, i + batchSize);
       const batchIndex = Math.floor(i / batchSize);
       let vectors: number[][];
@@ -1793,6 +2137,7 @@ export class Collection {
         console.warn(`agentdb: reembedAll WAL batch ${batchIndex} failed: ${reason}`);
         errors.push({ batchIndex, recordIds: batch.map((b) => b.id), reason });
         failed += batch.length;
+        try { onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
         continue;
       }
       await this.store.batch(() => {
@@ -1808,6 +2153,7 @@ export class Collection {
         this.hnswIdx!.add(batch[j].id, vectors[j]);
       }
       embedded += batch.length;
+      try { onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
     }
 
     // --- Disk records (compacted Parquet/JSONL) ---
@@ -1815,8 +2161,9 @@ export class Collection {
       let diskBatchIndex = Math.ceil(walToEmbed.length / batchSize);
       const diskBatch: { id: string; text: string; record: StoredRecord }[] = [];
 
-      const flushDiskBatch = async (): Promise<void> => {
-        if (diskBatch.length === 0) return;
+      const flushDiskBatch = async (): Promise<boolean> => {
+        if (diskBatch.length === 0) return false;
+        if (signal?.aborted) return true; // signal abort before embedding
         let vectors: number[][];
         try {
           vectors = await this.embeddingProvider!.embed(diskBatch.map((b) => b.text));
@@ -1827,7 +2174,8 @@ export class Collection {
           failed += diskBatch.length;
           diskBatch.length = 0;
           diskBatchIndex++;
-          return;
+          try { onProgress?.({ completed: embedded + failed, total: null, phase: "disk" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
+          return false;
         }
         const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
           const q = quantize(vectors[j]);
@@ -1846,11 +2194,14 @@ export class Collection {
         embedded += diskBatch.length;
         diskBatch.length = 0;
         diskBatchIndex++;
+        try { onProgress?.({ completed: embedded + failed, total: null, phase: "disk" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
+        return false;
       };
 
       // Single pass: process every non-expired disk record (skip WAL-shadowed ids)
       const diskSeen = new Set<string>();
       for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+        if (signal?.aborted) break;
         if (walSeen.has(id) || diskSeen.has(id)) continue;
         diskSeen.add(id);
         if (isExpired(record as StoredRecord)) continue;
@@ -1858,9 +2209,13 @@ export class Collection {
         const text = extractTextFromRecord(clean);
         if (!text) continue;
         diskBatch.push({ id, text, record: record as StoredRecord });
-        if (diskBatch.length >= batchSize) await flushDiskBatch();
+        if (diskBatch.length >= batchSize) {
+          const aborted = await flushDiskBatch();
+          if (aborted) { console.warn(`agentdb [${this.name}]: reembedAll aborted — embedded=${embedded}, failed=${failed}`); return { embedded, failed, errors, aborted: true }; }
+        }
       }
-      await flushDiskBatch();
+      const aborted = await flushDiskBatch();
+      if (aborted || signal?.aborted) { console.warn(`agentdb [${this.name}]: reembedAll aborted — embedded=${embedded}, failed=${failed}`); return { embedded, failed, errors, aborted: true }; }
     }
 
     return { embedded, failed, errors };
@@ -1878,7 +2233,7 @@ export class Collection {
     }
     // Initialize HNSW if needed, or reinitialize if dimensions were unknown (0)
     if (!this.hnswIdx || this.hnswIdx.dims === 0) {
-      this.hnswIdx = new HnswIndex({ dimensions: vector.length });
+      this.hnswIdx = new HnswIndex(this.hnswOpts(vector.length));
     }
     // Validate dimensions
     if (vector.length !== this.hnswIdx.dims) {
@@ -1892,7 +2247,7 @@ export class Collection {
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
     this.updateBTreeIndexes(id, oldRecord, stored);
-    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
+    await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     // Update HNSW (remove old if exists, add new)
     if (this.hnswIdx.size > 0) {
       try { this.hnswIdx.remove(id); } catch { /* not in index yet */ }

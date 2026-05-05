@@ -333,3 +333,72 @@ describe("GET /audit (HTTP)", () => {
     }, 15000);
   });
 });
+
+describe("AuditLogger configurable ring buffer and query limits", () => {
+  describe("unit: ring buffer eviction", () => {
+    it("caps recent() at maxEntries, dropping oldest on overflow", () => {
+      const log = new AuditLogger(50);
+      for (let i = 0; i < 60; i++) {
+        log.log({ timestamp: new Date().toISOString(), method: "GET", agentId: `a${i}` });
+      }
+      const entries = log.recent(200);
+      expect(entries.length).toBe(50);
+      // Ring wraps: oldest visible entry should be seq 11 (entries 0-9 dropped)
+      // Check that the most recent is the last logged
+      expect(entries[entries.length - 1].agentId).toBe("a59");
+    });
+
+    it("query() returns at most maxEntries items", () => {
+      const log = new AuditLogger(50);
+      for (let i = 0; i < 60; i++) {
+        log.log({ timestamp: new Date().toISOString(), method: "GET" });
+      }
+      const res = log.query({ limit: 1000 });
+      expect(res.entries.length).toBeLessThanOrEqual(50);
+    });
+  });
+
+  describe("unit: configurable query limits", () => {
+    it("query({ limit: 100 }) is capped at auditMaxLimit=5", () => {
+      const log = new AuditLogger(1000, 5, 2);
+      for (let i = 0; i < 20; i++) {
+        log.log({ timestamp: new Date().toISOString(), method: "GET" });
+      }
+      const res = log.query({ limit: 100 });
+      expect(res.entries.length).toBeLessThanOrEqual(5);
+    });
+
+    it("query({}) uses auditDefaultLimit=2", () => {
+      const log = new AuditLogger(1000, 5, 2);
+      for (let i = 0; i < 20; i++) {
+        log.log({ timestamp: new Date().toISOString(), method: "GET" });
+      }
+      const res = log.query({});
+      expect(res.entries.length).toBeLessThanOrEqual(2);
+    });
+  });
+
+  describe("integration: auditBufferSize and auditMaxLimit via startHttp", () => {
+    it("GET /audit?limit=100 returns at most auditMaxLimit=5 entries", async () => {
+      const tmpDir2 = await mkdtemp(join(tmpdir(), "agentdb-audit-cfg-"));
+      const result = await startHttp(tmpDir2, {
+        port: 0,
+        auditBufferSize: 50,
+        auditMaxLimit: 5,
+        authToken: "tok",
+      });
+      try {
+        // Log some entries via the auditLog instance directly
+        for (let i = 0; i < 20; i++) {
+          result.auditLog.log({ timestamp: new Date().toISOString(), method: "tools/call" });
+        }
+        const res = await fetchAudit(result.port, "?limit=100", { Authorization: "Bearer tok" });
+        expect(res.status).toBe(200);
+        expect((res.body as AuditWire).entries.length).toBeLessThanOrEqual(5);
+      } finally {
+        await result.close();
+        await rm(tmpDir2, { recursive: true, force: true });
+      }
+    }, 15000);
+  });
+});

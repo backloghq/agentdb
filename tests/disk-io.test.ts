@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -403,6 +403,46 @@ describe("Parquet compaction and reader", () => {
       }).rejects.toThrow(SyntaxError);
     });
 
+    it("readRecordsByOffsets respects concurrency=5 (6 Promise.all calls for 30 records)", async () => {
+      const { writeRecordStore, readRecordsByOffsets } = await import("../src/disk-io.js");
+      const N = 30;
+      const records: Array<[string, Record<string, unknown>]> = Array.from({ length: N }, (_, i) => [
+        `rc5-${i}`, { _id: `rc5-${i}`, value: i },
+      ]);
+      const { path, offsetIndex } = await writeRecordStore(backend, records);
+      const entries = Array.from(offsetIndex.entries()).map(([id, entry]) => ({ id, entry }));
+
+      const spy = vi.spyOn(Promise, "all");
+      try {
+        const result = await readRecordsByOffsets(backend, path, entries, 5);
+        expect(result.size).toBe(N);
+        // 30 records ÷ concurrency 5 = exactly 6 batches → 6 Promise.all calls
+        expect(spy).toHaveBeenCalledTimes(6);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("readRecordsByOffsets defaults to concurrency=20 (2 Promise.all calls for 30 records)", async () => {
+      const { writeRecordStore, readRecordsByOffsets } = await import("../src/disk-io.js");
+      const N = 30;
+      const records: Array<[string, Record<string, unknown>]> = Array.from({ length: N }, (_, i) => [
+        `rc20-${i}`, { _id: `rc20-${i}`, value: i },
+      ]);
+      const { path, offsetIndex } = await writeRecordStore(backend, records);
+      const entries = Array.from(offsetIndex.entries()).map(([id, entry]) => ({ id, entry }));
+
+      const spy = vi.spyOn(Promise, "all");
+      try {
+        const result = await readRecordsByOffsets(backend, path, entries);
+        expect(result.size).toBe(N);
+        // 30 records ÷ default concurrency 20 = 2 batches (ceil) → 2 Promise.all calls
+        expect(spy).toHaveBeenCalledTimes(2);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it("streaming uses less peak heap than readAllFromJsonl for large JSONL", async () => {
       const { writeRecordStore, readJsonlStream, readAllFromJsonl } = await import("../src/disk-io.js");
 
@@ -439,6 +479,94 @@ describe("Parquet compaction and reader", () => {
       if (global.gc) {
         expect(streamDelta).toBeLessThan(mapDelta * 3);
       }
+    });
+  });
+
+  describe("DiskStore.jsonlConcurrency", () => {
+    it("defaults to 20 when diskConcurrency is not set", async () => {
+      const { DiskStore } = await import("../src/disk-store.js");
+      const store = new DiskStore(backend);
+      expect(store.jsonlConcurrency).toBe(20);
+    });
+
+    it("reflects custom diskConcurrency option", async () => {
+      const { DiskStore } = await import("../src/disk-store.js");
+      const store = new DiskStore(backend, { diskConcurrency: 5 });
+      expect(store.jsonlConcurrency).toBe(5);
+    });
+  });
+
+  describe("DiskStore compaction thresholds", () => {
+    it("mergeParquetThreshold and mergeJsonlThreshold getters reflect defaults", async () => {
+      const { DiskStore } = await import("../src/disk-store.js");
+      const store = new DiskStore(backend);
+      expect(store.mergeParquetThreshold).toBe(10);
+      expect(store.mergeJsonlThreshold).toBe(8);
+    });
+
+    it("mergeParquetThreshold and mergeJsonlThreshold getters reflect custom values", async () => {
+      const { DiskStore } = await import("../src/disk-store.js");
+      const store = new DiskStore(backend, { mergeParquetThreshold: 3, mergeJsonlThreshold: 2 });
+      expect(store.mergeParquetThreshold).toBe(3);
+      expect(store.mergeJsonlThreshold).toBe(2);
+    });
+
+    it("shouldCompact() returns true with mergeJsonlThreshold:3 after 3 appendEmbeddings", async () => {
+      const { DiskStore } = await import("../src/disk-store.js");
+      const store = new DiskStore(backend, { mergeJsonlThreshold: 3 });
+
+      // Bootstrap: full compact to initialize compactionMeta
+      const base: Array<[string, Record<string, unknown>]> = [
+        ["r-0", { _id: "r-0", v: 0 }],
+        ["r-1", { _id: "r-1", v: 1 }],
+      ];
+      await store.compact(base[Symbol.iterator]());
+      expect(store.shouldCompact()).toBe(false); // 0 jsonlFiles → fileCount=1 < 3
+
+      // appendEmbeddings 3 times — each adds one entry to jsonlFiles
+      await store.appendEmbeddings([["r-0", { _id: "r-0", _embedding: [1] }]]);
+      await store.appendEmbeddings([["r-1", { _id: "r-1", _embedding: [2] }]]);
+      await store.appendEmbeddings([["r-0", { _id: "r-0", _embedding: [3] }]]);
+      // jsonlFiles.length=3 → fileCount=3+1=4 >= 3
+      expect(store.shouldCompact()).toBe(true);
+    });
+
+    it("shouldCompact() returns false with default threshold (8) after 3 appendEmbeddings", async () => {
+      const { DiskStore } = await import("../src/disk-store.js");
+      const store = new DiskStore(backend); // default mergeJsonlThreshold=8
+
+      const base: Array<[string, Record<string, unknown>]> = [
+        ["r-0", { _id: "r-0", v: 0 }],
+      ];
+      await store.compact(base[Symbol.iterator]());
+
+      await store.appendEmbeddings([["r-0", { _id: "r-0", _embedding: [1] }]]);
+      await store.appendEmbeddings([["r-0", { _id: "r-0", _embedding: [2] }]]);
+      await store.appendEmbeddings([["r-0", { _id: "r-0", _embedding: [3] }]]);
+      // jsonlFiles.length=3 → fileCount=4 < 8
+      expect(store.shouldCompact()).toBe(false);
+    });
+
+    it("compact() uses mergeParquetThreshold to decide incremental vs full", async () => {
+      const { DiskStore } = await import("../src/disk-store.js");
+      const store = new DiskStore(backend, { mergeParquetThreshold: 2 });
+
+      // Initial full compact
+      const r0: Array<[string, Record<string, unknown>]> = [["r-0", { _id: "r-0", n: 0 }]];
+      await store.compact(r0[Symbol.iterator]());
+
+      // First incremental: parquetFileCount=0+1=1 < 2 → incremental
+      const r1: Array<[string, Record<string, unknown>]> = [["r-1", { _id: "r-1", n: 1 }]];
+      const all1 = [...r0, ...r1];
+      await store.compact(all1[Symbol.iterator](), r1);
+      // After first incremental, parquetFiles has 1 entry
+
+      // Second compact: parquetFileCount=1+1=2 >= 2 → full merge (resets parquetFiles)
+      const r2: Array<[string, Record<string, unknown>]> = [["r-2", { _id: "r-2", n: 2 }]];
+      const all2 = [...all1, ...r2];
+      await store.compact(all2[Symbol.iterator](), r2);
+      // Full merge resets jsonlFiles and parquetFiles to []
+      expect(store.shouldCompact()).toBe(false); // jsonlFiles reset → fileCount=1 < 3 (default 8)
     });
   });
 });

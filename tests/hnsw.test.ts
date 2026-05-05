@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { HnswIndex } from "../src/hnsw.js";
 
 /** Simple seeded PRNG for deterministic tests. */
@@ -209,6 +209,46 @@ describe("HnswIndex", () => {
       const elapsed = performance.now() - start;
 
       expect(elapsed).toBeLessThan(20);
+    });
+  });
+
+  describe("maxLevel option", () => {
+    it("respects explicit maxLevel cap during insertion", () => {
+      seed = 1;
+      const cap = 8;
+      const capped = new HnswIndex({ dimensions: DIM, M: 4, maxLevel: cap });
+      for (let i = 0; i < 500; i++) {
+        capped.add(`v${i}`, randomVector(DIM));
+      }
+      expect(capped.currentMaxLayer).toBeLessThanOrEqual(cap);
+    });
+
+    it("defaults to max(16, floor(log(1e6)/log(M))) when maxLevel is not set", () => {
+      // For M=16: floor(log(1e6)/log(16)) = floor(6/1.204) = floor(4.98) = 4 → max(16, 4) = 16
+      const idx = new HnswIndex({ dimensions: DIM, M: 16 });
+      for (let i = 0; i < 500; i++) {
+        idx.add(`v${i}`, randomVector(DIM));
+      }
+      // maxLayer must be ≤ 16 (default cap for M=16)
+      expect(idx.currentMaxLayer).toBeLessThanOrEqual(16);
+    });
+
+    it("derived cap allows levels above 16 for M=2 (guards against hardcoded-16 regression)", () => {
+      // For M=2: derived cap = max(16, floor(log(1e6)/log(2))) = max(16, 19) = 19
+      // randomLevel() computes: floor(-ln(rand) * mL) where mL = 1/ln(M) = 1/ln(2) ≈ 1.4427
+      // To force level=17: rand ≈ 7e-6 → -ln(7e-6) ≈ 11.87 → 11.87 * 1.4427 ≈ 17.12 → floor=17
+      // min(17, 19) = 17 ✓ (with correct cap). Old hardcoded cap=16 would return 16 instead.
+      const idxM2 = new HnswIndex({ dimensions: DIM, M: 2 });
+      const randSpy = vi.spyOn(Math, "random").mockReturnValueOnce(7e-6);
+      try {
+        idxM2.add("forced", randomVector(DIM));
+        // With correct derived cap of 19, level 17 is permitted
+        expect(idxM2.currentMaxLayer).toBe(17);
+      } finally {
+        randSpy.mockRestore();
+      }
+      // Sanity: cap is 19 (not 16) for M=2
+      expect(idxM2.currentMaxLayer).toBeLessThanOrEqual(19);
     });
   });
 });
