@@ -856,6 +856,164 @@ col.find({ filter: { status: "active" }, summary: true });
 
 **Default recommendation:** Use `memory` for small datasets, `disk` or `auto` for anything that might grow.
 
+## Configuration
+
+The MCP CLI accepts configuration from three sources. Precedence (highest first):
+
+1. **CLI flags** — passed directly to `npx @backloghq/agentdb`
+2. **Environment variables** — `AGENTDB_*` prefixed vars
+3. **Config file** — `agentdb.config.json` in the working directory, or the path from `--config` / `AGENTDB_CONFIG`
+
+### 1. CLI flags
+
+Every option has a flag. Flags win over env vars and the config file:
+
+```bash
+npx @backloghq/agentdb \
+  --path ./data \
+  --http --port 3000 \
+  --backend s3 --bucket my-bucket \
+  --write-mode group \
+  --embeddings openai \
+  --schemas "schemas/*.json" \
+  --auth-token secret \
+  --tenant-id org-123
+```
+
+Run `npx @backloghq/agentdb --help` for the full flag list.
+
+### 2. Environment variables
+
+All flags have an `AGENTDB_` equivalent. Useful for container deployments and secrets managers:
+
+```bash
+AGENTDB_PATH=./data
+AGENTDB_WRITE_MODE=group
+AGENTDB_BACKEND=s3
+AGENTDB_S3_BUCKET=my-bucket
+AGENTDB_S3_REGION=us-east-1
+AGENTDB_HTTP_AUTH=secret
+AGENTDB_TENANT_ID=org-123
+AGENTDB_EMBEDDINGS_PROVIDER=openai
+AGENTDB_EMBEDDINGS_API_KEY=sk-...
+```
+
+Full reference:
+
+| Variable | Type | Description |
+|---|---|---|
+| `AGENTDB_CONFIG` | string | Path to config file (overrides auto-discovery) |
+| `AGENTDB_PATH` | string | Data directory |
+| `AGENTDB_WRITE_MODE` | `immediate`\|`group`\|`async` | Write durability mode |
+| `AGENTDB_GROUP_COMMIT_SIZE` | number | Batch size for group/async mode |
+| `AGENTDB_GROUP_COMMIT_MS` | number | Max latency (ms) for group commit |
+| `AGENTDB_MAX_FIND_LIMIT` | number | Cap on records returned by `find()` |
+| `AGENTDB_MAX_INDEX_CARDINALITY` | number | B-tree index cardinality threshold |
+| `AGENTDB_CACHE_SIZE` | number | Disk LRU record cache size |
+| `AGENTDB_DISK_CONCURRENCY` | number | Parallel JSONL reads |
+| `AGENTDB_EMBEDDING_BATCH_SIZE` | number | Records per embedding batch |
+| `AGENTDB_FILTER_CACHE_SIZE` | number | Compiled-filter LRU cache size |
+| `AGENTDB_MERGE_PARQUET_THRESHOLD` | number | Parquet file compaction trigger |
+| `AGENTDB_MERGE_JSONL_THRESHOLD` | number | JSONL file compaction trigger |
+| `AGENTDB_MEMORY_BUDGET` | number | Memory budget in bytes (0 = unlimited) |
+| `AGENTDB_ROW_GROUP_SIZE` | number | Parquet row group size |
+| `AGENTDB_HNSW_M` | number | HNSW M parameter |
+| `AGENTDB_HNSW_EF_CONSTRUCTION` | number | HNSW efConstruction |
+| `AGENTDB_HNSW_EF_SEARCH` | number | HNSW efSearch |
+| `AGENTDB_HNSW_MAX_LEVEL` | number | HNSW max level cap |
+| `AGENTDB_EMBEDDINGS_PROVIDER` | string | Embedding provider: `ollama`, `openai`, `voyage`, `cohere`, `gemini`, `http` |
+| `AGENTDB_EMBEDDINGS_API_KEY` | string | API key for the embedding provider |
+| `AGENTDB_EMBEDDINGS_MODEL` | string | Model name |
+| `AGENTDB_EMBEDDINGS_BATCH_LIMIT` | number | Max texts per API call (HTTP provider) |
+| `AGENTDB_BACKEND` | `fs`\|`s3` | Storage backend |
+| `AGENTDB_S3_BUCKET` | string | S3 bucket name |
+| `AGENTDB_S3_REGION` | string | AWS region |
+| `AGENTDB_S3_PREFIX` | string | S3 key prefix |
+| `AGENTDB_AGENT_ID` | string | Agent ID for multi-writer mode |
+| `AGENTDB_TENANT_ID` | string | Tenant binding |
+| `AGENTDB_SCHEMA_PATHS` | comma-list | Schema JSON files to load on startup |
+| `AGENTDB_STORAGE_MODE` | `memory`\|`disk`\|`auto` | Storage mode |
+| `AGENTDB_READ_ONLY` | boolean | Open collections read-only |
+| `AGENTDB_HTTP_PORT` | number | HTTP port |
+| `AGENTDB_HTTP_HOST` | string | HTTP bind address |
+| `AGENTDB_HTTP_AUTH` | string | Bearer token |
+| `AGENTDB_HTTP_MULTI_TOKEN` | JSON array | Multiple bearer tokens (JSON) |
+| `AGENTDB_HTTP_JWT_SECRET` | string | JWT signing secret |
+| `AGENTDB_HTTP_JWT_AUDIENCE` | string | JWT audience |
+| `AGENTDB_HTTP_JWT_ISSUER` | string | JWT issuer |
+| `AGENTDB_HTTP_MAX_SESSIONS` | number | Max concurrent MCP sessions |
+| `AGENTDB_HTTP_SESSION_IDLE_MS` | number | Session idle timeout (ms) |
+| `AGENTDB_HTTP_AUDIT_BUFFER_SIZE` | number | Audit log ring-buffer size |
+| `AGENTDB_HTTP_AUDIT_MAX_LIMIT` | number | Audit query max page size |
+| `AGENTDB_HTTP_AUDIT_DEFAULT_LIMIT` | number | Audit query default page size |
+| `AGENTDB_HTTP_RATE_LIMIT` | number | Max requests/minute per IP |
+| `AGENTDB_HTTP_RATE_LIMIT_WINDOW` | number | Rate limit window (ms) |
+| `AGENTDB_HTTP_CORS` | comma-list | Allowed CORS origins |
+| `AWS_REGION` | string | AWS region fallback (standard SDK var) |
+
+### 3. Config file
+
+`agentdb.config.json` in the working directory is loaded automatically when present. Use `--config <path>` or `AGENTDB_CONFIG=<path>` to point at a different file.
+
+**Note:** if you pass `--config` explicitly and the file does not exist, the CLI exits 1. The auto-discovered `./agentdb.config.json` silently produces an empty config when absent (no error), so you can safely omit it in development.
+
+```json
+{
+  "db": {
+    "path": "./data",
+    "writeMode": "group",
+    "maxFindLimit": 5000,
+    "memoryBudget": 1073741824,
+    "hnsw": { "M": 32, "efSearch": 100 },
+    "embeddings": {
+      "provider": "openai",
+      "model": "text-embedding-3-small"
+    }
+  },
+  "http": {
+    "port": 3000,
+    "host": "0.0.0.0",
+    "auth": "change-me",
+    "maxSessions": 200,
+    "sessionIdleMs": 600000,
+    "cors": ["https://myapp.example.com"]
+  },
+  "collections": {
+    "notes": {
+      "maxFindLimit": 500,
+      "mergeParquetThreshold": 5,
+      "hnsw": { "efSearch": 200 }
+    }
+  }
+}
+```
+
+The `collections` key supports per-collection overrides for most storage and search knobs. Any key omitted falls back to the db-wide value.
+
+### Library API
+
+The config pipeline is also available as a library function. The CLI uses it internally; library users are not affected by any of the above:
+
+```typescript
+import { loadAgentDBConfig, ConfigValidationError } from "@backloghq/agentdb";
+
+try {
+  const config = loadAgentDBConfig({
+    configPath: "./my-config.json", // optional; auto-discovers agentdb.config.json by default
+    requireConfigFile: true,        // error if configPath is missing (default: false)
+    env: process.env,               // injectable for testing
+    cli: { db: { path: "./data" } }, // highest precedence
+  });
+  console.log(config.db?.path);
+} catch (e) {
+  if (e instanceof ConfigValidationError) {
+    console.error(`Config error (${e.source}): ${e.message}`);
+  }
+}
+```
+
+`ConfigValidationError` carries `.source` (`"file"` | `"env"` | `"cli"`), `.path[]` (the field path that failed), and `.message`.
+
 ## Production Tuning
 
 Every configurable knob, its location, default, and the workload signal that should prompt you to change it.
