@@ -775,4 +775,91 @@ describe("Progress callbacks", () => {
       await rm(dir, { recursive: true, force: true });
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // R8/4 — rebuild lifecycle: zombie-write guard, sequential single-flight,
+  //          and close-during-swap coverage note.
+  // ---------------------------------------------------------------------------
+  describe("R8/4 — rebuild lifecycle coverage", () => {
+    it("(a) post-exception zombie-write: _rebuildingIdx cleared in finally; insert and re-rebuild after failed rebuild succeed", async () => {
+      const dir = await makeTmpDir();
+      const N = 8;
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(
+        defineSchema({ name: "zombie-write-col", fields: { title: { type: "string" } }, textSearch: true }),
+      );
+      for (let i = 0; i < N; i++) await col.insert({ title: `item ${i}` });
+
+      // Establish an initial text/ so the second rebuild has hadExistingIndex = true
+      await col.rebuildTextIndex();
+
+      // Arm a one-shot spy: throw on the 5th add() call during the next rebuild loop,
+      // while _rebuildingIdx is still set. The finally block must clear it regardless.
+      const origAdd = TermLog.prototype.add;
+      let addCallCount = 0;
+      const addSpy = vi.spyOn(TermLog.prototype, "add").mockImplementation(
+        async function (this: TermLog, ...args: Parameters<typeof origAdd>) {
+          addCallCount++;
+          if (addCallCount === 5) {
+            // One-shot: restore before throwing so subsequent textIdx.add() calls succeed
+            addSpy.mockRestore();
+            throw new Error("simulated mid-rebuild add failure");
+          }
+          return origAdd.apply(this, args);
+        },
+      );
+
+      // Second rebuild fails mid-loop (5th add throws)
+      await expect(col.rebuildTextIndex()).rejects.toThrow("simulated mid-rebuild add failure");
+
+      // After a failed rebuild the finally block must have cleared _rebuildingIdx.
+      // A subsequent insert must NOT throw (no zombie shadow-write to a closed newIdx).
+      await expect(col.insert({ title: "zombie-proof item" })).resolves.toBeDefined();
+
+      // A third rebuild must succeed and include the newly inserted record
+      const count = await col.rebuildTextIndex();
+      expect(count).toBe(N + 1);
+
+      const results = await col.bm25Search("zombie-proof");
+      expect(results.records.length).toBeGreaterThan(0);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("(b) sequential single-flight: two successive awaited rebuildTextIndex() calls both succeed", async () => {
+      const dir = await makeTmpDir();
+      const N = 12;
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(
+        defineSchema({ name: "seq-single-flight", fields: { title: { type: "string" } }, textSearch: true }),
+      );
+      for (let i = 0; i < N; i++) await col.insert({ title: `entry ${i}` });
+
+      // First rebuild must succeed and index all N records
+      const c1 = await col.rebuildTextIndex();
+      expect(c1).toBe(N);
+
+      // Second rebuild (after first has fully resolved) must also succeed
+      const c2 = await col.rebuildTextIndex();
+      expect(c2).toBe(N);
+
+      // bm25Search must work after the second rebuild
+      const results = await col.bm25Search("entry");
+      expect(results.records.length).toBeGreaterThan(0);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it.skip(
+      "(c) close-during-swap: no phase:'swap' marker exists in ProgressEvent " +
+      "(only 'rebuilding'/'wal'/'disk'/'importing') — cannot reliably inject into the " +
+      "rename dance window without fs/promises instrumentation; " +
+      "this scenario is already covered by rebuild-atomicity.test.ts",
+      () => {},
+    );
+  });
 });

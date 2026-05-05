@@ -157,3 +157,82 @@ describe("R7/3c — vendor key forwarding via stub HTTP endpoint", () => {
     expect(_lastRequest!.authorization).toBe(`Bearer ${envKey}`);
   });
 });
+
+describe("R8/4f — vendor key: request body shape and constructor-key precedence", () => {
+  it("Voyage: embed() sends input:[...] body containing the requested texts", async () => {
+    const provider = new VoyageEmbeddingProvider({
+      apiKey: "voyage-body-test-key-r84-xxxxxxx",
+      baseUrl,
+      dimensions: 4,
+    });
+
+    _lastRequest = null;
+    await provider.embed(["text one", "text two"]);
+
+    expect(_lastRequest).not.toBeNull();
+    const parsed = JSON.parse(_lastRequest!.body) as Record<string, unknown>;
+    expect(parsed.input).toEqual(["text one", "text two"]);
+  });
+
+  it("Cohere: embed() sends texts:[...] body containing the requested texts", async () => {
+    const provider = new CohereEmbeddingProvider({
+      apiKey: "cohere-body-test-key-r84-xxxxxxx",
+      baseUrl,
+      dimensions: 4,
+    });
+
+    _lastRequest = null;
+    await provider.embed(["text one", "text two"]);
+
+    expect(_lastRequest).not.toBeNull();
+    const parsed = JSON.parse(_lastRequest!.body) as Record<string, unknown>;
+    expect(parsed.texts).toEqual(["text one", "text two"]);
+  });
+
+  it("Voyage: constructor apiKey takes precedence over any env fallback", async () => {
+    const canonicalKey = "voyage-canonical-r84-xxxxxxxxxx";
+    const fallbackKey  = "voyage-fallback-r84-yyyyyyyyyyy";
+    // Simulate cli.ts setting the env var while the caller also supplies an explicit key
+    const prev = process.env.VOYAGE_API_KEY;
+    process.env.VOYAGE_API_KEY = fallbackKey;
+    try {
+      const provider = new VoyageEmbeddingProvider({
+        apiKey: canonicalKey, // explicit key — must win over env
+        baseUrl,
+        dimensions: 4,
+      });
+
+      _lastRequest = null;
+      await provider.embed(["precedence test"]);
+
+      expect(_lastRequest!.authorization).toBe(`Bearer ${canonicalKey}`);
+      expect(_lastRequest!.authorization).not.toContain(fallbackKey);
+    } finally {
+      if (prev === undefined) delete process.env.VOYAGE_API_KEY;
+      else process.env.VOYAGE_API_KEY = prev;
+    }
+  });
+
+  it("Cohere: constructor apiKey takes precedence over any env fallback", async () => {
+    const canonicalKey = "cohere-canonical-r84-xxxxxxxxxx";
+    const fallbackKey  = "cohere-fallback-r84-yyyyyyyyyyy";
+    const prev = process.env.COHERE_API_KEY;
+    process.env.COHERE_API_KEY = fallbackKey;
+    try {
+      const provider = new CohereEmbeddingProvider({
+        apiKey: canonicalKey,
+        baseUrl,
+        dimensions: 4,
+      });
+
+      _lastRequest = null;
+      await provider.embed(["precedence test"]);
+
+      expect(_lastRequest!.authorization).toBe(`Bearer ${canonicalKey}`);
+      expect(_lastRequest!.authorization).not.toContain(fallbackKey);
+    } finally {
+      if (prev === undefined) delete process.env.COHERE_API_KEY;
+      else process.env.COHERE_API_KEY = prev;
+    }
+  });
+});

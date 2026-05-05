@@ -1,11 +1,15 @@
 /**
- * R7/3a / R8/3 — Atomic rename failure modes, crash recovery, and rollback warn.
+ * R7/3a / R8/3 / R8/4 — Atomic rename failure modes, crash recovery, and rollback warn.
  *
  * Uses vi.mock on node:fs/promises to inject rename failures, then verifies:
  *   - Rollback path restores text/ from text.old/ and collection remains queryable.
  *   - Crash-recovery branches in open(): text.old/ present → restore or delete.
  *   - R8/3: when rollback reopen ALSO fails, console.error fires with the collection
  *     name and "text index unavailable", while the original swap error still propagates.
+ *   - R8/4d: rollback-of-rollback (step-2 + rollback rename both fail) — console.error
+ *     fires, swap error propagates, text/ is absent.
+ *   - R8/4e: crash recovery B is non-destructive — stale text.old/ cleanup does not
+ *     touch the current text/ index (new-beacon records from second rebuild survive).
  */
 
 import { vi, describe, it, expect, afterEach } from "vitest";
@@ -17,9 +21,12 @@ import { AgentDB } from "../src/agentdb.js";
 import { defineSchema } from "../src/schema.js";
 
 // ---------------------------------------------------------------------------
-// Selective rename mock — only active when _interceptStep2 is true
+// Selective rename mock — only active when the corresponding flag is true
 // ---------------------------------------------------------------------------
 let _interceptStep2 = false;
+/** One-shot: intercepts the rollback rename (text.old/ → text/) to simulate
+ *  a double-failure scenario where both the swap and the rollback fail. */
+let _interceptRollbackRename = false;
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -38,6 +45,20 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         throw Object.assign(
           new Error("ENOTEMPTY: directory not empty"),
           { code: "ENOTEMPTY" },
+        );
+      }
+      // Intercept rollback rename: text.old/ → text/
+      // oldPath ends with "text.old", newPath ends with "text" (not "text.old")
+      if (
+        _interceptRollbackRename &&
+        String(oldPath).endsWith("text.old") &&
+        String(newPath).endsWith(join("", "text")) &&
+        !String(newPath).endsWith("text.old")
+      ) {
+        _interceptRollbackRename = false; // one-shot
+        throw Object.assign(
+          new Error("ENOENT: no such file or directory"),
+          { code: "ENOENT" },
         );
       }
       return actual.rename(oldPath as string, newPath as string);
@@ -69,6 +90,7 @@ describe("Atomic rename failure modes", () => {
 
   afterEach(async () => {
     _interceptStep2 = false;
+    _interceptRollbackRename = false;
     if (dir) await rm(dir, { recursive: true, force: true });
   });
 
@@ -99,6 +121,48 @@ describe("Atomic rename failure modes", () => {
     // bm25Search must still work using the restored original index
     const after = await col.bm25Search("document");
     expect(after.records.length).toBeGreaterThan(0);
+
+    await db.close();
+  });
+
+  it("R8/4d — step-2 and rollback rename both fail → console.error fires, swap error propagates, text/ absent", async () => {
+    dir = await makeTmpDir();
+    const N = 10;
+    const db = new AgentDB(dir);
+    await db.init();
+    const col = await db.collection(textSearchSchema("rollback-of-rollback"));
+    for (let i = 0; i < N; i++) await col.insert({ title: `item ${i}` });
+
+    // Initial rebuild so hadExistingIndex = true (step 1 will run)
+    await col.rebuildTextIndex();
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // Arm both failures: step 2 (text.new→text) and rollback (text.old→text)
+      _interceptStep2 = true;
+      _interceptRollbackRename = true;
+
+      const swapErr = await col.rebuildTextIndex().catch((e: unknown) => e);
+
+      // The original swap error (ENOTEMPTY) must propagate
+      expect(swapErr).toBeInstanceOf(Error);
+      expect((swapErr as Error).message).toContain("ENOTEMPTY");
+
+      // console.error must have fired because TermLog.open(textDir) failed after the
+      // rollback rename also failed — textDir does not exist
+      const errCall = errorSpy.mock.calls.find(
+        (args) => typeof args[0] === "string" && args[0].includes("rollback reopen failed"),
+      );
+      expect(errCall).toBeDefined();
+      expect(errCall![0]).toContain("rollback-of-rollback");
+      expect(errCall![0]).toContain("text index unavailable");
+
+      // text/ must NOT exist — the rollback rename failed, leaving it absent
+      const textDir = join(dir, "collections", "rollback-of-rollback", "text");
+      await expect(access(textDir)).rejects.toThrow();
+    } finally {
+      errorSpy.mockRestore();
+    }
 
     await db.close();
   });
@@ -196,6 +260,53 @@ describe("Crash recovery in open()", () => {
 
     await db.close();
   });
+
+  it("R8/4e — B non-destructive: stale text.old/ cleanup preserves current text/ (second-rebuild content survives)", async () => {
+    dir = await makeTmpDir();
+    const N = 8;
+    const M = 6;
+
+    // Session 1: two successive rebuilds; the second one is the "current" index
+    let db = new AgentDB(dir);
+    await db.init();
+    const schema = textSearchSchema("crash-recovery-b-nd");
+    let col = await db.collection(schema);
+
+    // First wave: old-beacon records + first rebuild
+    for (let i = 0; i < N; i++) await col.insert({ title: `old-beacon ${i}` });
+    await col.rebuildTextIndex();
+
+    // Second wave: new-beacon-unique records + second rebuild (current text/ has N+M entries)
+    for (let i = 0; i < M; i++) await col.insert({ title: `new-beacon-unique ${i}` });
+    await col.rebuildTextIndex();
+
+    const colDir = join(dir, "collections", "crash-recovery-b-nd");
+    const textDir = join(colDir, "text");
+    const textOldDir = join(colDir, "text.old");
+
+    await db.close();
+
+    // Simulate a stale text.old/ left from an earlier crashed swap (empty — not a real index)
+    await mkdir(textOldDir, { recursive: true });
+
+    await expect(access(textDir)).resolves.toBeUndefined();
+    await expect(access(textOldDir)).resolves.toBeUndefined();
+
+    // Session 2: open() removes the stale backup without touching current text/
+    db = new AgentDB(dir);
+    await db.init();
+    col = await db.collection(schema);
+
+    // Stale backup must be gone; current index untouched
+    await expect(access(textOldDir)).rejects.toThrow();
+    await expect(access(textDir)).resolves.toBeUndefined();
+
+    // The second rebuild's content must survive — new-beacon-unique records are searchable
+    const results = await col.bm25Search("new-beacon-unique");
+    expect(results.records.length).toBeGreaterThanOrEqual(M);
+
+    await db.close();
+  });
 });
 
 describe("R8/3 — rollback reopen failure: console.error fires, original error propagates", () => {
@@ -203,6 +314,7 @@ describe("R8/3 — rollback reopen failure: console.error fires, original error 
 
   afterEach(async () => {
     _interceptStep2 = false;
+    _interceptRollbackRename = false;
     if (dir) await rm(dir, { recursive: true, force: true });
   });
 
