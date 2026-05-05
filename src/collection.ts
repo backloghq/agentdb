@@ -499,6 +499,11 @@ export class Collection {
     }
 
     // Open TermLog for text search (if enabled) before WAL replay so adds land in the index.
+    // termlogAlreadyIndexed: true when TermLog reopened from existing segments.
+    // In that case skip the WAL-replay add() loop — segments already have all data.
+    // Re-adding every record doubles totalDocs/totalLen in the BM25 scoring state,
+    // shifting IDF and breaking score determinism across close/reopen.
+    let termlogAlreadyIndexed = false;
     if (this.opts.textSearch) {
       const textDir = pathJoin(dir, "text");
       if (!this._termlogBackend) await mkdir(textDir, { recursive: true });
@@ -508,12 +513,13 @@ export class Collection {
         k1: this.opts.bm25K1 ?? 1.2,
         b: this.opts.bm25B ?? 0.75,
       });
+      termlogAlreadyIndexed = this.textIdx.docCount() > 0;
     }
 
     // Single pass: detect TTL, build text index, load HNSW embeddings
     for (const [id, record] of this.store.entries()) {
       if (record[META_EXPIRES]) this._hasTTL = true;
-      if (this.textIdx && !isExpired(record)) {
+      if (this.textIdx && !termlogAlreadyIndexed && !isExpired(record)) {
         await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
       }
       if (!isExpired(record)) {
