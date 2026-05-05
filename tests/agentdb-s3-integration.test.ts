@@ -174,6 +174,30 @@ describe.skipIf(!integration)("AgentDB S3 + termlog-s3 integration", () => {
     await cleanupPrefix(client, rebuildPrefix);
   }, 90000);
 
+  it("rebuildTextIndex bounded-concurrency wipe completes without error at 200+ blobs", async () => {
+    // Insert enough docs to produce many termlog segment blobs, then rebuild.
+    // Asserts no SDK timeout/error from unbounded Promise.all fan-out.
+    const { S3Backend: OpsS3 } = await import("@backloghq/opslog-s3");
+    const wipePrefix = `${basePrefix}wipe-concurrency/`;
+    const db = new AgentDB(wipePrefix, { backend: new OpsS3({ bucket, prefix: wipePrefix, client }) });
+    await db.init();
+
+    const col = await db.collection(textSchema);
+    for (let i = 0; i < 200; i++) {
+      await col.insert({ _id: `w${i}`, title: `unique${i} term` });
+    }
+    await db.close();
+
+    const db2 = new AgentDB(wipePrefix, { backend: new OpsS3({ bucket, prefix: wipePrefix, client }) });
+    await db2.init();
+    const col2 = await db2.collection(textSchema);
+    // Must complete without throwing; docCount must equal N
+    await expect(col2.rebuildTextIndex()).resolves.toBe(200);
+    await db2.close();
+
+    await cleanupPrefix(client, wipePrefix);
+  }, 120000);
+
   it("S3 mode open with textSearch does not throw LegacyTextIndexError", async () => {
     // v1.4 never wrote indexes/text-index.json to S3, so the legacy check must be skipped.
     // This verifies that a fresh S3 collection opens without false-throwing.
