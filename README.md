@@ -1019,6 +1019,10 @@ try {
 
 `ConfigValidationError` carries `.source` (`"file"` | `"env"` | `"cli"`), `.path[]` (the field path that failed), and `.message`.
 
+### Restart required
+
+Configuration is read once at startup. Changing env vars, the config file, or CLI flags takes effect only after restarting the process. There is no hot-reload.
+
 ## Production Tuning
 
 Every configurable knob, its location, default, and the workload signal that should prompt you to change it.
