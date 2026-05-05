@@ -1168,6 +1168,18 @@ try {
 
 Returns `{ rebuiltDocCount: N }`. Requires admin permission.
 
+**What's new in v2.1:**
+- `AgentDB.open(dir, opts)` static factory — async one-call entry point; replaces the `new AgentDB(...); await db.init()` two-step
+- Lazy auto-init — calling `db.collection(...)` without explicit `init()` now Just Works
+- Configuration: optional `agentdb.config.json` + 47 `AGENTDB_*` env vars for the MCP CLI (precedence CLI > env > file > defaults)
+- Per-collection overrides via `collectionOverrides` (db-wide) or the config file's `collections` block
+- Production-readiness knobs: `maxFindLimit`, `maxIndexCardinality`, `mergeParquetThreshold`, `mergeJsonlThreshold`, `filterCacheSize`, HNSW `M`/`efConstruction`/`efSearch`/`maxLevel`, `maxSessions`/`sessionIdleMs`, audit buffer/limits
+- Ergonomics: `onProgress` callbacks for `reembedAll`/`rebuildTextIndex`/`db_import`; `AbortSignal` for `find`, `reembedAll`, `rebuildTextIndex`; `col.metrics()` for cache hit-rate / index usage / BM25 segment count / write mode
+- Auth hardening: JWT secret minimum 32 bytes (HS256 RFC 7518); auth precedence (JWT > multi-token > bearer) with conflict warn
+- `rebuildTextIndex` now uses snapshot-then-swap with concurrent-write capture and crash recovery — runs safely against live collections (FS mode)
+
+See [MIGRATION-2.0.md](./MIGRATION-2.0.md#new-in-v21) for the full v2.1 list and [CHANGELOG.md](./CHANGELOG.md) for the detailed entry.
+
 **What's new in v2.0:**
 - No per-collection document cap (256 MB / ~25–30K doc ceiling is gone)
 - S3-backed text indexes via `@backloghq/termlog-s3` (auto-wired when opslog uses S3)

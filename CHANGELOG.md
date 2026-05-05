@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-05-06
+
 ### Added
 
 - **`AgentDB.open(dir, opts)` static factory (task 300)** — async one-call entry point that constructs and initializes the database. Eliminates the `new AgentDB(...); await db.init()` two-step footgun for new users. `AgentDB.open()` is now the recommended entry point in the README quickstart. Existing `new AgentDB(); await db.init()` code continues to work unchanged.
