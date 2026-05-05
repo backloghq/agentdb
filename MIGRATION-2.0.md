@@ -26,12 +26,10 @@ try {
   col = await db.collection(schema);
 } catch (e) {
   if (e instanceof LegacyTextIndexError) {
-    // Step 1: open without textSearch to get a handle
-    const raw = await db.collection("notes");
-    // Step 2: rebuild (wipes text/, indexes all records, deletes legacy blob)
-    const count = await raw.rebuildTextIndex();
+    // Rebuild: wipes old index, re-indexes all records, deletes legacy blob
+    const count = await db.rebuildTextIndex("notes");
     console.log(`Rebuilt ${count} docs`);
-    // Step 3: reopen with textSearch enabled
+    // Reopen with textSearch enabled
     col = await db.collection(schema);
   } else {
     throw e;

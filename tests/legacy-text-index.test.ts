@@ -195,6 +195,82 @@ describe("rebuildTextIndex — fix path for LegacyTextIndexError", () => {
   });
 });
 
+describe("db.rebuildTextIndex(name) — documented migration flow", () => {
+  let baseDir: string;
+
+  beforeEach(async () => { baseDir = await makeTmpDir(); });
+  afterEach(async () => { await rm(baseDir, { recursive: true, force: true }); });
+
+  it("exact README flow: throw → db.rebuildTextIndex() → reopen → bm25Search works", async () => {
+    // Session 1: create collection with records, no textSearch
+    const plainSchema = defineSchema({ name: "docs", fields: { title: { type: "string" } } });
+    const db0 = new AgentDB(baseDir);
+    await db0.init();
+    const col0 = await db0.collection(plainSchema);
+    await col0.insert({ _id: "r1", title: "golang goroutines concurrency" });
+    await col0.insert({ _id: "r2", title: "golang channels select" });
+    await col0.insert({ _id: "r3", title: "python asyncio" });
+    await db0.close();
+
+    // Plant legacy blob to simulate upgrading from v1.4
+    await writeLegacyBlob(baseDir, "docs");
+
+    // Session 2: the documented migration flow as written in README/MIGRATION-2.0.md
+    const db = new AgentDB(baseDir);
+    await db.init();
+
+    let col;
+    try {
+      col = await db.collection(schema);
+    } catch (e) {
+      if (e instanceof LegacyTextIndexError) {
+        // This is the exact documented recovery — must not re-throw
+        await db.rebuildTextIndex("docs");
+        col = await db.collection(schema);
+      } else {
+        throw e;
+      }
+    }
+
+    // bm25Search must work immediately after recovery
+    const result = await col!.bm25Search("golang");
+    expect(result.records.some((r) => r._id === "r1")).toBe(true);
+    expect(result.records.some((r) => r._id === "r2")).toBe(true);
+    expect(result.records.some((r) => r._id === "r3")).toBe(false);
+
+    await db.close();
+  });
+
+  it("db.rebuildTextIndex returns correct doc count and allows immediate reopen", async () => {
+    const plainSchema = defineSchema({ name: "docs", fields: { title: { type: "string" } } });
+    const db0 = new AgentDB(baseDir);
+    await db0.init();
+    const col0 = await db0.collection(plainSchema);
+    await col0.insert({ _id: "a", title: "alpha beta" });
+    await col0.insert({ _id: "b", title: "gamma delta" });
+    await db0.close();
+
+    await writeLegacyBlob(baseDir, "docs");
+
+    const db = new AgentDB(baseDir);
+    await db.init();
+
+    // Throws on first open
+    await expect(db.collection(schema)).rejects.toBeInstanceOf(LegacyTextIndexError);
+
+    // Rebuild returns correct count
+    const count = await db.rebuildTextIndex("docs");
+    expect(count).toBe(2);
+
+    // Reopen works and legacy blob is gone
+    const col = await db.collection(schema);
+    const result = await col.bm25Search("alpha");
+    expect(result.records.some((r) => r._id === "a")).toBe(true);
+
+    await db.close();
+  });
+});
+
 describe("db_rebuild_text_index tool", () => {
   let baseDir: string;
   let db: AgentDB;

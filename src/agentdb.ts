@@ -753,6 +753,70 @@ export class AgentDB {
 
   // --- Export / Import ---
 
+  /**
+   * Rebuild the BM25 text index for a collection.
+   *
+   * Use this to recover from `LegacyTextIndexError` (v1.4 → v2.0 upgrade):
+   *
+   * ```ts
+   * try {
+   *   await db.collection(schema);
+   * } catch (e) {
+   *   if (e instanceof LegacyTextIndexError) {
+   *     await db.rebuildTextIndex(schema.name);
+   *     await db.collection(schema); // succeeds now
+   *   }
+   * }
+   * ```
+   *
+   * Opens the collection temporarily without `textSearch` to avoid re-throwing
+   * `LegacyTextIndexError`, calls `rebuildTextIndex()`, then evicts so the next
+   * `db.collection()` call opens fresh with the caller's opts.
+   *
+   * @returns The number of documents indexed.
+   */
+  async rebuildTextIndex(name: string): Promise<number> {
+    this.ensureOpen();
+    validateCollectionName(name);
+
+    // Open without textSearch so the legacy-blob check doesn't throw.
+    // Temporarily override cached opts to suppress textSearch for this open.
+    const savedOpts = this.collectionOpts.get(name);
+    const savedSchema = this.schemas.get(name);
+    this.collectionOpts.set(name, { ...savedOpts, textSearch: false });
+    this.schemas.delete(name);
+
+    let col: Collection;
+    try {
+      col = await this.collection(name);
+    } finally {
+      // Restore caller's opts regardless of outcome.
+      if (savedOpts !== undefined) this.collectionOpts.set(name, savedOpts);
+      else this.collectionOpts.delete(name);
+      if (savedSchema !== undefined) this.schemas.set(name, savedSchema);
+    }
+
+    const count = await col.rebuildTextIndex();
+
+    // Evict so the next db.collection() call reopens with the caller's opts (textSearch: true).
+    await this.evictCollection(name);
+
+    return count;
+  }
+
+  /** Close and evict a single open collection (used by rebuildTextIndex). */
+  private async evictCollection(name: string): Promise<void> {
+    const col = this.open.get(name);
+    if (!col) return;
+    const listener = this.collectionListeners.get(name);
+    if (listener) col.off("change", listener);
+    this.collectionListeners.delete(name);
+    this.memoryMonitor.updateEstimate(name, 0, 0);
+    await col.close();
+    this.open.delete(name);
+    this.removeLru(name);
+  }
+
   /** Export all (or named) collections as a self-contained JSON object. */
   async export(collections?: string[]): Promise<ExportData> {
     this.ensureOpen();

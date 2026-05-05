@@ -118,15 +118,15 @@ export interface ChangeEvent {
  * Thrown when a v1.4 text-index.json blob is found on disk without a v2.0
  * termlog manifest. The collection cannot be opened until the index is rebuilt.
  *
- * Resolution: call `collection.rebuildTextIndex()` or the `db_rebuild_text_index`
- * MCP tool, then reopen the collection.
+ * Resolution: call `db.rebuildTextIndex(name)` then reopen, or use the
+ * `db_rebuild_text_index` MCP tool.
  */
 export class LegacyTextIndexError extends Error {
   readonly legacyPath: string;
   constructor(legacyPath: string) {
     super(
       `v1.4 text index detected at ${legacyPath}. v2.0 does not auto-migrate. ` +
-      `To rebuild from records: call \`collection.rebuildTextIndex()\` or ` +
+      `To rebuild: call \`await db.rebuildTextIndex(name)\` or ` +
       `use the \`db_rebuild_text_index\` MCP tool, then reopen.`,
     );
     this.name = "LegacyTextIndexError";
@@ -317,8 +317,13 @@ export class Collection {
     const textDir = pathJoin(this._dir, "text");
     if (this._termlogBackend) {
       // S3 mode: delete all blobs under the termlog prefix so TermLog.open starts clean.
+      // Use a 16-parallel batch loop to avoid unbounded fan-out on large indexes.
       const blobs = await this._termlogBackend.listBlobs("").catch(() => [] as string[]);
-      await Promise.all(blobs.map((b) => this._termlogBackend!.deleteBlob(b).catch(() => {})));
+      const CONCURRENCY = 16;
+      for (let i = 0; i < blobs.length; i += CONCURRENCY) {
+        const batch = blobs.slice(i, i + CONCURRENCY);
+        await Promise.all(batch.map((b) => this._termlogBackend!.deleteBlob(b).catch(() => {})));
+      }
     } else {
       await rm(textDir, { recursive: true, force: true });
       await mkdir(textDir, { recursive: true });
