@@ -9,6 +9,9 @@ export interface OllamaOptions {
   dimensions?: number;
 }
 
+// Ollama API accepts one text per request; batching is sequential by design.
+const BATCH_LIMIT = 1;
+
 /**
  * Ollama embedding provider.
  * Uses the local Ollama API for embeddings (single-text endpoint, batched sequentially).
@@ -28,17 +31,16 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
 
   async embed(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
-
-    const results: number[][] = [];
-    for (const text of texts) {
-      const embedding = await this.embedSingle(text);
+    const all: number[][] = [];
+    for (let i = 0; i < texts.length; i += BATCH_LIMIT) {
+      const embedding = await this.embedSingle(texts[i]);
       if (!this.dimensionsDetected) {
         this.dimensions = embedding.length;
         this.dimensionsDetected = true;
       }
-      results.push(embedding);
+      all.push(embedding);
     }
-    return results;
+    return all;
   }
 
   private async embedSingle(text: string): Promise<number[]> {

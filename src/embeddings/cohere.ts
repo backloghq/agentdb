@@ -3,6 +3,7 @@ import type { EmbeddingProvider } from "./types.js";
 const DEFAULT_MODEL = "embed-english-v3.0";
 const DEFAULT_BASE_URL = "https://api.cohere.com/v2";
 const DEFAULT_INPUT_TYPE = "search_document";
+const BATCH_LIMIT = 96;
 
 export interface CohereOptions {
   apiKey: string;
@@ -35,7 +36,16 @@ export class CohereEmbeddingProvider implements EmbeddingProvider {
 
   async embed(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
+    const all: number[][] = [];
+    for (let i = 0; i < texts.length; i += BATCH_LIMIT) {
+      const batch = texts.slice(i, i + BATCH_LIMIT);
+      const result = await this.embedBatch(batch);
+      all.push(...result);
+    }
+    return all;
+  }
 
+  private async embedBatch(texts: string[]): Promise<number[][]> {
     const response = await fetch(`${this.baseUrl}/embed`, {
       method: "POST",
       headers: {
