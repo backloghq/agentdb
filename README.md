@@ -925,6 +925,11 @@ Full reference:
 | `AGENTDB_EMBEDDINGS_API_KEY` | string | API key for the embedding provider |
 | `AGENTDB_EMBEDDINGS_MODEL` | string | Model name |
 | `AGENTDB_EMBEDDINGS_BATCH_LIMIT` | number | Max texts per API call (HTTP provider) |
+| `AGENTDB_EMBEDDINGS_URL` | string | HTTP embedding provider URL |
+| `AGENTDB_EMBEDDINGS_BASE_URL` | string | Ollama base URL (same as `AGENTDB_OLLAMA_URL`) |
+| `AGENTDB_EMBEDDINGS_DIMENSIONS` | number | Embedding vector dimensions (HTTP provider) |
+| `AGENTDB_OLLAMA_URL` | string | Ollama base URL (alias for `AGENTDB_EMBEDDINGS_BASE_URL`) |
+| `AGENTDB_DISK_THRESHOLD` | number | Record count at which `auto` mode switches to disk |
 | `AGENTDB_BACKEND` | `fs`\|`s3` | Storage backend |
 | `AGENTDB_S3_BUCKET` | string | S3 bucket name |
 | `AGENTDB_S3_REGION` | string | AWS region |
@@ -1074,7 +1079,7 @@ console.log(m.findTruncations);
 // Index sizes
 console.log(m.bm25SegmentCount, m.hnswNodeCount, m.walRecordCount, m.parquetRowGroups);
 // BM25 detail — doc count (flushed) and whether a merge pass would reduce segment count
-console.log(m.bm25DocCount, m.bm25MergePending);
+console.log(m.bm25DocCount, m.bm25NeedsMerge);
 // Write mode this collection is running under
 console.log(m.writeMode);
 ```

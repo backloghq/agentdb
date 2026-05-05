@@ -245,19 +245,19 @@ describe("Collection.metrics()", () => {
     });
   });
 
-  describe("bm25DocCount and bm25MergePending", () => {
-    it("bm25DocCount and bm25MergePending are null when textSearch is not enabled", async () => {
+  describe("bm25DocCount and bm25NeedsMerge", () => {
+    it("bm25DocCount and bm25NeedsMerge are null when textSearch is not enabled", async () => {
       const dir = await makeTmpDir();
       const db = new AgentDB(dir);
       await db.init();
       const col = await db.collection(defineSchema({ name: "metrics-bm25null", fields: { v: { type: "string" } } }));
       expect(col.metrics().bm25DocCount).toBeNull();
-      expect(col.metrics().bm25MergePending).toBeNull();
+      expect(col.metrics().bm25NeedsMerge).toBeNull();
       await db.close();
       await rm(dir, { recursive: true, force: true });
     });
 
-    it("bm25DocCount is a non-negative number and bm25MergePending is boolean when textSearch is enabled", async () => {
+    it("bm25DocCount is a non-negative number and bm25NeedsMerge is boolean when textSearch is enabled", async () => {
       const dir = await makeTmpDir();
       const db = new AgentDB(dir);
       await db.init();
@@ -272,13 +272,13 @@ describe("Collection.metrics()", () => {
       const m = col.metrics();
       expect(m.bm25DocCount).not.toBeNull();
       expect(m.bm25DocCount).toBeGreaterThanOrEqual(0);
-      expect(typeof m.bm25MergePending).toBe("boolean");
+      expect(typeof m.bm25NeedsMerge).toBe("boolean");
 
       await db.close();
       await rm(dir, { recursive: true, force: true });
     });
 
-    it("bm25MergePending is false when only one segment exists", async () => {
+    it("bm25NeedsMerge is false when only one segment exists", async () => {
       const dir = await makeTmpDir();
       const db = new AgentDB(dir);
       await db.init();
@@ -293,7 +293,7 @@ describe("Collection.metrics()", () => {
       const m = col.metrics();
       // After rebuildTextIndex: at most 1 segment → no merge pending
       expect(m.bm25SegmentCount).toBeLessThanOrEqual(1);
-      expect(m.bm25MergePending).toBe(false);
+      expect(m.bm25NeedsMerge).toBe(false);
 
       await db.close();
       await rm(dir, { recursive: true, force: true });

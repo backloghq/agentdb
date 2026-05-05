@@ -52,6 +52,8 @@ Configuration (precedence: CLI flags > env vars > config file):
     AGENTDB_GROUP_COMMIT_SIZE, AGENTDB_GROUP_COMMIT_MS, AGENTDB_ROW_GROUP_SIZE,
     AGENTDB_HNSW_M, AGENTDB_HNSW_EF_CONSTRUCTION, AGENTDB_HNSW_EF_SEARCH, AGENTDB_HNSW_MAX_LEVEL,
     AGENTDB_EMBEDDINGS_PROVIDER, AGENTDB_EMBEDDINGS_API_KEY, AGENTDB_EMBEDDINGS_MODEL,
+    AGENTDB_EMBEDDINGS_URL, AGENTDB_EMBEDDINGS_BASE_URL, AGENTDB_EMBEDDINGS_DIMENSIONS,
+    AGENTDB_OLLAMA_URL, AGENTDB_DISK_THRESHOLD,
     AGENTDB_HTTP_PORT, AGENTDB_HTTP_HOST, AGENTDB_HTTP_AUTH, AGENTDB_HTTP_MAX_SESSIONS,
     AGENTDB_HTTP_SESSION_IDLE_MS, AGENTDB_HTTP_AUDIT_BUFFER_SIZE, AGENTDB_HTTP_RATE_LIMIT,
     AGENTDB_HTTP_CORS, AGENTDB_BACKEND, AGENTDB_S3_BUCKET, AGENTDB_S3_REGION,
@@ -178,7 +180,7 @@ async function resolveAgentDBOpts(): Promise<AgentDBOptions> {
   const opts: AgentDBOptions = {};
 
   if (db.agentId) opts.agentId = db.agentId;
-  if (db.writeMode && (db.writeMode === "group" || db.writeMode === "async")) {
+  if (db.writeMode) {
     opts.writeMode = db.writeMode;
   }
   if (db.groupCommitSize) opts.groupCommitSize = db.groupCommitSize;
@@ -209,7 +211,7 @@ async function resolveAgentDBOpts(): Promise<AgentDBOptions> {
       opts.embeddings = {
         provider: "ollama",
         model: model || undefined,
-        baseUrl: (emb.baseUrl) || process.env.AGENTDB_OLLAMA_URL || undefined,
+        baseUrl: emb.baseUrl || undefined,
       } as import("../embeddings/index.js").EmbeddingConfig;
     } else if (provider === "openai") {
       opts.embeddings = {

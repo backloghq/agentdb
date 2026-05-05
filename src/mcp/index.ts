@@ -234,11 +234,12 @@ export async function startHttp(
   // CORS
   if (opts?.corsOrigins && opts.corsOrigins.length > 0) {
     const allowed = new Set(opts.corsOrigins);
+    const allowAll = allowed.has("*");
     app.use((req, res, next) => {
       const origin = req.headers.origin;
-      if (origin && allowed.has(origin)) {
-        res.setHeader("Access-Control-Allow-Origin", origin);
-        res.setHeader("Vary", "Origin");
+      if (origin && (allowAll || allowed.has(origin))) {
+        res.setHeader("Access-Control-Allow-Origin", allowAll ? "*" : origin);
+        if (!allowAll) res.setHeader("Vary", "Origin");
         res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id");
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
       }

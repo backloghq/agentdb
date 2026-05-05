@@ -113,8 +113,14 @@ export interface CollectionMetrics {
   bm25SegmentCount: number | null;
   /** Total indexed documents across all flushed BM25 segments. null when text search is not enabled. */
   bm25DocCount: number | null;
-  /** Whether the BM25 index has more than one segment (i.e. a merge pass would reduce them). null when text search is not enabled. */
-  bm25MergePending: boolean | null;
+  /**
+   * Whether the BM25 text index currently has more than one segment, meaning a merge pass
+   * would reduce them. This reflects termlog's internal LSM compaction state — it is NOT
+   * tied to `mergeParquetThreshold` or `mergeJsonlThreshold`. `true` = multiple segments
+   * exist and compaction would help; `false` = fully merged (single segment); `null` = text
+   * search not enabled for this collection.
+   */
+  bm25NeedsMerge: boolean | null;
   /** Number of nodes in the HNSW index. null when no embedding provider is configured. */
   hnswNodeCount: number | null;
   /** Number of records in the WAL (current session writes). */
@@ -311,7 +317,7 @@ export class Collection {
       findTruncations: this._findTruncations,
       bm25SegmentCount: segCount,
       bm25DocCount: this.textIdx?.docCount() ?? null,
-      bm25MergePending: segCount !== null ? segCount > 1 : null,
+      bm25NeedsMerge: segCount !== null ? segCount > 1 : null,
       hnswNodeCount: this.hnswIdx?.size ?? null,
       walRecordCount: this.store.count(),
       parquetRowGroups: this._diskStore?.parquetRowGroups ?? null,
