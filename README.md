@@ -875,12 +875,8 @@ try {
   await db.collection(schema);
 } catch (e) {
   if (e instanceof LegacyTextIndexError) {
-    // Open without textSearch to get a handle, then rebuild
-    const col = await db.collection("notes");
-    await col.rebuildTextIndex();  // wipes text/, re-indexes all records, deletes legacy blob
-    // Reopen with textSearch enabled
-    const col2 = await db.collection(schema);
-    // col2.bm25Search(...) works now
+    await db.rebuildTextIndex("notes");  // wipes old index, re-indexes all records
+    await db.collection(schema);         // succeeds now
   }
 }
 ```
@@ -914,7 +910,7 @@ See [examples/](./examples/) for runnable demos powered by Ollama:
 - **[Multi-Agent Task Board](./examples/multi-agent/)** — Agents collaborate on a shared task board. Event-driven via NOTIFY/LISTEN.
 - **[RAG Knowledge Base](./examples/rag-knowledge-base/)** — Ingest docs, embed with Ollama, answer questions via hybrid search (BM25 + semantic, fused via RRF). Updated for v2.0.
 - **[Research Pipeline](./examples/research-pipeline/)** — 3-stage AI pipeline: Researcher → Analyst → Writer. Each stage triggers the next.
-- **[Multi-Model Code Review](./examples/code-review/)** — Gemini generates code, Ollama reviews locally, Gemini writes tests. Multi-provider orchestration. Updated for v1.3: shows schema lifecycle (`defineSchema` with description/instructions/field descriptions, auto-persistence, `db_get_schema` discovery).
+- **[Multi-Model Code Review](./examples/code-review/)** — Gemini generates code, Ollama reviews locally, Gemini writes tests. Multi-provider orchestration. Updated for v2.0: shows schema lifecycle (`defineSchema` with description/instructions/field descriptions, auto-persistence, `db_get_schema` discovery).
 - **[Live Dashboard](./examples/live-dashboard/)** — Real-time CLI view of any running demo's collections.
 
 ## Development

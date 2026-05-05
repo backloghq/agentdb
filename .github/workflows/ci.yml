@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, v1.5-termlog]
+    branches: [main]
   pull_request:
     branches: [main]
 

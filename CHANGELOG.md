@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [2.0.0] - 2026-05-05
 
+### Fixed (pre-release audit round 2)
+
+- **Documented migration flow re-threw `LegacyTextIndexError` on second open** — `AgentDB.collection()` caches `colOpts` (including `textSearch: true`) before calling `_openCollection()`. When step 1 threw, the cached opts persisted; a subsequent `db.collection("name")` call used the same opts and threw again, making the documented recovery impossible. Fix: new `AgentDB.rebuildTextIndex(name)` top-level method that opens the collection internally with `textSearch: false` (temporarily overriding cached opts), calls `col.rebuildTextIndex()`, then evicts so the next open uses the caller's opts. README, MIGRATION-2.0.md, and the `LegacyTextIndexError` message all updated to the new single-call API.
+- **S3 rebuild wipe had unbounded `Promise.all` fan-out** — at 10K blobs, 10K concurrent `deleteBlob` SDK calls were queued, exceeding the AWS SDK default connection pool (50) and risking timeouts or OOM. Replaced with a 16-parallel batch loop matching the `diskConcurrency` pattern used elsewhere in agentdb.
+
+### Changed (pre-release audit round 2)
+
+- **`AgentDB.rebuildTextIndex(name)` added** — top-level recovery method for the v1.4 → v2.0 migration path; opens collection without textSearch, rebuilds, evicts; returns indexed doc count. `LegacyTextIndexError` message updated to point at this method. README and MIGRATION-2.0.md updated accordingly.
+- **CI `push` trigger drops `v1.5-termlog` branch** — working-branch trigger removed; CI now only runs on pushes to `main`.
+- **README example "Updated for v1.3" corrected to "Updated for v2.0"**.
+
 ### Fixed (pre-release audit)
 
 - **`rebuildTextIndex()` double-counted docs in S3 mode** — the local-FS branch wiped `text/` with `rm` + `mkdir` before reopening TermLog. The S3 branch skipped the wipe (no directories to delete), so `TermLog.open` reopened existing segments while the subsequent `add()` loop re-indexed every record on top — same doubling bug fixed for WAL replay at `15709e3`. Fix: in S3 mode, call `_termlogBackend.listBlobs("") `+ `deleteBlob()` for each blob before reopening TermLog. `db.import()` and repeated `db_rebuild_text_index` calls were both affected.
