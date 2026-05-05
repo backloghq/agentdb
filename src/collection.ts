@@ -104,6 +104,8 @@ export interface CollectionOptions {
   cacheSize?: number;
   /** Parquet row group size for disk mode (default: 5000). Overrides AgentDBOptions.rowGroupSize for this collection. */
   rowGroupSize?: number;
+  /** Maximum records returned by find() (default: 10_000). A console.warn is emitted on truncation. Overrides AgentDBOptions.maxFindLimit for this collection. */
+  maxFindLimit?: number;
 }
 
 /** Change event emitted after mutations. */
@@ -697,8 +699,9 @@ export class Collection {
   }
 
   async find(opts?: FindOpts): Promise<FindResult> {
-    const MAX_LIMIT = 10000;
-    const limit = Math.min(opts?.limit ?? 50, MAX_LIMIT);
+    const MAX_LIMIT = this.opts.maxFindLimit ?? 10_000;
+    const requestedLimit = opts?.limit ?? 50;
+    const limit = Math.min(requestedLimit, MAX_LIMIT);
     const offset = opts?.offset ?? 0;
     const useSummary = opts?.summary ?? false;
     const maxTokens = opts?.maxTokens;
@@ -869,10 +872,16 @@ export class Collection {
       mapped.push(result);
     }
 
+    const truncated = total > offset + limit || tokenTruncated;
+    if (truncated && requestedLimit > limit) {
+      console.warn(
+        `agentdb: find() truncated at maxFindLimit=${MAX_LIMIT} — set CollectionOptions.maxFindLimit to raise or lower this cap`,
+      );
+    }
     return {
       records: mapped,
       total,
-      truncated: total > offset + limit || tokenTruncated,
+      truncated,
       estimatedTokens: maxTokens ? tokenCount : undefined,
     };
   }

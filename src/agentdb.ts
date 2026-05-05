@@ -68,6 +68,8 @@ export interface AgentDBOptions {
   diskConcurrency?: number;
   /** Number of records per embedding provider call in embedUnembedded (default: 256). Per-collection override via CollectionOptions.embeddingBatchSize. */
   embeddingBatchSize?: number;
+  /** Maximum records returned by find() across all collections (default: 10_000). Per-collection override via CollectionOptions.maxFindLimit. */
+  maxFindLimit?: number;
 }
 
 export interface CollectionInfo {
@@ -285,6 +287,8 @@ export class AgentDB {
         ? { cacheSize: this.opts.cacheSize } : {}),
       ...(this.opts.rowGroupSize !== undefined && baseOpts?.rowGroupSize === undefined
         ? { rowGroupSize: this.opts.rowGroupSize } : {}),
+      ...(this.opts.maxFindLimit !== undefined && baseOpts?.maxFindLimit === undefined
+        ? { maxFindLimit: this.opts.maxFindLimit } : {}),
     };
     const col = new Collection(name, store, mergedOpts);
     if (this.embeddingProvider) {

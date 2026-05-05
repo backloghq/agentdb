@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1682,6 +1682,67 @@ describe("Collection", () => {
 
     it("$text throws without textSearch enabled", async () => {
       await expect(col.find({ filter: { $text: "test" } })).rejects.toThrow("Text search not enabled");
+    });
+  });
+
+  describe("maxFindLimit", () => {
+    async function makeCol(name: string, maxFindLimit: number): Promise<{ col: Collection; dir: string }> {
+      const { mkdtemp: mkd } = await import("node:fs/promises");
+      const dir = await mkd(join(tmpdir(), `agentdb-mfl-${name}-`));
+      const s = new Store<Record<string, unknown>>();
+      const c = new Collection(name, s, { maxFindLimit });
+      await c.open(dir, { checkpointThreshold: 100000 });
+      return { col: c, dir };
+    }
+
+    it("truncates at maxFindLimit and emits console.warn", async () => {
+      const { col: c, dir } = await makeCol("cap5", 5);
+      for (let i = 0; i < 10; i++) await c.insert({ idx: i });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const result = await c.find({ limit: 10 });
+        expect(result.records).toHaveLength(5);
+        expect(result.truncated).toBe(true);
+        expect(warnSpy).toHaveBeenCalledOnce();
+        expect(warnSpy.mock.calls[0][0]).toContain("maxFindLimit=5");
+      } finally {
+        warnSpy.mockRestore();
+        await c.close();
+        const { rm } = await import("node:fs/promises");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not warn when limit is within maxFindLimit", async () => {
+      const { col: c, dir } = await makeCol("cap5b", 5);
+      for (let i = 0; i < 10; i++) await c.insert({ idx: i });
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const result = await c.find({ limit: 3 });
+        expect(result.records).toHaveLength(3);
+        expect(result.truncated).toBe(true);
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        warnSpy.mockRestore();
+        await c.close();
+        const { rm } = await import("node:fs/promises");
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("allows maxFindLimit above default 10000", async () => {
+      const { col: c, dir } = await makeCol("big", 20000);
+      for (let i = 0; i < 200; i++) await c.insert({ idx: i });
+
+      const result = await c.find({ limit: 200 });
+      expect(result.records).toHaveLength(200);
+      expect(result.truncated).toBe(false);
+
+      await c.close();
+      const { rm } = await import("node:fs/promises");
+      await rm(dir, { recursive: true, force: true });
     });
   });
 });
