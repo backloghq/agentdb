@@ -1,8 +1,11 @@
 /**
- * Unit tests for src/config.ts — env var coercion (commit 1).
- * File loading and precedence tests are in commit 2.
+ * Unit tests for src/config.ts — env var coercion (commit 1) and
+ * file loading + precedence (commit 2).
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { loadAgentDBConfig, ConfigValidationError } from "../src/config.js";
 
 /**
@@ -257,5 +260,248 @@ describe("Config env var coercion", () => {
       const cfg = fromEnv({ AGENTDB_HTTP_JWT_SECRET: "super-secret" });
       expect(cfg.http?.jwt?.secret).toBe("super-secret");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// File loading tests (commit 2)
+// ---------------------------------------------------------------------------
+
+describe("Config file loading", () => {
+  // Each test creates its own unique tmpdir to avoid cross-test pollution.
+  const tmpDirs: string[] = [];
+
+  function makeTmpDir(): string {
+    const dir = join(tmpdir(), `agentdb-cfg-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    tmpDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  it("valid config file populates db and http fields", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "agentdb.config.json");
+    writeFileSync(cfgPath, JSON.stringify({
+      db: { maxFindLimit: 50000, memoryBudget: 1073741824, hnsw: { M: 32, efSearch: 100 } },
+      http: { port: 3000, maxSessions: 500, auditBufferSize: 50000 },
+    }));
+
+    const cfg = loadAgentDBConfig({ configPath: cfgPath, env: {} });
+    expect(cfg.db?.maxFindLimit).toBe(50000);
+    expect(cfg.db?.memoryBudget).toBe(1073741824);
+    expect(cfg.db?.hnsw?.M).toBe(32);
+    expect(cfg.db?.hnsw?.efSearch).toBe(100);
+    expect(cfg.http?.port).toBe(3000);
+    expect(cfg.http?.maxSessions).toBe(500);
+    expect(cfg.http?.auditBufferSize).toBe(50000);
+  });
+
+  it("missing config file returns empty config — no error", () => {
+    const cfg = loadAgentDBConfig({ configPath: "/nonexistent/agentdb.config.json", env: {} });
+    expect(cfg.db).toBeUndefined();
+    expect(cfg.http).toBeUndefined();
+  });
+
+  it("malformed JSON throws ConfigValidationError with file path in message", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "bad.json");
+    writeFileSync(cfgPath, "{ not valid json }");
+
+    try {
+      loadAgentDBConfig({ configPath: cfgPath, env: {} });
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigValidationError);
+      expect((e as ConfigValidationError).source).toBe("file");
+      expect((e as ConfigValidationError).message).toContain(cfgPath);
+      return;
+    }
+    throw new Error("Expected error not thrown");
+  });
+
+  it("invalid shape (db.maxFindLimit as string) throws ConfigValidationError with path", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "invalid.json");
+    writeFileSync(cfgPath, JSON.stringify({ db: { maxFindLimit: "not-a-number" } }));
+
+    try {
+      loadAgentDBConfig({ configPath: cfgPath, env: {} });
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigValidationError);
+      expect((e as ConfigValidationError).source).toBe("file");
+      expect((e as ConfigValidationError).path).toContain("maxFindLimit");
+      return;
+    }
+    throw new Error("Expected error not thrown");
+  });
+
+  it("invalid writeMode in file throws ConfigValidationError", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "bad-mode.json");
+    writeFileSync(cfgPath, JSON.stringify({ db: { writeMode: "turbo" } }));
+
+    try {
+      loadAgentDBConfig({ configPath: cfgPath, env: {} });
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigValidationError);
+      expect((e as ConfigValidationError).source).toBe("file");
+      return;
+    }
+    throw new Error("Expected error not thrown");
+  });
+
+  it("--config custom path loads from that path", () => {
+    const dir = makeTmpDir();
+    const customPath = join(dir, "custom.json");
+    writeFileSync(customPath, JSON.stringify({ db: { cacheSize: 9999 }, http: { host: "10.0.0.1" } }));
+
+    const cfg = loadAgentDBConfig({ configPath: customPath, env: {} });
+    expect(cfg.db?.cacheSize).toBe(9999);
+    expect(cfg.http?.host).toBe("10.0.0.1");
+  });
+
+  it("config file can contain per-collection overrides", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "col.json");
+    writeFileSync(cfgPath, JSON.stringify({
+      collections: {
+        users: { maxFindLimit: 1000, filterCacheSize: 256 },
+        events: { mergeParquetThreshold: 5 },
+      },
+    }));
+
+    const cfg = loadAgentDBConfig({ configPath: cfgPath, env: {} });
+    expect(cfg.collections?.users?.maxFindLimit).toBe(1000);
+    expect(cfg.collections?.users?.filterCacheSize).toBe(256);
+    expect(cfg.collections?.events?.mergeParquetThreshold).toBe(5);
+  });
+
+  it("AGENTDB_CONFIG env var points to config file", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "env-pointed.json");
+    writeFileSync(cfgPath, JSON.stringify({ db: { rowGroupSize: 2000 } }));
+
+    // AGENTDB_CONFIG in env (no explicit configPath option → loader reads AGENTDB_CONFIG)
+    const cfg = loadAgentDBConfig({ env: { AGENTDB_CONFIG: cfgPath } });
+    expect(cfg.db?.rowGroupSize).toBe(2000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Precedence tests (commit 2)
+// ---------------------------------------------------------------------------
+
+describe("Config precedence (cli > env > file)", () => {
+  const tmpDirs: string[] = [];
+
+  function makeTmpDir(): string {
+    const dir = join(tmpdir(), `agentdb-prec-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    tmpDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  it("env wins over file: file port=3000, env port=4000 → result is 4000", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "a.json");
+    writeFileSync(cfgPath, JSON.stringify({ http: { port: 3000 } }));
+
+    const cfg = loadAgentDBConfig({
+      configPath: cfgPath,
+      env: { AGENTDB_HTTP_PORT: "4000" },
+    });
+    expect(cfg.http?.port).toBe(4000);
+  });
+
+  it("cli wins over env and file: all three set port → CLI wins", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "b.json");
+    writeFileSync(cfgPath, JSON.stringify({ http: { port: 3000 } }));
+
+    const cfg = loadAgentDBConfig({
+      configPath: cfgPath,
+      env: { AGENTDB_HTTP_PORT: "4000" },
+      cli: { http: { port: 5000 } },
+    });
+    expect(cfg.http?.port).toBe(5000);
+  });
+
+  it("file wins when env is absent: file maxFindLimit=9999, no env → 9999", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "c.json");
+    writeFileSync(cfgPath, JSON.stringify({ db: { maxFindLimit: 9999 } }));
+
+    const cfg = loadAgentDBConfig({ configPath: cfgPath, env: {} });
+    expect(cfg.db?.maxFindLimit).toBe(9999);
+  });
+
+  it("deep merge: file hnsw.M=32, env hnsw.efSearch=100 → both present", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "d.json");
+    writeFileSync(cfgPath, JSON.stringify({ db: { hnsw: { M: 32, efConstruction: 400 } } }));
+
+    const cfg = loadAgentDBConfig({
+      configPath: cfgPath,
+      env: { AGENTDB_HNSW_EF_SEARCH: "100" },
+    });
+    expect(cfg.db?.hnsw?.M).toBe(32);
+    expect(cfg.db?.hnsw?.efConstruction).toBe(400);
+    expect(cfg.db?.hnsw?.efSearch).toBe(100);
+  });
+
+  it("per-collection from file not affected by top-level env override", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "e.json");
+    writeFileSync(cfgPath, JSON.stringify({
+      db: { maxFindLimit: 10000 },
+      collections: { users: { maxFindLimit: 100 } },
+    }));
+
+    const cfg = loadAgentDBConfig({
+      configPath: cfgPath,
+      env: { AGENTDB_MAX_FIND_LIMIT: "50" },
+    });
+    // Env overrides top-level db.maxFindLimit
+    expect(cfg.db?.maxFindLimit).toBe(50);
+    // Per-collection is in collections key — env has no per-collection var, so file value persists
+    expect(cfg.collections?.users?.maxFindLimit).toBe(100);
+  });
+
+  it("cli partial override: cli sets host, file sets port — both present", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "f.json");
+    writeFileSync(cfgPath, JSON.stringify({ http: { port: 3000 } }));
+
+    const cfg = loadAgentDBConfig({
+      configPath: cfgPath,
+      env: {},
+      cli: { http: { host: "0.0.0.0" } },
+    });
+    expect(cfg.http?.port).toBe(3000);
+    expect(cfg.http?.host).toBe("0.0.0.0");
+  });
+
+  it("three layers all set db.path — CLI wins", () => {
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "g.json");
+    writeFileSync(cfgPath, JSON.stringify({ db: { path: "/file-path" } }));
+
+    const cfg = loadAgentDBConfig({
+      configPath: cfgPath,
+      env: { AGENTDB_PATH: "/env-path" },
+      cli: { db: { path: "/cli-path" } },
+    });
+    expect(cfg.db?.path).toBe("/cli-path");
   });
 });
