@@ -150,6 +150,12 @@ export interface HttpOptions {
   maxSessions?: number;
   /** Idle session timeout in ms. Default: 1_800_000 (30 min). */
   sessionIdleMs?: number;
+  /** AuditLogger ring-buffer capacity. Default: 10_000. */
+  auditBufferSize?: number;
+  /** Hard cap on a single /audit query page. Default: 10_000. */
+  auditMaxLimit?: number;
+  /** Default /audit query page size when caller omits limit. Default: 1_000. */
+  auditDefaultLimit?: number;
 }
 
 /**
@@ -243,7 +249,11 @@ export async function startHttp(
 
   // Audit logging — created before auth middleware so it can record
   // tenant_mismatch security events from the auth middleware itself.
-  const auditLog = new AuditLogger();
+  const auditLog = new AuditLogger(
+    opts?.auditBufferSize,
+    opts?.auditMaxLimit,
+    opts?.auditDefaultLimit,
+  );
 
   // Auth middleware
   const authMiddleware = createAuthMiddleware({

@@ -230,10 +230,14 @@ export class AuditLogger {
   private head = 0;
   private count = 0;
   private nextSeq = 0;
+  private maxLimit: number;
+  private defaultLimit: number;
 
-  constructor(maxEntries = 10000) {
+  constructor(maxEntries = 10000, maxLimit = AUDIT_MAX_LIMIT, defaultLimit = AUDIT_DEFAULT_LIMIT) {
     this.maxEntries = maxEntries;
     this.entries = new Array(maxEntries);
+    this.maxLimit = maxLimit;
+    this.defaultLimit = defaultLimit;
   }
 
   /**
@@ -292,8 +296,8 @@ export class AuditLogger {
    * job (poll often enough; see docs/specs/upstream-agentdb-audit-streaming.md).
    */
   query(opts: { cursor?: string; limit?: number; tenantFilter?: string } = {}): AuditQueryResult {
-    const requested = opts.limit ?? AUDIT_DEFAULT_LIMIT;
-    const limit = Math.max(1, Math.min(AUDIT_MAX_LIMIT, requested));
+    const requested = opts.limit ?? this.defaultLimit;
+    const limit = Math.max(1, Math.min(this.maxLimit, requested));
     const cursor = opts.cursor;
     const tenantFilter = opts.tenantFilter;
 
