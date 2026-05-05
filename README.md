@@ -803,7 +803,7 @@ const col = await db.collection("articles", { embeddingBatchSize: 64 });
 
 Smaller batches reduce peak memory and provider timeout risk; larger batches reduce round-trips. Most hosted providers cap at 512–2048 texts per call — stay below their limit. All embedding providers (OpenAI, Voyage, Cohere, Gemini, Ollama, HTTP) automatically chunk each `embed()` call into provider-safe batches, so `embeddingBatchSize` can be set independently of API limits.
 
-**`diskConcurrency`** — maximum number of concurrent `DiskStore.get()` calls when materializing BM25/vector candidates in disk mode. Default: `16` for non-local-filesystem backends (e.g. S3); local filesystem is unbounded.
+**`diskConcurrency`** — maximum number of concurrent `DiskStore.get()` calls when materializing BM25/vector candidates in disk mode. Default: `20` for non-local-filesystem backends (e.g. S3); local filesystem is unbounded.
 
 ```typescript
 // db-wide default (applied to every disk-mode collection)
@@ -813,7 +813,7 @@ const db = new AgentDB("./data", { diskConcurrency: 32 });
 const col = await db.collection("embeddings", { diskConcurrency: 8 });
 ```
 
-S3 sizing guidance: the default of `16` prevents per-prefix request throttling at typical QPS. If you are running at very high query concurrency (dozens of simultaneous `hybridSearch` calls) and observe `SlowDown` errors, raise to `32`. If you share an S3 prefix with other workloads, lower to `8` to leave headroom.
+S3 sizing guidance: the default of `20` prevents per-prefix request throttling at typical QPS. If you are running at very high query concurrency (dozens of simultaneous `hybridSearch` calls) and observe `SlowDown` errors, raise to `32`. If you share an S3 prefix with other workloads, lower to `8` to leave headroom.
 
 ### Rate limiting and CORS
 
