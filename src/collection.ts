@@ -57,7 +57,7 @@ export interface FindOpts {
   maxTokens?: number;
   /** Sort by field. Prefix with "-" for descending. E.g. "name" or "-score". */
   sort?: string;
-  /** Cancellation signal. When aborted during a disk scan, returns a partial result with truncated=true. */
+  /** Cancellation signal. When aborted, returns a partial result with `aborted: true` and an empty or partial records array. Works in both memory and disk storage modes. */
   signal?: AbortSignal;
 }
 
@@ -1028,6 +1028,11 @@ export class Collection {
     const useSummary = opts?.summary ?? false;
     const maxTokens = opts?.maxTokens;
     const signal = opts?.signal;
+
+    // Pre-abort: signal was already cancelled before find() was called — skip all work.
+    if (signal?.aborted) {
+      return { records: [], total: 0, truncated: false, aborted: true };
+    }
 
     // Extract $text from filter for combined text + attribute search
     let textQuery: string | undefined;

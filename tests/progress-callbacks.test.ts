@@ -582,14 +582,43 @@ describe("Progress callbacks", () => {
       col = await db.collection(schema);
 
       const controller = new AbortController();
-      controller.abort(); // already aborted — disk scan check fires immediately
+      controller.abort(); // pre-aborted — early-return fires before any scan
 
       const result = await col.find({ signal: controller.signal, limit: 100 });
-      // WAL is empty (new session), disk scan was aborted → truncated=true
-      expect(result.truncated).toBe(true);
+      // Signal was pre-aborted → aborted:true, truncated:false (no work was done)
+      expect(result.aborted).toBe(true);
+      expect(result.truncated).toBe(false);
 
       await db.close();
       await rm(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe("AbortSignal — find (memory-mode, task 299)", () => {
+    it("pre-aborted signal on memory-mode collection returns aborted:true, empty records", async () => {
+      const dir = await makeTmpDir();
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(
+        defineSchema({ name: "abort-find-mem", fields: { v: { type: "string" } } }),
+      );
+      for (let i = 0; i < 10; i++) await col.insert({ v: `item ${i}` });
+
+      const result = await col.find({ signal: AbortSignal.abort(), limit: 100 });
+
+      expect(result.records.length).toBe(0);
+      expect(result.aborted).toBe(true);
+      expect(result.truncated).toBe(false);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("mid-iteration memory-mode abort: synchronous iteration cannot be interrupted — document why (no test)", () => {
+      // In-memory find() iterates a synchronous Map/Array — there is no await point inside
+      // the iteration loop so signal.aborted cannot be checked per-record. The pre-aborted
+      // check at the top of find() is the only viable intercept for memory mode.
+      // This test exists to explicitly document the decision rather than leave it as a gap.
     });
   });
 

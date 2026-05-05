@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- **Task 299 — AbortSignal honoured in memory-mode `find()`** — a pre-aborted `AbortSignal` passed to `find()` on an in-memory collection was silently ignored, returning all records with `aborted: undefined`. Fixed by adding an early-return at the top of `find()` (after extracting `signal`, before any iteration): `if (signal?.aborted) return { records: [], total: 0, truncated: false, aborted: true }`. This covers both memory and disk modes for the pre-abort case; disk mode already handled mid-scan abort per-iteration. `FindOpts.signal` TSDoc updated to remove "during a disk scan" qualifier — the signal is honoured regardless of storage backend. The pre-aborted disk-mode test updated to assert `aborted: true, truncated: false` (was `truncated: true`, which was semantically wrong — no scan was done). 2 new tests: memory-mode pre-aborted → `aborted: true, records.length=0, truncated: false`; documentation test explaining why mid-loop memory-mode abort is not feasible (synchronous iteration). Test count: 1484 → 1486.
+
 - **R8/4 test gap bundle — 6 new tests across three files** (test count: 1451 → 1484):
   - **(a)** Post-exception zombie-write guard (`progress-callbacks.test.ts`): spy `TermLog.prototype.add` to throw on the 5th call mid-rebuild; assert the `finally` block clears `_rebuildingIdx`; insert a new record after the failed rebuild must not throw; a subsequent rebuild succeeds and finds N+1 records.
   - **(b)** Sequential single-flight (`progress-callbacks.test.ts`): two successive `await col.rebuildTextIndex()` calls both return the correct count — verifies the `_rebuilding` guard is cleared on completion.
