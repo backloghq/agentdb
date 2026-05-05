@@ -23,6 +23,7 @@ import {
   META_AGENT, META_REASON, META_EXPIRES, META_EMBEDDING, META_VERSION,
   resolveFilter, stripMeta, isExpired, summarize, estimateTokens,
   applyUpdate, extractTextFromRecord, summarizeValue,
+  makeFilterCache, FILTER_CACHE_MAX,
 } from "./collection-helpers.js";
 
 // Re-export types and helpers that external consumers depend on
@@ -108,6 +109,8 @@ export interface CollectionOptions {
   maxFindLimit?: number;
   /** Max unique values a field may have before its disk B-tree index is skipped (default: 1000). A console.warn fires once per field when exceeded. Overrides AgentDBOptions.maxIndexCardinality for this collection. */
   maxIndexCardinality?: number;
+  /** Per-collection compiled-filter LRU cache size (default: 64). Raise for collections with many distinct query shapes; lower for memory-constrained collections with few patterns. Overrides AgentDBOptions.filterCacheSize for this collection. */
+  filterCacheSize?: number;
 }
 
 /** Change event emitted after mutations. */
@@ -164,6 +167,8 @@ export class Collection {
   private _textIdxLoaded = false;
   // Optional termlog StorageBackend — set to S3Backend when running in S3 mode.
   private _termlogBackend: import("@backloghq/termlog").StorageBackend | undefined = undefined;
+  // Per-collection compiled-filter LRU cache — initialised in constructor.
+  private _compileCached!: (filterObj: Record<string, unknown>) => (record: Record<string, unknown>) => boolean;
 
   /** Set disk store for disk-backed mode. Called by AgentDB during open. */
   setDiskStore(ds: DiskStore): void { this._diskStore = ds; }
@@ -227,10 +232,14 @@ export class Collection {
   /** Get the opslog store (for accessing session writes in disk mode). */
   getStore(): Store<StoredRecord> { return this.store; }
 
+  /** Configured filter cache size for this collection (default: 64). */
+  get filterCacheSize(): number { return this.opts.filterCacheSize ?? FILTER_CACHE_MAX; }
+
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
     this.store = store;
     this.opts = opts ?? {};
+    this._compileCached = makeFilterCache(opts?.filterCacheSize ?? FILTER_CACHE_MAX);
     // TermLog is opened in open() once the directory is known; textIdx stays null until then.
   }
 
@@ -442,7 +451,7 @@ export class Collection {
 
   /** Resolve a filter with virtual filter support. */
   private resolve(filter: Filter): (record: Record<string, unknown>) => boolean {
-    return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter(), this.opts.tagField);
+    return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter(), this.opts.tagField, this._compileCached);
   }
 
   /** Whether the underlying store is open. */

@@ -72,6 +72,8 @@ export interface AgentDBOptions {
   maxFindLimit?: number;
   /** Max unique values a field may have before its disk B-tree index is skipped (default: 1000). Per-collection override via CollectionOptions.maxIndexCardinality. */
   maxIndexCardinality?: number;
+  /** Per-collection compiled-filter LRU cache size (default: 64). Per-collection override via CollectionOptions.filterCacheSize. */
+  filterCacheSize?: number;
 }
 
 export interface CollectionInfo {
@@ -142,6 +144,7 @@ export class AgentDB {
       embeddingBatchSize: opts?.embeddingBatchSize,
       maxFindLimit: opts?.maxFindLimit,
       maxIndexCardinality: opts?.maxIndexCardinality,
+      filterCacheSize: opts?.filterCacheSize,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -295,6 +298,8 @@ export class AgentDB {
         ? { maxFindLimit: this.opts.maxFindLimit } : {}),
       ...(this.opts.maxIndexCardinality !== undefined && baseOpts?.maxIndexCardinality === undefined
         ? { maxIndexCardinality: this.opts.maxIndexCardinality } : {}),
+      ...(this.opts.filterCacheSize !== undefined && baseOpts?.filterCacheSize === undefined
+        ? { filterCacheSize: this.opts.filterCacheSize } : {}),
     };
     const col = new Collection(name, store, mergedOpts);
     if (this.embeddingProvider) {

@@ -39,24 +39,36 @@ export type VirtualFilterFn = (record: Record<string, unknown>, getter: (id: str
 
 // --- Predicate cache ---
 
-const FILTER_CACHE_MAX = 64;
-const filterCache = new Map<string, (record: Record<string, unknown>) => boolean>();
+/** Default compiled-filter LRU cache size (per collection). */
+export const FILTER_CACHE_MAX = 64;
 
-export function cachedCompileFilter(filterObj: Record<string, unknown>): (record: Record<string, unknown>) => boolean {
-  const key = JSON.stringify(filterObj);
-  const cached = filterCache.get(key);
-  if (cached) {
-    filterCache.delete(key);
-    filterCache.set(key, cached);
-    return cached;
-  }
-  const predicate = compileFilter(filterObj);
-  if (filterCache.size >= FILTER_CACHE_MAX) {
-    const oldest = filterCache.keys().next().value!;
-    filterCache.delete(oldest);
-  }
-  filterCache.set(key, predicate);
-  return predicate;
+type CompileFn = (filterObj: Record<string, unknown>) => (record: Record<string, unknown>) => boolean;
+
+/**
+ * Create a per-collection compiled-filter LRU cache.
+ * Returns a compile function that memoises up to `maxSize` distinct filter shapes.
+ * Evicts the oldest entry (insertion-order) when the cap is reached.
+ * @param compile — inner compile function; defaults to `compileFilter`. Pass a spy in tests.
+ */
+export function makeFilterCache(maxSize: number, compile: CompileFn = compileFilter): CompileFn {
+  const cache = new Map<string, (record: Record<string, unknown>) => boolean>();
+  return function cachedCompile(filterObj: Record<string, unknown>) {
+    const key = JSON.stringify(filterObj);
+    const cached = cache.get(key);
+    if (cached) {
+      // Move to end (most-recently used)
+      cache.delete(key);
+      cache.set(key, cached);
+      return cached;
+    }
+    const predicate = compile(filterObj);
+    if (cache.size >= maxSize) {
+      const oldest = cache.keys().next().value!;
+      cache.delete(oldest);
+    }
+    cache.set(key, predicate);
+    return predicate;
+  };
 }
 
 /** Resolve a filter (string or object) into a compiled predicate, with optional virtual filter support. */
@@ -65,6 +77,7 @@ export function resolveFilter(
   virtualFilters?: Record<string, VirtualFilterFn>,
   getter?: (id: string) => Record<string, unknown> | undefined,
   tagField?: string,
+  compileFn: CompileFn = compileFilter,
 ): (record: Record<string, unknown>) => boolean {
   if (filter === null || filter === undefined) return () => true;
 
@@ -98,7 +111,7 @@ export function resolveFilter(
       }
 
       const basePredicate = Object.keys(remaining).length > 0
-        ? cachedCompileFilter(remaining)
+        ? compileFn(remaining)
         : () => true;
 
       return (record) =>
@@ -106,7 +119,7 @@ export function resolveFilter(
     }
   }
 
-  return cachedCompileFilter(filterObj);
+  return compileFn(filterObj);
 }
 
 // --- Record utilities ---

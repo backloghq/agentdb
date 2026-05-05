@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "@backloghq/opslog";
 import { Collection } from "../src/collection.js";
+import { makeFilterCache } from "../src/collection-helpers.js";
 
 describe("Collection", () => {
   let tmpDir: string;
@@ -1742,6 +1743,83 @@ describe("Collection", () => {
 
       await c.close();
       const { rm } = await import("node:fs/promises");
+      await rm(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe("filterCacheSize", () => {
+    it("makeFilterCache evicts LRU entry once maxSize is reached", () => {
+      // Use a spy to count actual compile calls
+      const spy = vi.fn().mockReturnValue(() => true);
+      const cache = makeFilterCache(2, spy);
+
+      // Fill cache: A and B compile once each. LRU order (oldest→newest): [A, B]
+      cache({ v: "A" });
+      cache({ v: "B" });
+      expect(spy).toHaveBeenCalledTimes(2);
+
+      // Hit B — bumps B to newest. LRU order: [A, B]
+      cache({ v: "B" });
+      expect(spy).toHaveBeenCalledTimes(2);
+
+      // Miss C — evicts oldest (A). LRU order: [B, C]
+      cache({ v: "C" });
+      expect(spy).toHaveBeenCalledTimes(3);
+
+      // Hit B — still in cache (B was bumped, never evicted)
+      cache({ v: "B" });
+      expect(spy).toHaveBeenCalledTimes(3);
+
+      // Miss A — was evicted; recompiles. Evicts oldest (C). LRU order: [B, A]
+      cache({ v: "A" });
+      expect(spy).toHaveBeenCalledTimes(4);
+
+      // Hit B — still in cache
+      cache({ v: "B" });
+      expect(spy).toHaveBeenCalledTimes(4);
+    });
+
+    it("two makeFilterCache instances are independent (no cross-eviction)", () => {
+      const spyA = vi.fn().mockReturnValue(() => true);
+      const spyB = vi.fn().mockReturnValue(() => true);
+      const cacheA = makeFilterCache(2, spyA);
+      const cacheB = makeFilterCache(2, spyB);
+
+      // Fill both caches
+      cacheA({ a: 1 });
+      cacheA({ a: 2 });
+      cacheB({ b: 1 });
+      cacheB({ b: 2 });
+      expect(spyA).toHaveBeenCalledTimes(2);
+      expect(spyB).toHaveBeenCalledTimes(2);
+
+      // Evict from B (add a third entry to B — evicts b:1)
+      cacheB({ b: 3 });
+      expect(spyB).toHaveBeenCalledTimes(3);
+
+      // A's cache is unaffected — both entries still present
+      cacheA({ a: 1 });
+      cacheA({ a: 2 });
+      expect(spyA).toHaveBeenCalledTimes(2); // no new A compilations
+    });
+
+    it("Collection.filterCacheSize getter returns configured value (default 64)", async () => {
+      const s = new Store<Record<string, unknown>>();
+      const dir = await mkdtemp(join(tmpdir(), "agentdb-fcs-"));
+      const col = new Collection("test", s, {});
+      await col.open(dir, { checkpointThreshold: 100000 });
+      expect(col.filterCacheSize).toBe(64);
+      await col.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("Collection.filterCacheSize getter reflects custom filterCacheSize option", async () => {
+      const s = new Store<Record<string, unknown>>();
+      const dir = await mkdtemp(join(tmpdir(), "agentdb-fcs-"));
+      const col = new Collection("test", s, { filterCacheSize: 8 });
+      await col.open(dir, { checkpointThreshold: 100000 });
+      expect(col.filterCacheSize).toBe(8);
+      await col.close();
       await rm(dir, { recursive: true, force: true });
     });
   });
