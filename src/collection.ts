@@ -430,15 +430,27 @@ export class Collection {
     if (this._rebuilding) throw new Error("agentdb: rebuildTextIndex already in progress");
     this._rebuilding = true;
 
+    // C: close() interlock — shared by both S3 and FS branches so close() can interrupt
+    // either rebuild path. Allocated synchronously before the first await so close() always
+    // sees the controller set by the time rebuildTextIndex() yields its first Promise.
+    const rebuildCtrl = new AbortController();
+    this._rebuildAbortCtrl = rebuildCtrl;
+    let settleRebuild!: () => void;
+    this._rebuildSettled = new Promise<void>((res) => { settleRebuild = res; });
+
     const onProgress = opts?.onProgress;
     const signal = opts?.signal;
     const textDir = pathJoin(this._dir, "text");
 
     if (this._termlogBackend) {
       // S3 mode: no atomic rename is possible for blob stores. Use the original
-      // destructive approach (wipe then rebuild). An abort here leaves textIdx=null
-      // and the S3 prefix empty — the caller must retry rebuildTextIndex to restore search.
+      // destructive approach (wipe then rebuild). An abort leaves textIdx=null and the S3
+      // prefix empty — the caller must retry rebuildTextIndex to restore search.
       try {
+        // Quick abort check before starting the destructive S3 wipe phase.
+        if (signal?.aborted || rebuildCtrl.signal.aborted) {
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
         if (this.textIdx) await this.textIdx.close();
         const blobs = await this._termlogBackend.listBlobs("").catch(() => [] as string[]);
         const CONCURRENCY = 16;
@@ -463,8 +475,19 @@ export class Collection {
             })()
           : Array.from(this.store.entries());
         const total = records.length;
+        // Check abort before entering the record loop — covers zero-record collections
+        // and the window where close() signalled abort during listBlobs/TermLog.open.
+        if (signal?.aborted || rebuildCtrl.signal.aborted) {
+          await this.textIdx.close();
+          this.textIdx = null;
+          console.warn(
+            `agentdb [${this.name}]: rebuildTextIndex aborted in S3 mode — ` +
+            `text index wiped, indexed 0/${total}. Call rebuildTextIndex() again to restore search.`,
+          );
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
         for (const [id, record] of records) {
-          if (signal?.aborted) {
+          if (signal?.aborted || rebuildCtrl.signal.aborted) {
             await this.textIdx.close();
             this.textIdx = null;
             console.warn(
@@ -484,6 +507,9 @@ export class Collection {
         return count;
       } finally {
         this._rebuilding = false;
+        this._rebuildAbortCtrl = null;
+        this._rebuildSettled = null;
+        settleRebuild();
       }
     }
 
@@ -499,14 +525,6 @@ export class Collection {
       k1: this.opts.bm25K1 ?? 1.2,
       b: this.opts.bm25B ?? 0.75,
     });
-
-    // C: close() interlock — create an AbortController for this rebuild so close() can
-    // interrupt it. Also create a promise that resolves when the rebuild finishes so
-    // close() can await teardown before proceeding.
-    const rebuildCtrl = new AbortController();
-    this._rebuildAbortCtrl = rebuildCtrl;
-    let settleRebuild!: () => void;
-    this._rebuildSettled = new Promise<void>((res) => { settleRebuild = res; });
 
     // Shadow-write: all live writes (insert/update/delete) that arrive during the rebuild
     // window will call textIndexAdd/textIndexRemove, which forward to _rebuildingIdx as well.
@@ -866,7 +884,7 @@ export class Collection {
   /** Close the underlying store. Idempotent — calling twice is a no-op. */
   async close(): Promise<void> {
     if (!this._opened) return;
-    // C: interlock with an in-flight FS-mode rebuild. Capture the settled promise BEFORE
+    // C: interlock with an in-flight rebuild (FS or S3 mode). Capture the settled promise BEFORE
     // aborting (the finally block clears _rebuildSettled before resolving it, so we must
     // hold a local reference). Abort causes the rebuild loop to throw AbortError; the
     // finally block resolves settleRebuild, unblocking the await below.
