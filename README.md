@@ -915,6 +915,10 @@ console.log(m.recordCacheHits / m.recordCacheFetches);
 console.log(m.findTruncations);
 // Index sizes
 console.log(m.bm25SegmentCount, m.hnswNodeCount, m.walRecordCount, m.parquetRowGroups);
+// BM25 detail — doc count (flushed) and whether a merge pass would reduce segment count
+console.log(m.bm25DocCount, m.bm25MergePending);
+// Write mode this collection is running under
+console.log(m.writeMode);
 ```
 
 ## Limits and Ceilings

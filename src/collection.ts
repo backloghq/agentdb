@@ -111,12 +111,18 @@ export interface CollectionMetrics {
   findTruncations: number;
   /** Number of BM25 segments in the text index. null when text search is not enabled. */
   bm25SegmentCount: number | null;
+  /** Total indexed documents across all flushed BM25 segments. null when text search is not enabled. */
+  bm25DocCount: number | null;
+  /** Whether the BM25 index has more than one segment (i.e. a merge pass would reduce them). null when text search is not enabled. */
+  bm25MergePending: boolean | null;
   /** Number of nodes in the HNSW index. null when no embedding provider is configured. */
   hnswNodeCount: number | null;
   /** Number of records in the WAL (current session writes). */
   walRecordCount: number;
   /** Number of Parquet row groups from last compaction. null when not in disk mode or no compaction yet. */
   parquetRowGroups: number | null;
+  /** Write mode this collection was opened with ("immediate", "group", or "async"). */
+  writeMode: "immediate" | "group" | "async";
 }
 
 /** Options for configuring collection middleware. */
@@ -219,6 +225,8 @@ export class Collection {
   private _filterCache!: FilterCacheHandle;
   // findTruncations counter — incremented each time find() hits the maxFindLimit cap.
   private _findTruncations = 0;
+  // Write mode captured from open() options for metrics() reporting.
+  private _writeMode: "immediate" | "group" | "async" = "immediate";
 
   /** Set disk store for disk-backed mode. Called by AgentDB during open. */
   setDiskStore(ds: DiskStore): void { this._diskStore = ds; }
@@ -294,16 +302,20 @@ export class Collection {
    */
   metrics(): CollectionMetrics {
     const cacheStats = this._diskStore?.getCacheStats() ?? null;
+    const segCount = this.textIdx?.segmentCount() ?? null;
     return {
       filterCompilations: this._filterCache.compilations(),
       filterCacheHits: this._filterCache.hits(),
       recordCacheFetches: cacheStats !== null ? cacheStats.hits + cacheStats.misses : null,
       recordCacheHits: cacheStats !== null ? cacheStats.hits : null,
       findTruncations: this._findTruncations,
-      bm25SegmentCount: this.textIdx?.segmentCount() ?? null,
+      bm25SegmentCount: segCount,
+      bm25DocCount: this.textIdx?.docCount() ?? null,
+      bm25MergePending: segCount !== null ? segCount > 1 : null,
       hnswNodeCount: this.hnswIdx?.size ?? null,
       walRecordCount: this.store.count(),
       parquetRowGroups: this._diskStore?.parquetRowGroups ?? null,
+      writeMode: this._writeMode,
     };
   }
 
@@ -565,6 +577,7 @@ export class Collection {
     await this.store.open(dir, options);
     this._opened = true;
     this._dir = dir;
+    if (options?.writeMode) this._writeMode = options.writeMode;
     if (options?.backend) {
       this.backend = options.backend;
     } else {

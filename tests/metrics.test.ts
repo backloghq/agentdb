@@ -223,6 +223,83 @@ describe("Collection.metrics()", () => {
     });
   });
 
+  describe("writeMode", () => {
+    it("writeMode is 'immediate' by default", async () => {
+      const dir = await makeTmpDir();
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({ name: "metrics-wm-default", fields: { v: { type: "string" } } }));
+      expect(col.metrics().writeMode).toBe("immediate");
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("writeMode reflects AgentDBOptions.writeMode when set to 'group'", async () => {
+      const dir = await makeTmpDir();
+      const db = new AgentDB(dir, { writeMode: "group" });
+      await db.init();
+      const col = await db.collection(defineSchema({ name: "metrics-wm-group", fields: { v: { type: "string" } } }));
+      expect(col.metrics().writeMode).toBe("group");
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe("bm25DocCount and bm25MergePending", () => {
+    it("bm25DocCount and bm25MergePending are null when textSearch is not enabled", async () => {
+      const dir = await makeTmpDir();
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({ name: "metrics-bm25null", fields: { v: { type: "string" } } }));
+      expect(col.metrics().bm25DocCount).toBeNull();
+      expect(col.metrics().bm25MergePending).toBeNull();
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("bm25DocCount is a non-negative number and bm25MergePending is boolean when textSearch is enabled", async () => {
+      const dir = await makeTmpDir();
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "metrics-bm25count",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      for (let i = 0; i < 5; i++) await col.insert({ title: `document ${i}` });
+      await col.rebuildTextIndex(); // forces flush to segments
+
+      const m = col.metrics();
+      expect(m.bm25DocCount).not.toBeNull();
+      expect(m.bm25DocCount).toBeGreaterThanOrEqual(0);
+      expect(typeof m.bm25MergePending).toBe("boolean");
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("bm25MergePending is false when only one segment exists", async () => {
+      const dir = await makeTmpDir();
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "metrics-bm25single",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      for (let i = 0; i < 3; i++) await col.insert({ title: `doc ${i}` });
+      await col.rebuildTextIndex(); // produces exactly 1 segment (full rebuild from scratch)
+
+      const m = col.metrics();
+      // After rebuildTextIndex: at most 1 segment → no merge pending
+      expect(m.bm25SegmentCount).toBeLessThanOrEqual(1);
+      expect(m.bm25MergePending).toBe(false);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+  });
+
   describe("parquetRowGroups", () => {
     it("parquetRowGroups is null for memory-mode collections", async () => {
       const dir = await makeTmpDir();
