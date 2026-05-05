@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Store } from "@backloghq/opslog";
 import type { StorageBackend } from "@backloghq/opslog";
 import { Collection } from "./collection.js";
-import type { CollectionOptions } from "./collection.js";
+import type { CollectionOptions, ProgressCallback } from "./collection.js";
 import type { EmbeddingConfig, EmbeddingProvider } from "./embeddings/index.js";
 import { resolveProvider } from "./embeddings/index.js";
 import { PermissionManager } from "./permissions.js";
@@ -863,10 +863,12 @@ export class AgentDB {
   }
 
   /** Import collections from export data. Skips existing records by default. */
-  async import(data: ExportData, opts?: { overwrite?: boolean }): Promise<{ collections: number; records: number }> {
+  async import(data: ExportData, opts?: { overwrite?: boolean; onProgress?: ProgressCallback }): Promise<{ collections: number; records: number }> {
     this.ensureOpen();
+    const onProgress = opts?.onProgress;
     let totalRecords = 0;
     const colNames = Object.keys(data.collections);
+    const grandTotal = colNames.reduce((n, name) => n + (data.collections[name].records.length), 0);
     for (const name of colNames) {
       const col = await this.collection(name);
       const records = data.collections[name].records;
@@ -881,6 +883,7 @@ export class AgentDB {
           }
         }
         totalRecords++;
+        onProgress?.({ completed: totalRecords, total: grandTotal, phase: "importing" });
       }
       // Per-record inserts already drove tl.add() — no rebuild needed.
     }

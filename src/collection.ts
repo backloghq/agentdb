@@ -67,6 +67,19 @@ export interface FindResult {
   estimatedTokens?: number;
 }
 
+/** Progress event emitted during long-running operations. */
+export interface ProgressEvent {
+  /** Records processed so far in the current phase. */
+  completed: number;
+  /** Total records in this phase, or `null` when total is not yet known (e.g. disk streaming). */
+  total: number | null;
+  /** Current operation phase. */
+  phase: "wal" | "disk" | "indexing" | "importing" | "rebuilding";
+}
+
+/** Callback invoked periodically during long-running operations. */
+export type ProgressCallback = (event: ProgressEvent) => void;
+
 /** Structured result returned by {@link Collection.reembedAll}. */
 export interface ReembedResult {
   /** Number of records successfully re-embedded. */
@@ -327,8 +340,9 @@ export class Collection {
    *
    * @returns The number of documents indexed during the rebuild.
    */
-  async rebuildTextIndex(): Promise<number> {
+  async rebuildTextIndex(opts?: { onProgress?: ProgressCallback }): Promise<number> {
     if (!this._dir) return 0;
+    const onProgress = opts?.onProgress;
     // Close existing TermLog if open, then wipe and recreate the text directory.
     if (this.textIdx) await this.textIdx.close();
     const textDir = pathJoin(this._dir, "text");
@@ -361,10 +375,12 @@ export class Collection {
           return out;
         })()
       : Array.from(this.store.entries());
+    const total = records.length;
     for (const [id, record] of records) {
       if (!isExpired(record)) {
         await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
         count++;
+        onProgress?.({ completed: count, total, phase: "rebuilding" });
       }
     }
     await this.textIdx.flush();
@@ -1783,12 +1799,13 @@ export class Collection {
    * Per-batch provider failures are recorded in the returned {@link ReembedResult} rather than
    * thrown, so the caller can distinguish partial success from total failure.
    */
-  async reembedAll(): Promise<ReembedResult> {
+  async reembedAll(opts?: { onProgress?: ProgressCallback }): Promise<ReembedResult> {
     if (!this.embeddingProvider || !this.hnswIdx) {
       throw new Error("reembedAll requires an embedding provider to be configured");
     }
 
     const batchSize = this.opts.embeddingBatchSize ?? 256;
+    const onProgress = opts?.onProgress;
     // Reset HNSW so stale vectors don't persist
     this.hnswIdx = new HnswIndex({ dimensions: this.embeddingProvider.dimensions });
     let embedded = 0;
@@ -1805,6 +1822,7 @@ export class Collection {
       const text = extractTextFromRecord(clean);
       if (text) walToEmbed.push({ id, text, record });
     }
+    const walTotal = walToEmbed.length;
 
     for (let i = 0; i < walToEmbed.length; i += batchSize) {
       const batch = walToEmbed.slice(i, i + batchSize);
@@ -1817,6 +1835,7 @@ export class Collection {
         console.warn(`agentdb: reembedAll WAL batch ${batchIndex} failed: ${reason}`);
         errors.push({ batchIndex, recordIds: batch.map((b) => b.id), reason });
         failed += batch.length;
+        onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" });
         continue;
       }
       await this.store.batch(() => {
@@ -1832,6 +1851,7 @@ export class Collection {
         this.hnswIdx!.add(batch[j].id, vectors[j]);
       }
       embedded += batch.length;
+      onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" });
     }
 
     // --- Disk records (compacted Parquet/JSONL) ---
@@ -1851,6 +1871,7 @@ export class Collection {
           failed += diskBatch.length;
           diskBatch.length = 0;
           diskBatchIndex++;
+          onProgress?.({ completed: embedded + failed, total: null, phase: "disk" });
           return;
         }
         const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
@@ -1870,6 +1891,7 @@ export class Collection {
         embedded += diskBatch.length;
         diskBatch.length = 0;
         diskBatchIndex++;
+        onProgress?.({ completed: embedded + failed, total: null, phase: "disk" });
       };
 
       // Single pass: process every non-expired disk record (skip WAL-shadowed ids)

@@ -18,6 +18,8 @@ export type {
   UpdateOps,
   FieldInfo,
   ReembedResult,
+  ProgressEvent,
+  ProgressCallback,
 } from "./collection.js";
 
 export { RecordCache } from "./record-cache.js";

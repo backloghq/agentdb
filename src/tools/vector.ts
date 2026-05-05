@@ -138,7 +138,12 @@ export function getVectorTools(db: AgentDB): AgentTool[] {
       annotations: DESTRUCTIVE,
       execute: safe("db_reembed_all", DESTRUCTIVE)(async (args) => {
         const col = await db.collection(args.collection as string);
-        return col.reembedAll();
+        return col.reembedAll({
+          onProgress: ({ completed, total, phase }) => {
+            const pct = total !== null ? ` (${Math.round((completed / total) * 100)}%)` : "";
+            console.error(`agentdb: db_reembed_all ${phase} ${completed}/${total ?? "?"}${pct}`);
+          },
+        });
       }),
     },
 
