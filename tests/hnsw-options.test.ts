@@ -1,6 +1,8 @@
 /**
  * Tests for HNSW M/efConstruction/efSearch/maxLevel exposure via CollectionOptions and AgentDBOptions.
  * Verifies: config getters, per-collection override, db-wide default, Collection.getHnswIndex().
+ *
+ * Task 302 tests appended: HNSW remove on delete + text-change.
  */
 import { describe, it, expect } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -176,5 +178,93 @@ describe("HNSW options exposure", () => {
       await db.close();
       await rm(dir, { recursive: true, force: true });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 302 — HNSW remove on deleteById and text-change update
+// ---------------------------------------------------------------------------
+
+describe("Task 302 — HNSW node cleanup on delete and text-change", () => {
+  it("deleteById removes the corresponding HNSW node (metrics().hnswNodeCount tracks accurately)", async () => {
+    const dir = await makeTmpDir();
+    const db = new AgentDB(dir, { embeddings: { provider: hashProvider } });
+    await db.init();
+    const col = await db.collection(
+      defineSchema({ name: "hnsw-del", fields: { title: { type: "string" } } }),
+    );
+
+    // Insert 10 records and embed them
+    const ids: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      ids.push(await col.insert({ title: `item ${i}` }));
+    }
+    await col.embedUnembedded();
+    expect((await col.metrics()).hnswNodeCount).toBe(10);
+
+    // Delete 5 — HNSW node count must drop to 5
+    for (let i = 0; i < 5; i++) await col.deleteById(ids[i]);
+    expect((await col.metrics()).hnswNodeCount).toBe(5);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("update text-change removes orphaned HNSW node until re-embedding runs", async () => {
+    const dir = await makeTmpDir();
+    const db = new AgentDB(dir, { embeddings: { provider: hashProvider } });
+    await db.init();
+    const col = await db.collection(
+      defineSchema({ name: "hnsw-upd", fields: { title: { type: "string" } } }),
+    );
+
+    // Insert 5 records and embed them
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      ids.push(await col.insert({ title: `doc ${i}` }));
+    }
+    await col.embedUnembedded();
+    expect((await col.metrics()).hnswNodeCount).toBe(5);
+
+    // Update one record's text — embedding is invalidated, HNSW node must be removed
+    await col.update({ _id: ids[0] }, { $set: { title: "completely new text" } });
+    expect((await col.metrics()).hnswNodeCount).toBe(4);
+
+    // After re-embedding, the node is re-added (count back to 5)
+    await col.embedUnembedded();
+    expect((await col.metrics()).hnswNodeCount).toBe(5);
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("round-trip: delete then re-insert with same id — semantic search returns new vector only", async () => {
+    const dir = await makeTmpDir();
+    const db = new AgentDB(dir, { embeddings: { provider: hashProvider } });
+    await db.init();
+    const col = await db.collection(
+      defineSchema({ name: "hnsw-roundtrip", fields: { title: { type: "string" } } }),
+    );
+
+    const id = await col.insert({ title: "original content" });
+    await col.embedUnembedded();
+    expect((await col.metrics()).hnswNodeCount).toBe(1);
+
+    // Delete removes from HNSW
+    await col.deleteById(id);
+    expect((await col.metrics()).hnswNodeCount).toBe(0);
+
+    // Re-insert with same id via upsert + re-embed
+    await col.upsert(id, { title: "brand new content" });
+    await col.embedUnembedded();
+    expect((await col.metrics()).hnswNodeCount).toBe(1);
+
+    // Semantic search should find the new record (not return the old orphaned node)
+    const results = await col.semanticSearch("brand new content", { limit: 5 });
+    expect(results.records.length).toBeGreaterThan(0);
+    expect(results.records[0].title).toBe("brand new content");
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
   });
 });

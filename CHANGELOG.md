@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Task 302 — HNSW orphaned nodes on delete and text-change update** — two memory-leak sites fixed: (A) `Collection.deleteById` now calls `this.hnswIdx?.remove(id)` after the BM25 remove, so deleting a record removes its HNSW node immediately; (B) `Collection.update` now calls `this.hnswIdx?.remove(id)` when `_embedding` is stripped because text fields changed — the stale node is removed at invalidation time rather than leaking until the next `embedUnembedded` cycle. `metrics().hnswNodeCount` now accurately reflects live records. 3 new tests in `hnsw-options.test.ts`: delete drops count, text-change update drops count then re-embed restores it, round-trip delete+re-insert returns new vector. Test count: 1465 → 1468.
+
 ## [2.1.0] - 2026-05-06
 
 ### Added

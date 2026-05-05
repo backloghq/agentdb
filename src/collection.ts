@@ -1357,6 +1357,9 @@ export class Collection {
       // Invalidate embedding if text fields changed
       if (updated[META_EMBEDDING] && this.hasTextChanged(record, updated)) {
         delete updated[META_EMBEDDING];
+        // Remove the now-stale HNSW node immediately. A fresh node is added
+        // by the next embedUnembedded/vectorUpsert call when re-embedding runs.
+        this.hnswIdx?.remove(id);
       }
       this.validateRecord(updated);
       this.stampVersion(updated, id);
@@ -1390,6 +1393,7 @@ export class Collection {
     if (!record || isExpired(record)) return false;
     this.store.delete(id);
     await this.textIndexRemove(id);
+    this.hnswIdx?.remove(id);
     this.updateBTreeIndexes(id, record, undefined);
     if (record._blobs) this.deleteBlobsForRecord(id).catch(() => {});
     this.emitChange("delete", [id], opts?.agent);
