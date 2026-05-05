@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 ### Added
 
 - **`CollectionOptions.maxFindLimit` and `AgentDBOptions.maxFindLimit`** — configurable cap on records returned by `find()` (default: `10_000`, preserving existing behaviour). When a query hits the cap, a `console.warn` is emitted including the current limit value so operators can grep logs. `AgentDBOptions.maxFindLimit` propagates to all collections as a db-wide default; `CollectionOptions.maxFindLimit` overrides per collection.
+- **`CollectionOptions.maxIndexCardinality` and `AgentDBOptions.maxIndexCardinality`** — configurable threshold for disk B-tree index use (default: `1000`, preserving existing behaviour). When a field's cardinality exceeds the threshold, the in-memory B-tree index is skipped and a `console.warn` is emitted once per field at index-load time, so operators can see which fields are falling back to full Parquet scans.
 
 ## [2.0.0] - 2026-05-05
 

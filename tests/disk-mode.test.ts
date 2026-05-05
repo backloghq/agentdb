@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -720,6 +720,71 @@ describe("Disk-backed mode", () => {
       await db.init();
       const col2 = await db.collection("no-checkpoints");
       expect(await col2.count()).toBe(500);
+    });
+  });
+
+  describe("maxIndexCardinality", () => {
+    const schema = defineSchema({
+      name: "card-test",
+      fields: {
+        uid: { type: "string" },
+        status: { type: "enum", values: ["open", "closed"], default: "open" },
+      },
+      indexes: ["uid", "status"],
+      storageMode: "disk",
+    });
+
+    it("warns once per field when cardinality exceeds maxIndexCardinality", async () => {
+      // First session: write 6 records with distinct uid values, close to trigger compaction
+      db = new AgentDB(tmpDir);
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 6; i++) {
+        await col.insert({ uid: `u-${i}`, status: "open" });
+      }
+      await db.close();
+
+      // Second session: reopen with maxIndexCardinality=5 — uid (6 distinct) should exceed it
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        db = new AgentDB(tmpDir, { maxIndexCardinality: 5 });
+        await db.init();
+        const col2 = await db.collection(schema);
+
+        const calls = warnSpy.mock.calls.filter((c) => String(c[0]).includes("maxIndexCardinality=5"));
+        expect(calls.length).toBeGreaterThanOrEqual(1);
+        expect(calls[0][0]).toContain("uid");
+
+        // Warning should not fire again on a subsequent query
+        warnSpy.mockClear();
+        await col2.count({ uid: "u-0" });
+        const callsAfter = warnSpy.mock.calls.filter((c) => String(c[0]).includes("maxIndexCardinality=5"));
+        expect(callsAfter).toHaveLength(0);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("does not warn when maxIndexCardinality is high enough", async () => {
+      db = new AgentDB(tmpDir);
+      await db.init();
+      const col = await db.collection(schema);
+      for (let i = 0; i < 6; i++) {
+        await col.insert({ uid: `u-${i}`, status: "open" });
+      }
+      await db.close();
+
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        db = new AgentDB(tmpDir, { maxIndexCardinality: 10000 });
+        await db.init();
+        await db.collection(schema);
+
+        const calls = warnSpy.mock.calls.filter((c) => String(c[0]).includes("maxIndexCardinality="));
+        expect(calls).toHaveLength(0);
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 });

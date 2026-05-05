@@ -106,6 +106,8 @@ export interface CollectionOptions {
   rowGroupSize?: number;
   /** Maximum records returned by find() (default: 10_000). A console.warn is emitted on truncation. Overrides AgentDBOptions.maxFindLimit for this collection. */
   maxFindLimit?: number;
+  /** Max unique values a field may have before its disk B-tree index is skipped (default: 1000). A console.warn fires once per field when exceeded. Overrides AgentDBOptions.maxIndexCardinality for this collection. */
+  maxIndexCardinality?: number;
 }
 
 /** Change event emitted after mutations. */

@@ -39,6 +39,8 @@ export interface DiskStoreOptions {
   rowGroupSize?: number;
   /** Columns to extract for Parquet skip-scanning. */
   extractColumns?: string[];
+  /** Max unique values a field may have before its B-tree index is skipped (default: 1000). */
+  maxIndexCardinality?: number;
 }
 
 export class DiskStore {
@@ -56,12 +58,15 @@ export class DiskStore {
   /** Pending index files for lazy loading — loaded on first query. */
   private _pendingIndexFiles: Map<string, string> = new Map(); // field → filename
   private _indexManager: IndexManager | null = null;
+  private maxIndexCardinality: number;
+  private _warnedCardinalityFields: Set<string> = new Set();
 
   constructor(backend: StorageBackend, options?: DiskStoreOptions) {
     this.backend = backend;
     this.cache = new RecordCache(options?.cacheSize ?? 1_000);
     this.rowGroupSize = options?.rowGroupSize ?? 5000;
     this.extractColumns = options?.extractColumns ?? [];
+    this.maxIndexCardinality = options?.maxIndexCardinality ?? DiskStore.MAX_INDEX_CARDINALITY;
   }
 
   /** Load persisted state: offset index + compaction metadata + JSONL offsets. */
@@ -97,7 +102,14 @@ export class DiskStore {
     const cardinality = this.compactionMeta.columnCardinality[field];
     // Field not in extracted columns — default to Parquet scan (unknown = assume high)
     if (cardinality === undefined) return false;
-    return cardinality <= DiskStore.MAX_INDEX_CARDINALITY;
+    if (cardinality <= this.maxIndexCardinality) return true;
+    if (!this._warnedCardinalityFields.has(field)) {
+      this._warnedCardinalityFields.add(field);
+      console.warn(
+        `agentdb: B-tree index on field "${field}" skipped — cardinality ${cardinality} exceeds maxIndexCardinality=${this.maxIndexCardinality}. Queries on this field will full-scan. Raise CollectionOptions.maxIndexCardinality to index high-cardinality fields.`,
+      );
+    }
+    return false;
   }
 
   /** Whether there are unsaved writes since last compaction. */

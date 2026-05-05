@@ -70,6 +70,8 @@ export interface AgentDBOptions {
   embeddingBatchSize?: number;
   /** Maximum records returned by find() across all collections (default: 10_000). Per-collection override via CollectionOptions.maxFindLimit. */
   maxFindLimit?: number;
+  /** Max unique values a field may have before its disk B-tree index is skipped (default: 1000). Per-collection override via CollectionOptions.maxIndexCardinality. */
+  maxIndexCardinality?: number;
 }
 
 export interface CollectionInfo {
@@ -138,6 +140,8 @@ export class AgentDB {
       rowGroupSize: opts?.rowGroupSize,
       diskConcurrency: opts?.diskConcurrency,
       embeddingBatchSize: opts?.embeddingBatchSize,
+      maxFindLimit: opts?.maxFindLimit,
+      maxIndexCardinality: opts?.maxIndexCardinality,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -289,6 +293,8 @@ export class AgentDB {
         ? { rowGroupSize: this.opts.rowGroupSize } : {}),
       ...(this.opts.maxFindLimit !== undefined && baseOpts?.maxFindLimit === undefined
         ? { maxFindLimit: this.opts.maxFindLimit } : {}),
+      ...(this.opts.maxIndexCardinality !== undefined && baseOpts?.maxIndexCardinality === undefined
+        ? { maxIndexCardinality: this.opts.maxIndexCardinality } : {}),
     };
     const col = new Collection(name, store, mergedOpts);
     if (this.embeddingProvider) {
@@ -341,6 +347,7 @@ export class AgentDB {
         cacheSize: mergedOpts?.cacheSize ?? 1_000,
         rowGroupSize: mergedOpts?.rowGroupSize ?? 5000,
         extractColumns: schema?.indexes ?? [],
+        maxIndexCardinality: mergedOpts?.maxIndexCardinality,
       });
       await diskStore.load();
 
