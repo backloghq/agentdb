@@ -43,6 +43,10 @@ export interface DiskStoreOptions {
   maxIndexCardinality?: number;
   /** Parallel batch size for JSONL record reads (default: 20). Ties to diskConcurrency on CollectionOptions/AgentDBOptions. */
   diskConcurrency?: number;
+  /** Number of incremental Parquet files before triggering a full merge (default: 10). */
+  mergeThreshold?: number;
+  /** Number of incremental JSONL delta files before triggering a full merge (default: 8). */
+  mergeJsonlThreshold?: number;
 }
 
 export class DiskStore {
@@ -63,6 +67,8 @@ export class DiskStore {
   private maxIndexCardinality: number;
   private _warnedCardinalityFields: Set<string> = new Set();
   private diskConcurrency: number;
+  private _mergeThreshold: number;
+  private _mergeJsonlThreshold: number;
 
   constructor(backend: StorageBackend, options?: DiskStoreOptions) {
     this.backend = backend;
@@ -71,6 +77,8 @@ export class DiskStore {
     this.extractColumns = options?.extractColumns ?? [];
     this.maxIndexCardinality = options?.maxIndexCardinality ?? DiskStore.MAX_INDEX_CARDINALITY;
     this.diskConcurrency = options?.diskConcurrency ?? 20;
+    this._mergeThreshold = options?.mergeThreshold ?? DiskStore.MERGE_THRESHOLD;
+    this._mergeJsonlThreshold = options?.mergeJsonlThreshold ?? DiskStore.MERGE_JSONL_THRESHOLD;
   }
 
   /** Load persisted state: offset index + compaction metadata + JSONL offsets. */
@@ -98,6 +106,11 @@ export class DiskStore {
 
   /** Max cardinality for in-memory index (above this, use Parquet column scan). Default: 1000. */
   static readonly MAX_INDEX_CARDINALITY = 1000;
+
+  /** Configured Parquet file merge threshold for this store. */
+  get mergeThreshold(): number { return this._mergeThreshold; }
+  /** Configured JSONL file merge threshold for this store. */
+  get mergeJsonlThreshold(): number { return this._mergeJsonlThreshold; }
 
   /** Check if a field should use in-memory index (low cardinality) or Parquet scan (high cardinality). */
   shouldUseInMemoryIndex(field: string): boolean {
@@ -358,7 +371,7 @@ export class DiskStore {
   /** True when accumulated JSONL files exceed the merge threshold. */
   shouldCompact(): boolean {
     const jsonlFileCount = (this.compactionMeta?.jsonlFiles?.length ?? 0) + 1;
-    return jsonlFileCount >= DiskStore.MERGE_JSONL_THRESHOLD;
+    return jsonlFileCount >= this._mergeJsonlThreshold;
   }
 
   /**
@@ -385,7 +398,7 @@ export class DiskStore {
   ): Promise<void> {
     const parquetFileCount = (this.compactionMeta?.parquetFiles?.length ?? 0) + 1;
     const jsonlFileCount = (this.compactionMeta?.jsonlFiles?.length ?? 0) + 1;
-    const shouldMerge = !this.compactionMeta || parquetFileCount >= DiskStore.MERGE_THRESHOLD || jsonlFileCount >= DiskStore.MERGE_JSONL_THRESHOLD || !newRecords;
+    const shouldMerge = !this.compactionMeta || parquetFileCount >= this._mergeThreshold || jsonlFileCount >= this._mergeJsonlThreshold || !newRecords;
 
     if (shouldMerge) {
       await this._compactFull(allRecords);
