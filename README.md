@@ -879,6 +879,20 @@ Every configurable knob, its location, default, and the workload signal that sho
 | `hnsw.efConstruction` | `AgentDB` / `Collection` | `200` | index build time is too slow (lower) or initial recall on a fresh dataset is unsatisfactory (raise) | 50 – 500 |
 | `hnsw.efSearch` | `AgentDB` / `Collection` | `50` | `semanticSearch` / `hybridSearch` recall is insufficient (raise) or query latency is high (lower) | 10 – 500 |
 
+### Write mode and commit knobs
+
+| Option | Location | Default | Tune when… | Notes |
+|--------|----------|---------|-----------|-------|
+| `writeMode` | `AgentDB` | `"immediate"` | write throughput is the bottleneck (switch to `"group"` for ~12x, `"async"` for ~50x) | `"group"` / `"async"` require single-writer; `"async"` loses unflushed ops on crash |
+| `groupCommitSize` | `AgentDB` | `50` | group-commit batches are too small (raise) or latency per op is too high (lower) | Only effective when `writeMode: "group"` |
+| `groupCommitMs` | `AgentDB` | `100` | you need lower write latency at the cost of smaller batches (lower) or higher throughput at higher latency (raise) | Only effective when `writeMode: "group"` |
+
+### Memory and budget knobs
+
+| Option | Location | Default | Tune when… | Notes |
+|--------|----------|---------|-----------|-------|
+| `memoryBudget` | `AgentDB` | `0` (unlimited) | you want a `console.warn` when total collection memory exceeds a threshold | Set in bytes; `0` disables the check; check fires at mutation time via the memory monitor |
+
 ### HTTP / MCP server knobs
 
 | Option | Location | Default | Tune when… | Recommended range |
