@@ -115,7 +115,7 @@ export interface ChangeEvent {
 }
 
 /**
- * Thrown when a v1.4 text-index.json blob is found on disk without a v1.5
+ * Thrown when a v1.4 text-index.json blob is found on disk without a v2.0
  * termlog manifest. The collection cannot be opened until the index is rebuilt.
  *
  * Resolution: call `collection.rebuildTextIndex()` or the `db_rebuild_text_index`
@@ -125,7 +125,7 @@ export class LegacyTextIndexError extends Error {
   readonly legacyPath: string;
   constructor(legacyPath: string) {
     super(
-      `v1.4 text index detected at ${legacyPath}. v1.5 does not auto-migrate. ` +
+      `v1.4 text index detected at ${legacyPath}. v2.0 does not auto-migrate. ` +
       `To rebuild from records: call \`collection.rebuildTextIndex()\` or ` +
       `use the \`db_rebuild_text_index\` MCP tool, then reopen.`,
     );
