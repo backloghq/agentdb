@@ -469,4 +469,20 @@ describe("AgentDB.collection — schema-vs-opts precedence (#202)", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("db.close() is idempotent — second call does not throw", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agentdb-close-idem-"));
+    try {
+      const db2 = new AgentDB(dir);
+      await db2.init();
+      await db2.collection("items");
+      await db2.close();
+      // Second close must be a no-op, not throw "Store is not open"
+      await expect(db2.close()).resolves.toBeUndefined();
+      // Third call too
+      await expect(db2.close()).resolves.toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

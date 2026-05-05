@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - **`mergeThreshold` renamed to `mergeParquetThreshold`** everywhere — `CollectionOptions`, `AgentDBOptions`, `DiskStoreOptions`, and the `DiskStore.mergeParquetThreshold` getter. The old name was ambiguous (both Parquet and JSONL have thresholds); the new name is unambiguous. No behaviour change; defaults are unchanged (`10` for Parquet, `8` for JSONL).
 - **`CollectionOptions.hnsw` and `AgentDBOptions.hnsw`** — expose HNSW index parameters (`M`, `efConstruction`, `efSearch`, `maxLevel`) via the standard db-wide-default / per-collection-override pattern. Defaults preserved: `M=16`, `efConstruction=200`, `efSearch=50`, `maxLevel=max(16,floor(log(1e6)/log(M)))`. Config getters added to `HnswIndex`: `configM`, `configEfConstruction`, `configEfSearch`, `configMaxLevel`. `Collection.getHnswIndex()` accessor added for test observability. `HnswIndex` and `HnswOptions` exported from package root. README Production Tuning table updated with three new rows.
 
+### Changed
+
+- **`Collection.close()` is now idempotent** — calling `close()` on an already-closed collection (or after `db.close()`) is now a no-op instead of throwing "Store is not open". The guard `if (!this._opened) return` is added at the top of `close()` before the rebuild-abort interlock. This is an additive behaviour change: code that previously relied on the throw to detect double-close must now check `_opened` explicitly (no known callers do this). 1 new test: two `db.close()` calls in sequence; both resolve without throwing. Test count: 1449 → 1450.
+
 ### Fixed
 
 - **Production Tuning table: `diskConcurrency` default corrected 16 → 20** — doc drift from R5; actual default in `DiskStore` and `materializeCandidates` is 20, the table row said 16. README line ~806 and the S3 sizing guidance paragraph updated.

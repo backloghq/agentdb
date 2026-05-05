@@ -857,8 +857,9 @@ export class Collection {
     if (this.textIdx) await this.textIdx.flush();
   }
 
-  /** Close the underlying store. */
+  /** Close the underlying store. Idempotent — calling twice is a no-op. */
   async close(): Promise<void> {
+    if (!this._opened) return;
     // C: interlock with an in-flight FS-mode rebuild. Capture the settled promise BEFORE
     // aborting (the finally block clears _rebuildSettled before resolving it, so we must
     // hold a local reference). Abort causes the rebuild loop to throw AbortError; the
