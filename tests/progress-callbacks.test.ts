@@ -346,6 +346,48 @@ describe("Progress callbacks", () => {
       await rm(dir, { recursive: true, force: true });
     });
 
+    it("bm25Search during rebuildTextIndex does not throw (R6/3 no-throw guarantee)", async () => {
+      // While a rebuildTextIndex is in flight, a concurrent bm25Search must never throw.
+      // It reads from the old textIdx (still open) and may return stale results, but
+      // crashing the search caller would be a contract violation.
+      const dir = await makeTmpDir();
+      const N = 20;
+
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "concurrent-search",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      for (let i = 0; i < N; i++) await col.insert({ title: `findme ${i}` });
+
+      let searchResultOrError: unknown = undefined;
+      let searchFired = false;
+      await col.rebuildTextIndex({
+        onProgress: () => {
+          if (!searchFired) {
+            searchFired = true;
+            // Fire bm25Search concurrently — must not throw, result may be stale.
+            searchResultOrError = col.bm25Search("findme").catch((e: unknown) => e);
+          }
+        },
+      });
+
+      // Wait for the concurrent search to settle.
+      if (searchResultOrError instanceof Promise) {
+        searchResultOrError = await searchResultOrError;
+      }
+
+      // The search must NOT have produced an Error/rejection.
+      expect(searchResultOrError).not.toBeInstanceOf(Error);
+      // And it must look like a valid search result (has a records array).
+      expect(searchResultOrError).toHaveProperty("records");
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
     it("snapshot-then-swap: abort preserves the original index (not empty)", async () => {
       // Verify that aborting rebuildTextIndex mid-run does NOT destroy the existing text index.
       // The collection must still be able to bm25Search using the pre-abort index.

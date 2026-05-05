@@ -2,8 +2,8 @@
  * Unit tests for src/config.ts — env var coercion (commit 1) and
  * file loading + precedence (commit 2).
  */
-import { describe, it, expect, afterEach } from "vitest";
-import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { writeFileSync, mkdirSync, rmSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadAgentDBConfig, ConfigValidationError } from "../src/config.js";
@@ -423,6 +423,44 @@ describe("Config file loading", () => {
     // AGENTDB_CONFIG in env (no explicit configPath option → loader reads AGENTDB_CONFIG)
     const cfg = loadAgentDBConfig({ env: { AGENTDB_CONFIG: cfgPath } });
     expect(cfg.db?.rowGroupSize).toBe(2000);
+  });
+
+  // -------------------------------------------------------------------------
+  // R6/3: World-readable config file warning (POSIX only)
+  // -------------------------------------------------------------------------
+
+  it("world-readable config file emits console.warn (POSIX only)", () => {
+    if (process.platform === "win32") return;
+
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "world-readable.json");
+    writeFileSync(cfgPath, JSON.stringify({ db: { cacheSize: 100 } }));
+    chmodSync(cfgPath, 0o644); // world-readable (others can read)
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      loadAgentDBConfig({ configPath: cfgPath, env: {} });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("world-readable"));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("non-world-readable config file does not emit console.warn", () => {
+    if (process.platform === "win32") return;
+
+    const dir = makeTmpDir();
+    const cfgPath = join(dir, "private.json");
+    writeFileSync(cfgPath, JSON.stringify({ db: { cacheSize: 100 } }));
+    chmodSync(cfgPath, 0o600); // owner-only
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      loadAgentDBConfig({ configPath: cfgPath, env: {} });
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 

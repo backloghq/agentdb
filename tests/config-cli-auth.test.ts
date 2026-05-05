@@ -38,7 +38,7 @@ afterAll(() => {
 function startServer(
   args: string[],
   opts: { env?: Record<string, string>; timeoutMs?: number } = {},
-): Promise<{ proc: ChildProcess; port: number; kill: () => void }> {
+): Promise<{ proc: ChildProcess; port: number; kill: () => void; getStderr: () => string }> {
   return new Promise((resolve, reject) => {
     const proc = spawn("node", [CLI, ...args], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -66,6 +66,7 @@ function startServer(
           proc,
           port: parseInt(m[1], 10),
           kill: () => proc.kill("SIGKILL"),
+          getStderr: () => stderr,
         });
       }
     });
@@ -266,6 +267,87 @@ describe.skipIf(!existsSync(CLI))("R5/1 auth wiring integration", () => {
       const status = await mcpPost(port);
       // No auth configured → pass-through (200 or protocol-specific non-401)
       expect(status).not.toBe(500);
+    } finally {
+      srv.kill();
+    }
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // R6/3: Auth precedence — JWT wins when multiple mechanisms configured
+  // --------------------------------------------------------------------------
+
+  it("auth precedence: JWT wins over multi-token when both are configured", async () => {
+    // When JWT secret + multi-token are both set, the CLI must:
+    //   (a) emit the "multiple auth mechanisms" conflict warn
+    //   (b) enforce JWT — so a valid JWT is accepted
+    //   (c) reject a multi-token bearer (multi-token is silently dropped)
+    const port = 39120 + Math.floor(Math.random() * 100);
+    const dataDir = join(tmp, "precedence-data");
+    const cfgPath = join(tmp, "precedence-cfg.json");
+    const secret = "precedence-jwt-secret-r63";
+    const multiTok = "multi-tok-should-be-ignored";
+
+    writeFileSync(cfgPath, JSON.stringify({ http: { multiToken: [multiTok] } }));
+
+    const srv = await startServer(
+      ["--http", "--port", String(port), "--path", dataDir, "--config", cfgPath],
+      { env: { AGENTDB_HTTP_JWT_SECRET: secret } },
+    );
+    try {
+      // Give the process a moment to flush remaining stderr lines
+      await new Promise((r) => setTimeout(r, 200));
+      const stderr = srv.getStderr();
+
+      // (a) conflict warn fired
+      expect(stderr).toContain("multiple auth mechanisms");
+
+      // (b) valid JWT is accepted
+      const jwtToken = await signJwt(secret);
+      expect(await mcpPost(port, { Authorization: `Bearer ${jwtToken}` })).not.toBe(401);
+
+      // (c) multi-token bearer is rejected (JWT mechanism is active, not multi-token)
+      expect(await mcpPost(port, { Authorization: `Bearer ${multiTok}` })).toBe(401);
+    } finally {
+      srv.kill();
+    }
+  }, 15000);
+
+  // --------------------------------------------------------------------------
+  // R6/3: Vendor key fallbacks — VOYAGE_API_KEY / COHERE_API_KEY
+  // --------------------------------------------------------------------------
+
+  it("vendor key fallback: VOYAGE_API_KEY used when AGENTDB_EMBEDDINGS_API_KEY absent", async () => {
+    // The server should start and log "Embeddings: voyage" even when only VOYAGE_API_KEY
+    // is set (not AGENTDB_EMBEDDINGS_API_KEY). This verifies the fallback in resolveAgentDBOpts.
+    const port = 39130 + Math.floor(Math.random() * 100);
+    const dataDir = join(tmp, "voyage-fallback-data");
+
+    const srv = await startServer(
+      ["--http", "--port", String(port), "--path", dataDir, "--embeddings", "voyage"],
+      { env: { VOYAGE_API_KEY: "test-voyage-key-r63" } },
+    );
+    try {
+      const stderr = srv.getStderr();
+      expect(stderr).toContain("Embeddings: voyage");
+      // Server is live — no startup error from missing key
+      expect(await mcpPost(port)).not.toBe(500);
+    } finally {
+      srv.kill();
+    }
+  }, 15000);
+
+  it("vendor key fallback: COHERE_API_KEY used when AGENTDB_EMBEDDINGS_API_KEY absent", async () => {
+    const port = 39140 + Math.floor(Math.random() * 100);
+    const dataDir = join(tmp, "cohere-fallback-data");
+
+    const srv = await startServer(
+      ["--http", "--port", String(port), "--path", dataDir, "--embeddings", "cohere"],
+      { env: { COHERE_API_KEY: "test-cohere-key-r63" } },
+    );
+    try {
+      const stderr = srv.getStderr();
+      expect(stderr).toContain("Embeddings: cohere");
+      expect(await mcpPost(port)).not.toBe(500);
     } finally {
       srv.kill();
     }
