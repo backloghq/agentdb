@@ -80,6 +80,25 @@ export interface AgentDBOptions {
   mergeJsonlThreshold?: number;
   /** HNSW index parameters (M, efConstruction, efSearch, maxLevel). Applied to all collections as a default. Per-collection override via CollectionOptions.hnsw. */
   hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number };
+  /**
+   * Per-collection option overrides, keyed by collection name.
+   *
+   * Precedence (highest → lowest):
+   *   1. Options passed programmatically to `db.collection(name, opts)` — wins for every field
+   *      that the caller explicitly defines (i.e. the field is not `undefined`).
+   *   2. This map (`collectionOverrides[name]`) — fills gaps not covered by the caller's opts.
+   *   3. AgentDB-level db-wide defaults (e.g. `AgentDBOptions.maxFindLimit`) — fill remaining gaps.
+   *   4. Built-in defaults (e.g. `maxFindLimit: 10_000`).
+   *
+   * Overrides are applied at collection-open time. The map reference is stored directly, so
+   * mutations to this object after construction are visible to future opens of any collection
+   * whose name appears in the map. Already-open collections are NOT affected — evict or close
+   * the collection first (e.g. via LRU or `db.close()`) for changes to take effect.
+   *
+   * The `agentdb.config.json` `collections:` block is piped into this field automatically by
+   * `loadAgentDBConfig` / the CLI.
+   */
+  collectionOverrides?: Record<string, CollectionOptions>;
 }
 
 export interface CollectionInfo {
@@ -154,6 +173,7 @@ export class AgentDB {
       mergeParquetThreshold: opts?.mergeParquetThreshold,
       mergeJsonlThreshold: opts?.mergeJsonlThreshold,
       hnsw: opts?.hnsw,
+      collectionOverrides: opts?.collectionOverrides,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -290,7 +310,22 @@ export class AgentDB {
     await mkdir(colDir, { recursive: true });
 
     const store = new Store<Record<string, unknown>>();
-    const baseOpts = this.collectionOpts.get(name);
+    const callerOpts = this.collectionOpts.get(name);
+    const configOverride = this.opts.collectionOverrides?.[name];
+
+    // Three-level merge: callerOpts (highest) > configOverride > db-wide defaults (applied below).
+    // Only defined fields from callerOpts override configOverride values; undefined caller fields
+    // fall through to configOverride, which falls through to the db-wide defaults below.
+    let baseOpts: CollectionOptions | undefined;
+    if (callerOpts || configOverride) {
+      baseOpts = { ...configOverride };
+      if (callerOpts) {
+        for (const [k, v] of Object.entries(callerOpts) as [string, unknown][]) {
+          if (v !== undefined) (baseOpts as Record<string, unknown>)[k] = v;
+        }
+      }
+    }
+
     // Apply db-wide defaults for knobs that also have per-collection overrides.
     // Per-collection value wins; db default fills in only when the collection didn't specify one.
     const mergedOpts: typeof baseOpts = {

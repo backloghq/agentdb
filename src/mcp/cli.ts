@@ -265,6 +265,13 @@ async function resolveAgentDBOpts(): Promise<AgentDBOptions> {
     console.error(`AgentDB using S3 backend: s3://${s3Bucket}/${s3Prefix || ""}`);
   }
 
+  // Per-collection overrides from config file (config.collections map).
+  // Each entry's fields take precedence over db-wide defaults but yield to programmatic
+  // CollectionOptions passed by the caller at db.collection(name, opts).
+  if (config.collections && Object.keys(config.collections).length > 0) {
+    opts.collectionOverrides = config.collections as import("../agentdb.js").AgentDBOptions["collectionOverrides"];
+  }
+
   return opts;
 }
 
