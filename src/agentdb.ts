@@ -358,8 +358,8 @@ export class AgentDB {
         }
       }
 
-      // Load persisted indexes
-      await diskStore.loadIndexes(col.getIndexManager(), col.getTextIndex());
+      // Load persisted indexes (text index now managed by TermLog; only B-tree indexes loaded here)
+      await diskStore.loadIndexes(col.getIndexManager());
 
       col.setDiskStore(diskStore);
       // Rebuild HNSW from disk embeddings if an embedding provider is configured.
@@ -791,7 +791,7 @@ export class AgentDB {
             newRecords.length > 0 ? newRecords : undefined,
           );
         }
-        await ds.saveIndexes(col.getIndexManager(), col.getTextIndex());
+        await ds.saveIndexes(col.getIndexManager());
       }
       // Clean up WAL ops after close — data is safe in JSONL + Parquet
       const diskBackend = ds ? col.getBackend() : null;

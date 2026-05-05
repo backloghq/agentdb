@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { rm, mkdir } from "node:fs/promises";
+import { join as pathJoin } from "node:path";
 import { Store, FsBackend } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
 import type { DiskStore } from "./disk-store.js";
 import { getNestedValue } from "./filter.js";
 // parseCompactFilter used by IndexManager (imported there directly)
-import { TextIndex } from "./text-index.js";
+import { TermLog } from "@backloghq/termlog";
 import { rrf } from "./rrf.js";
 import { ViewManager } from "./view.js";
 import type { ViewDefinition } from "./view.js";
@@ -122,7 +124,8 @@ export class Collection {
   private store: Store<StoredRecord>;
   private _opened = false;
   private opts: CollectionOptions;
-  private textIdx: TextIndex | null = null;
+  private textIdx: TermLog | null = null;
+  private _dir = "";
   private views = new ViewManager();
   private hnswIdx: HnswIndex | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
@@ -154,7 +157,7 @@ export class Collection {
       for (const [id, record] of this.store.entries()) {
         if (!isExpired(record)) {
           const clean = stripMeta(record);
-          this.textIdx.add(id, this.textRecord(clean));
+          await this.textIdx.add(id, extractTextFromRecord(this.textRecord(clean)));
         }
       }
     }
@@ -183,8 +186,8 @@ export class Collection {
   /** Get the index manager (for persistence). */
   getIndexManager(): IndexManager { return this.indexes; }
 
-  /** Get the text index (for persistence). */
-  getTextIndex(): TextIndex | null { return this.textIdx; }
+  /** Get the text index (TermLog handle). */
+  getTextIndex(): TermLog | null { return this.textIdx; }
 
   /** Field names restricted to BM25/text indexing. Empty means all-strings fallback. */
   searchableFields(): string[] { return this.opts.searchableFields ?? []; }
@@ -199,7 +202,7 @@ export class Collection {
     this.name = name;
     this.store = store;
     this.opts = opts ?? {};
-    if (this.opts.textSearch) this.textIdx = new TextIndex({ k1: this.opts.bm25K1, b: this.opts.bm25B });
+    // TermLog is opened in open() once the directory is known; textIdx stays null until then.
   }
 
   /** Check optimistic lock and throw on version mismatch. */
@@ -270,12 +273,23 @@ export class Collection {
   }
 
   /** Rebuild the full text index from current store contents. */
-  private rebuildTextIndex(): void {
-    if (!this.textIdx) return;
-    this.textIdx.clear();
+  private async rebuildTextIndex(): Promise<void> {
+    if (!this.textIdx || !this._dir) return;
+    await this.textIdx.close();
+    const textDir = pathJoin(this._dir, "text");
+    await rm(textDir, { recursive: true, force: true });
+    await mkdir(textDir, { recursive: true });
+    this.textIdx = await TermLog.open({
+      dir: textDir,
+      k1: this.opts.bm25K1 ?? 1.2,
+      b: this.opts.bm25B ?? 0.75,
+    });
     for (const [id, record] of this.store.entries()) {
-      this.textIdx.add(id, this.textRecord(stripMeta(record)));
+      if (!isExpired(record)) {
+        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+      }
     }
+    await this.textIdx.flush();
   }
 
   /** Rebuild all indexes from current store contents. Delegates to IndexManager. */
@@ -288,12 +302,12 @@ export class Collection {
    * Re-indexes only the specified records in the text index (avoids re-tokenizing all records).
    * B-tree indexes are fully rebuilt (cheap — just field lookups, no tokenization).
    */
-  private incrementalIndexUpdate(affectedIds: string[]): void {
+  private async incrementalIndexUpdate(affectedIds: string[]): Promise<void> {
     const cleanRecords = this.indexes.incrementalUpdate(affectedIds, (id) => this.store.get(id));
     if (this.textIdx) {
       for (const [id, clean] of cleanRecords) {
-        if (clean) this.textIdx.add(id, this.textRecord(clean));
-        else this.textIdx.remove(id);
+        if (clean) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(clean)));
+        else await this.textIdx.remove(id);
       }
     }
   }
@@ -386,6 +400,7 @@ export class Collection {
   async open(dir: string, options?: { checkpointThreshold?: number; checkpointOnClose?: boolean; backend?: StorageBackend; agentId?: string; writeMode?: "immediate" | "group" | "async"; groupCommitSize?: number; groupCommitMs?: number; readOnly?: boolean; skipLoad?: boolean }): Promise<void> {
     await this.store.open(dir, options);
     this._opened = true;
+    this._dir = dir;
     if (options?.backend) {
       this.backend = options.backend;
     } else {
@@ -396,10 +411,24 @@ export class Collection {
       this.backend = blobBackend;
     }
     this.blobPrefix = "blobs";
+
+    // Open TermLog for text search (if enabled) before WAL replay so adds land in the index.
+    if (this.opts.textSearch) {
+      const textDir = pathJoin(dir, "text");
+      await mkdir(textDir, { recursive: true });
+      this.textIdx = await TermLog.open({
+        dir: textDir,
+        k1: this.opts.bm25K1 ?? 1.2,
+        b: this.opts.bm25B ?? 0.75,
+      });
+    }
+
     // Single pass: detect TTL, build text index, load HNSW embeddings
     for (const [id, record] of this.store.entries()) {
       if (record[META_EXPIRES]) this._hasTTL = true;
-      if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(record)));
+      if (this.textIdx && !isExpired(record)) {
+        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+      }
       if (!isExpired(record)) {
         const stored = record[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
         if (stored) {
@@ -412,10 +441,15 @@ export class Collection {
         }
       }
     }
+    if (this.textIdx) await this.textIdx.flush();
   }
 
   /** Close the underlying store. */
   async close(): Promise<void> {
+    if (this.textIdx) {
+      await this.textIdx.close();
+      this.textIdx = null;
+    }
     await this.store.close();
     this._opened = false;
   }
@@ -434,7 +468,7 @@ export class Collection {
     this.stampVersion(stored, id);
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
-    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
+    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("insert", [id], opts?.agent);
     return id;
@@ -465,7 +499,7 @@ export class Collection {
     });
     if (this.textIdx) {
       for (const { id, stored } of prepared) {
-        this.textIdx.add(id, this.textRecord(stripMeta(stored)));
+        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
       }
     }
     for (const { id, stored } of prepared) {
@@ -586,7 +620,9 @@ export class Collection {
     let textMatchIds: Set<string> | null = null;
     if (textQuery) {
       if (!this.textIdx) throw new Error("Text search not enabled. Set textSearch: true in collection options.");
-      textMatchIds = new Set(this.textIdx.search(textQuery));
+      await this.textIdx.flush();
+      const hits = await this.textIdx.search(textQuery, { mode: "and" });
+      textMatchIds = new Set(hits.map((h) => h.docId));
     }
 
     // Lazy-load persisted indexes on first query (deferred from open for fast cold start)
@@ -889,7 +925,7 @@ export class Collection {
     // Incremental re-index for text and B-tree (only affected records)
     if (this.textIdx) {
       for (const { id, updated } of updates) {
-        this.textIdx.add(id, this.textRecord(stripMeta(updated)));
+        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(updated))));
       }
     }
     for (const { id, old, updated } of updates) {
@@ -909,7 +945,7 @@ export class Collection {
     const record = this.store.get(id);
     if (!record || isExpired(record)) return false;
     this.store.delete(id);
-    if (this.textIdx) this.textIdx.remove(id);
+    if (this.textIdx) await this.textIdx.remove(id);
     this.updateBTreeIndexes(id, record, undefined);
     if (record._blobs) this.deleteBlobsForRecord(id).catch(() => {});
     this.emitChange("delete", [id], opts?.agent);
@@ -936,7 +972,7 @@ export class Collection {
     this.validateRecord(stored);
     this.stampVersion(stored, id);
     await this.store.set(id, stored);
-    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
+    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     this.updateBTreeIndexes(id, oldRecord, stored);
     this.emitChange("upsert", [id], opts?.agent);
     return { id, action: existing ? "updated" : "inserted" };
@@ -974,7 +1010,7 @@ export class Collection {
     });
 
     for (const { id, stored, oldRecord, existing } of prepared) {
-      if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
+      if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
       this.updateBTreeIndexes(id, oldRecord, stored);
       results.push({ id, action: existing ? "updated" : "inserted" });
     }
@@ -1024,7 +1060,7 @@ export class Collection {
       }
     });
     if (this.textIdx) {
-      for (const id of toDelete) this.textIdx.remove(id);
+      for (const id of toDelete) await this.textIdx.remove(id);
     }
     for (const { id, record } of oldRecords) {
       if (record) this.updateBTreeIndexes(id, record, undefined);
@@ -1045,9 +1081,9 @@ export class Collection {
     const result = await this.store.undo();
     if (result) {
       if (lastOp) {
-        this.incrementalIndexUpdate([lastOp.id]);
+        await this.incrementalIndexUpdate([lastOp.id]);
       } else {
-        this.rebuildTextIndex();
+        await this.rebuildTextIndex();
         this.rebuildBTreeIndexes();
       }
       this.emitChange("undo", lastOp ? [lastOp.id] : []);
@@ -1077,7 +1113,7 @@ export class Collection {
    */
   async batch(fn: () => void): Promise<void> {
     await this.store.batch(fn);
-    this.rebuildTextIndex();
+    await this.rebuildTextIndex();
     this.rebuildBTreeIndexes();
     this.emitChange("update", []);
   }
@@ -1092,7 +1128,7 @@ export class Collection {
    */
   async refresh(): Promise<void> {
     await this.store.refresh();
-    this.rebuildTextIndex();
+    await this.rebuildTextIndex();
     this.rebuildBTreeIndexes();
     this.emitChange("update", []);
   }
@@ -1107,7 +1143,7 @@ export class Collection {
     const newOps = await this.store.tail();
     if (newOps.length > 0) {
       const affectedIds = [...new Set(newOps.map((op) => op.id))];
-      this.incrementalIndexUpdate(affectedIds);
+      await this.incrementalIndexUpdate(affectedIds);
       this.emitChange("update", affectedIds);
     }
     return newOps;
@@ -1152,7 +1188,7 @@ export class Collection {
       }
     });
     for (const { id, record } of expired) {
-      if (this.textIdx) this.textIdx.remove(id);
+      if (this.textIdx) await this.textIdx.remove(id);
       this.updateBTreeIndexes(id, record, undefined);
     }
     const ids = expired.map((e) => e.id);
@@ -1214,7 +1250,9 @@ export class Collection {
       throw new Error("Full-text search not enabled. Set textSearch: true in collection options.");
     }
     await this.ensureDiskIndexesLoaded();
-    const matchIds = this.textIdx.search(query);
+    await this.textIdx.flush();
+    const hits = await this.textIdx.search(query, { mode: "and" });
+    const matchIds = new Set(hits.map((h) => h.docId));
     const allAccessor = this.allCleanRecords();
     const limit = opts?.limit ?? 50;
     const offset = opts?.offset ?? 0;
@@ -1333,7 +1371,9 @@ export class Collection {
     const limit = opts?.limit ?? 10;
     const candidateLimit = opts?.candidateLimit ?? Math.max(limit * 4, 50);
 
-    const candidates = this.textIdx.searchScored(query, { limit: candidateLimit });
+    await this.textIdx.flush();
+    const hits = await this.textIdx.search(query, { mode: "or", limit: candidateLimit });
+    const candidates = hits.map((h) => ({ id: h.docId, score: h.score }));
     if (candidates.length === 0) return { records: [], scores: [] };
 
     return this.materializeCandidates(candidates, { limit, filter: opts?.filter, summary: opts?.summary });
@@ -1750,7 +1790,7 @@ export class Collection {
     const oldRecord = this.store.get(id);
     await this.store.set(id, stored);
     this.updateBTreeIndexes(id, oldRecord, stored);
-    if (this.textIdx) this.textIdx.add(id, this.textRecord(stripMeta(stored)));
+    if (this.textIdx) await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(stored))));
     // Update HNSW (remove old if exists, add new)
     if (this.hnswIdx.size > 0) {
       try { this.hnswIdx.remove(id); } catch { /* not in index yet */ }
@@ -1838,6 +1878,11 @@ export class Collection {
   stats(): { activeRecords: number; opsCount: number; textIndexBytes: number } {
     const s = this.store.stats();
     return { activeRecords: s.activeRecords, opsCount: s.opsCount, textIndexBytes: this.textIdx?.estimatedBytes() ?? 0 };
+  }
+
+  /** Flush the TermLog text index to disk (called by AgentDB.close and after WAL replay). */
+  async flushTextIndex(): Promise<void> {
+    if (this.textIdx) await this.textIdx.flush();
   }
 
   /**
