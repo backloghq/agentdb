@@ -1905,4 +1905,38 @@ describe("Collection", () => {
       }
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Task 304 — Collection.close() listener + watcher cleanup
+  // ---------------------------------------------------------------------------
+  describe("Task 304 — close() cleans up emitter listeners and watch interval", () => {
+    it("change listeners are removed on close — emitter has no listeners after close()", async () => {
+      const events: string[] = [];
+      const listener = () => { events.push("fired"); };
+      col.on("change", listener);
+
+      // Verify listener is registered (fires on insert)
+      await col.insert({ name: "before-close" });
+      expect(events).toHaveLength(1);
+
+      await col.close();
+
+      // After close, the emitter must have zero "change" listeners
+      const emitter = (col as unknown as { emitter: { listenerCount: (e: string) => number } }).emitter;
+      expect(emitter.listenerCount("change")).toBe(0);
+    });
+
+    it("watch interval is stopped on close — no further callbacks fire after close()", async () => {
+      const calls: number[] = [];
+      col.watch(() => { calls.push(Date.now()); }, 50);
+
+      await col.close();
+
+      // After close, capture the call count and wait briefly — if the interval leaked
+      // it would fire again within 200ms. No new calls = watcher cleaned up.
+      const countAfterClose = calls.length;
+      await new Promise((r) => setTimeout(r, 150));
+      expect(calls.length).toBe(countAfterClose);
+    });
+  });
 });

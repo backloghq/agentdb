@@ -874,6 +874,11 @@ export class Collection {
     if (this._rebuildAbortCtrl) this._rebuildAbortCtrl.abort();
     if (waitForRebuild) await waitForRebuild;
 
+    // Stop the WAL polling interval before closing the store (unwatch needs the store).
+    this.unwatch();
+    // Remove all change listeners so closed Collection objects don't retain subscriber closures.
+    this.emitter.removeAllListeners();
+
     if (this.textIdx) {
       await this.textIdx.close();
       this.textIdx = null;
