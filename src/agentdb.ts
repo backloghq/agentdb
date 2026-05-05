@@ -769,6 +769,10 @@ export class AgentDB {
         }
         totalRecords++;
       }
+      // Rebuild text index from imported records so bm25Search works without close/reopen.
+      if (col.getTextIndex()) {
+        await col.rebuildTextIndex();
+      }
     }
     return { collections: colNames.length, records: totalRecords };
   }
