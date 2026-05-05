@@ -188,6 +188,29 @@ describe("termlog lifecycle — db_export / db_import", () => {
     expect(dstIds).not.toContain("r3");
     await dstDb.close();
   });
+
+  it("import does not double-index records — docCount equals record count", async () => {
+    const srcDb = new AgentDB(srcDir);
+    await srcDb.init();
+    const srcCol = await srcDb.collection(textSchema);
+    for (let i = 0; i < 10; i++) {
+      await srcCol.insert({ _id: `d${i}`, title: `term${i} document` });
+    }
+    const data = await srcDb.export();
+    await srcDb.close();
+
+    const dstDb = new AgentDB(dstDir);
+    await dstDb.init();
+    await dstDb.collection(textSchema);
+    await dstDb.import(data);
+
+    const dstCol = await dstDb.collection(textSchema);
+    // Flush write buffer so docCount() reflects indexed segments, not just the buffer.
+    await dstCol.flushTextIndex();
+    const docCount = dstCol.getTextIndex()?.docCount() ?? 0;
+    expect(docCount).toBe(10);
+    await dstDb.close();
+  });
 });
 
 describe("termlog lifecycle — compactInPlace isolation", () => {
