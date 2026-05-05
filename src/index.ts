@@ -24,6 +24,8 @@ export type {
   FilterCacheHandle,
 } from "./collection.js";
 
+export { HnswIndex } from "./hnsw.js";
+export type { HnswOptions } from "./hnsw.js";
 export { RecordCache } from "./record-cache.js";
 export type { CacheStats } from "./record-cache.js";
 export { ArrayIndex } from "./array-index.js";

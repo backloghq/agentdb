@@ -114,6 +114,18 @@ export class HnswIndex {
     return this.maxLayer;
   }
 
+  /** Max connections per node per layer as configured (default: 16). */
+  get configM(): number { return this.M; }
+
+  /** Search width used during construction as configured (default: 200). */
+  get configEfConstruction(): number { return this.efConstruction; }
+
+  /** Search width used during queries as configured (default: 50). */
+  get configEfSearch(): number { return this.efSearch; }
+
+  /** Maximum layer cap as configured (default: derived as max(16, floor(log(1e6)/log(M)))). */
+  get configMaxLevelCap(): number { return this.maxLevelCap; }
+
   /** Add a vector to the index. */
   add(id: string, vector: number[]): void {
     if (vector.length !== this.dimensions) {

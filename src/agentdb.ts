@@ -78,6 +78,8 @@ export interface AgentDBOptions {
   mergeThreshold?: number;
   /** Number of incremental JSONL delta files before triggering a full merge (default: 8). Per-collection override via CollectionOptions.mergeJsonlThreshold. */
   mergeJsonlThreshold?: number;
+  /** HNSW index parameters (M, efConstruction, efSearch, maxLevel). Applied to all collections as a default. Per-collection override via CollectionOptions.hnsw. */
+  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number };
 }
 
 export interface CollectionInfo {
@@ -151,6 +153,7 @@ export class AgentDB {
       filterCacheSize: opts?.filterCacheSize,
       mergeThreshold: opts?.mergeThreshold,
       mergeJsonlThreshold: opts?.mergeJsonlThreshold,
+      hnsw: opts?.hnsw,
     };
     if (opts?.embeddings) {
       this.embeddingProvider = resolveProvider(opts.embeddings);
@@ -310,6 +313,8 @@ export class AgentDB {
         ? { mergeThreshold: this.opts.mergeThreshold } : {}),
       ...(this.opts.mergeJsonlThreshold !== undefined && baseOpts?.mergeJsonlThreshold === undefined
         ? { mergeJsonlThreshold: this.opts.mergeJsonlThreshold } : {}),
+      ...(this.opts.hnsw !== undefined && baseOpts?.hnsw === undefined
+        ? { hnsw: this.opts.hnsw } : {}),
     };
     const col = new Collection(name, store, mergedOpts);
     if (this.embeddingProvider) {

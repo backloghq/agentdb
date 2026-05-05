@@ -875,6 +875,9 @@ Every configurable knob, its location, default, and the workload signal that sho
 | `mergeJsonlThreshold` | `AgentDB` / `Collection` | `8` | same as `mergeThreshold` — controls JSONL delta file accumulation before full merge | 4 – 40 |
 | `diskConcurrency` | `AgentDB` / `Collection` | `20` | S3 point-lookup latency is high (raise to overlap more requests); has no effect on local FS | 4 – 64 |
 | `embeddingBatchSize` | `AgentDB` / `Collection` | `256` | embedding provider rate-limit errors or timeouts on large batch runs | 8 – 512 |
+| `hnsw.M` | `AgentDB` / `Collection` | `16` | recall is low (raise) or index build is slow and you accept lower recall (lower) | 4 – 64 |
+| `hnsw.efConstruction` | `AgentDB` / `Collection` | `200` | index build time is too slow (lower) or initial recall on a fresh dataset is unsatisfactory (raise) | 50 – 500 |
+| `hnsw.efSearch` | `AgentDB` / `Collection` | `50` | `semanticSearch` / `hybridSearch` recall is insufficient (raise) or query latency is high (lower) | 10 – 500 |
 
 ### HTTP / MCP server knobs
 

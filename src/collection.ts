@@ -11,7 +11,7 @@ import { rrf } from "./rrf.js";
 import { ViewManager } from "./view.js";
 import type { ViewDefinition } from "./view.js";
 import { EventEmitter } from "node:events";
-import { HnswIndex } from "./hnsw.js";
+import { HnswIndex, type HnswOptions } from "./hnsw.js";
 import { IndexManager } from "./collection-indexes.js";
 import type { EmbeddingProvider } from "./embeddings/types.js";
 import { quantize, serializeQuantized, deserializeQuantized } from "./embeddings/quantize.js";
@@ -157,6 +157,8 @@ export interface CollectionOptions {
   mergeThreshold?: number;
   /** Number of incremental JSONL delta files before triggering a full merge (default: 8). Overrides AgentDBOptions.mergeJsonlThreshold for this collection. */
   mergeJsonlThreshold?: number;
+  /** HNSW index parameters for approximate nearest neighbor search. Overrides AgentDBOptions.hnsw for this collection. */
+  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number };
 }
 
 /** Change event emitted after mutations. */
@@ -256,7 +258,7 @@ export class Collection {
       const q = deserializeQuantized(stored);
       const vec = Array.from(q.data).map((v) => v / q.scale);
       if (this.hnswIdx.dims === 0) {
-        this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+        this.hnswIdx = new HnswIndex(this.hnswOpts(vec.length));
       }
       this.hnswIdx.add(id, vec);
     }
@@ -270,6 +272,9 @@ export class Collection {
 
   /** Get the text index (TermLog handle). */
   getTextIndex(): TermLog | null { return this.textIdx; }
+
+  /** Get the HNSW index (if an embedding provider is configured). */
+  getHnswIndex(): HnswIndex | null { return this.hnswIdx; }
 
   /** Field names restricted to BM25/text indexing. Empty means all-strings fallback. */
   searchableFields(): string[] { return this.opts.searchableFields ?? []; }
@@ -526,6 +531,11 @@ export class Collection {
     this.indexes.trackQueryFields(filter);
   }
 
+  /** Build HnswOptions from collection-level hnsw config + the given dimensions. */
+  private hnswOpts(dimensions: number): HnswOptions {
+    return { dimensions, ...this.opts.hnsw };
+  }
+
   /** Resolve a filter with virtual filter support. */
   private resolve(filter: Filter): (record: Record<string, unknown>) => boolean {
     return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter(), this.opts.tagField, this._filterCache.compile);
@@ -539,14 +549,14 @@ export class Collection {
   /** Set the embedding provider for semantic search. Called by AgentDB. */
   setEmbeddingProvider(provider: EmbeddingProvider): void {
     this.embeddingProvider = provider;
-    this.hnswIdx = new HnswIndex({ dimensions: provider.dimensions });
+    this.hnswIdx = new HnswIndex(this.hnswOpts(provider.dimensions));
   }
 
   /** Lazily initialize HNSW to the real vector size on the first embed call.
    * Needed when the provider has dimensions=0 at construction (e.g. Ollama auto-detect). */
   private ensureHnswDims(vec: number[]): void {
     if (this.hnswIdx && this.hnswIdx.dims === 0) {
-      this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+      this.hnswIdx = new HnswIndex(this.hnswOpts(vec.length));
     }
   }
 
@@ -627,7 +637,7 @@ export class Collection {
           const q = deserializeQuantized(stored);
           const vec = Array.from(q.data).map((v) => v / q.scale);
           if (!this.hnswIdx || this.hnswIdx.dims === 0) {
-            this.hnswIdx = new HnswIndex({ dimensions: vec.length });
+            this.hnswIdx = new HnswIndex(this.hnswOpts(vec.length));
           }
           this.hnswIdx.add(id, vec);
         }
@@ -1873,7 +1883,7 @@ export class Collection {
     const onProgress = opts?.onProgress;
     const signal = opts?.signal;
     // Reset HNSW so stale vectors don't persist
-    this.hnswIdx = new HnswIndex({ dimensions: this.embeddingProvider.dimensions });
+    this.hnswIdx = new HnswIndex(this.hnswOpts(this.embeddingProvider.dimensions));
     let embedded = 0;
     let failed = 0;
     const errors: ReembedResult["errors"] = [];
@@ -1998,7 +2008,7 @@ export class Collection {
     }
     // Initialize HNSW if needed, or reinitialize if dimensions were unknown (0)
     if (!this.hnswIdx || this.hnswIdx.dims === 0) {
-      this.hnswIdx = new HnswIndex({ dimensions: vector.length });
+      this.hnswIdx = new HnswIndex(this.hnswOpts(vector.length));
     }
     // Validate dimensions
     if (vector.length !== this.hnswIdx.dims) {
