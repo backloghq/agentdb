@@ -44,21 +44,35 @@ export const FILTER_CACHE_MAX = 64;
 
 type CompileFn = (filterObj: Record<string, unknown>) => (record: Record<string, unknown>) => boolean;
 
+/** Handle returned by {@link makeFilterCache}. Exposes the memoised compile fn and observable counters. */
+export interface FilterCacheHandle {
+  /** Compile (or return cached) predicate for `filterObj`. */
+  compile: CompileFn;
+  /** Total number of cache misses (full compilations). */
+  compilations(): number;
+  /** Total number of cache hits (compilations skipped). */
+  hits(): number;
+}
+
 /**
  * Create a per-collection compiled-filter LRU cache.
- * Returns a compile function that memoises up to `maxSize` distinct filter shapes.
+ * Returns a {@link FilterCacheHandle} with `compile`, `compilations()`, and `hits()`.
  * Evicts the oldest entry (insertion-order) when the cap is reached.
  * @param compile — inner compile function; defaults to `compileFilter`. Pass a spy in tests.
  */
-export function makeFilterCache(maxSize: number, compile: CompileFn = compileFilter): CompileFn {
+export function makeFilterCache(maxSize: number, compile: CompileFn = compileFilter): FilterCacheHandle {
   const cache = new Map<string, (record: Record<string, unknown>) => boolean>();
-  return function cachedCompile(filterObj: Record<string, unknown>) {
+  let _compilations = 0;
+  let _hits = 0;
+
+  function cachedCompile(filterObj: Record<string, unknown>) {
     const key = JSON.stringify(filterObj);
     const cached = cache.get(key);
     if (cached) {
       // Move to end (most-recently used)
       cache.delete(key);
       cache.set(key, cached);
+      _hits++;
       return cached;
     }
     const predicate = compile(filterObj);
@@ -67,7 +81,14 @@ export function makeFilterCache(maxSize: number, compile: CompileFn = compileFil
       cache.delete(oldest);
     }
     cache.set(key, predicate);
+    _compilations++;
     return predicate;
+  }
+
+  return {
+    compile: cachedCompile,
+    compilations: () => _compilations,
+    hits: () => _hits,
   };
 }
 

@@ -20,6 +20,8 @@ export type {
   ReembedResult,
   ProgressEvent,
   ProgressCallback,
+  CollectionMetrics,
+  FilterCacheHandle,
 } from "./collection.js";
 
 export { RecordCache } from "./record-cache.js";

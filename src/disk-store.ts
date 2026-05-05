@@ -111,6 +111,10 @@ export class DiskStore {
   get mergeThreshold(): number { return this._mergeThreshold; }
   /** Configured JSONL file merge threshold for this store. */
   get mergeJsonlThreshold(): number { return this._mergeJsonlThreshold; }
+  /** Number of Parquet row groups from the last compaction, or null if no compaction has run. */
+  get parquetRowGroups(): number | null { return this.compactionMeta?.rowGroups ?? null; }
+  /** LRU cache stats (hits, misses, hit rate, size, evictions). */
+  getCacheStats() { return this.cache.stats(); }
 
   /** Check if a field should use in-memory index (low cardinality) or Parquet scan (high cardinality). */
   shouldUseInMemoryIndex(field: string): boolean {

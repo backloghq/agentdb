@@ -24,11 +24,12 @@ import {
   resolveFilter, stripMeta, isExpired, summarize, estimateTokens,
   applyUpdate, extractTextFromRecord, summarizeValue,
   makeFilterCache, FILTER_CACHE_MAX,
+  type FilterCacheHandle,
 } from "./collection-helpers.js";
 
 // Re-export types and helpers that external consumers depend on
 export type { StoredRecord, Filter, UpdateOps } from "./collection-helpers.js";
-export type { ComputedFn, VirtualFilterFn } from "./collection-helpers.js";
+export type { ComputedFn, VirtualFilterFn, FilterCacheHandle } from "./collection-helpers.js";
 
 /** Options for mutation operations. */
 export interface MutationOpts {
@@ -92,6 +93,28 @@ export interface ReembedResult {
   errors: Array<{ batchIndex: number; recordIds: string[]; reason: string }>;
   /** True when the operation was cancelled via AbortSignal before completing. */
   aborted?: boolean;
+}
+
+/** Live performance counters and index sizes for a collection. */
+export interface CollectionMetrics {
+  /** Number of compiled-filter cache misses (full compilations) since collection was opened. */
+  filterCompilations: number;
+  /** Number of compiled-filter cache hits since collection was opened. */
+  filterCacheHits: number;
+  /** Number of times a record was fetched from the disk LRU cache (hits + misses). null when not in disk mode. */
+  recordCacheFetches: number | null;
+  /** Number of disk LRU cache hits since collection was opened. null when not in disk mode. */
+  recordCacheHits: number | null;
+  /** Number of times find() returned a truncated result (maxFindLimit cap reached). */
+  findTruncations: number;
+  /** Number of BM25 segments in the text index. null when text search is not enabled. */
+  bm25SegmentCount: number | null;
+  /** Number of nodes in the HNSW index. null when no embedding provider is configured. */
+  hnswNodeCount: number | null;
+  /** Number of records in the WAL (current session writes). */
+  walRecordCount: number;
+  /** Number of Parquet row groups from last compaction. null when not in disk mode or no compaction yet. */
+  parquetRowGroups: number | null;
 }
 
 /** Options for configuring collection middleware. */
@@ -189,7 +212,9 @@ export class Collection {
   // Optional termlog StorageBackend — set to S3Backend when running in S3 mode.
   private _termlogBackend: import("@backloghq/termlog").StorageBackend | undefined = undefined;
   // Per-collection compiled-filter LRU cache — initialised in constructor.
-  private _compileCached!: (filterObj: Record<string, unknown>) => (record: Record<string, unknown>) => boolean;
+  private _filterCache!: FilterCacheHandle;
+  // findTruncations counter — incremented each time find() hits the maxFindLimit cap.
+  private _findTruncations = 0;
 
   /** Set disk store for disk-backed mode. Called by AgentDB during open. */
   setDiskStore(ds: DiskStore): void { this._diskStore = ds; }
@@ -256,11 +281,30 @@ export class Collection {
   /** Configured filter cache size for this collection (default: 64). */
   get filterCacheSize(): number { return this.opts.filterCacheSize ?? FILTER_CACHE_MAX; }
 
+  /**
+   * Return live performance counters and index sizes for this collection.
+   * Counters reset when the collection is closed and reopened.
+   */
+  metrics(): CollectionMetrics {
+    const cacheStats = this._diskStore?.getCacheStats() ?? null;
+    return {
+      filterCompilations: this._filterCache.compilations(),
+      filterCacheHits: this._filterCache.hits(),
+      recordCacheFetches: cacheStats !== null ? cacheStats.hits + cacheStats.misses : null,
+      recordCacheHits: cacheStats !== null ? cacheStats.hits : null,
+      findTruncations: this._findTruncations,
+      bm25SegmentCount: this.textIdx?.segmentCount() ?? null,
+      hnswNodeCount: this.hnswIdx?.size ?? null,
+      walRecordCount: this.store.count(),
+      parquetRowGroups: this._diskStore?.parquetRowGroups ?? null,
+    };
+  }
+
   constructor(name: string, store: Store<StoredRecord>, opts?: CollectionOptions) {
     this.name = name;
     this.store = store;
     this.opts = opts ?? {};
-    this._compileCached = makeFilterCache(opts?.filterCacheSize ?? FILTER_CACHE_MAX);
+    this._filterCache = makeFilterCache(opts?.filterCacheSize ?? FILTER_CACHE_MAX);
     // TermLog is opened in open() once the directory is known; textIdx stays null until then.
   }
 
@@ -482,7 +526,7 @@ export class Collection {
 
   /** Resolve a filter with virtual filter support. */
   private resolve(filter: Filter): (record: Record<string, unknown>) => boolean {
-    return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter(), this.opts.tagField, this._compileCached);
+    return resolveFilter(filter, this.opts.virtualFilters, this.recordGetter(), this.opts.tagField, this._filterCache.compile);
   }
 
   /** Whether the underlying store is open. */
@@ -920,6 +964,7 @@ export class Collection {
 
     const truncated = total > offset + limit || tokenTruncated || abortedEarly;
     if (truncated && requestedLimit > limit) {
+      this._findTruncations++;
       console.warn(
         `agentdb: find() truncated at maxFindLimit=${MAX_LIMIT} — set CollectionOptions.maxFindLimit to raise or lower this cap`,
       );

@@ -1754,28 +1754,28 @@ describe("Collection", () => {
       const cache = makeFilterCache(2, spy);
 
       // Fill cache: A and B compile once each. LRU order (oldest→newest): [A, B]
-      cache({ v: "A" });
-      cache({ v: "B" });
+      cache.compile({ v: "A" });
+      cache.compile({ v: "B" });
       expect(spy).toHaveBeenCalledTimes(2);
 
       // Hit B — bumps B to newest. LRU order: [A, B]
-      cache({ v: "B" });
+      cache.compile({ v: "B" });
       expect(spy).toHaveBeenCalledTimes(2);
 
       // Miss C — evicts oldest (A). LRU order: [B, C]
-      cache({ v: "C" });
+      cache.compile({ v: "C" });
       expect(spy).toHaveBeenCalledTimes(3);
 
       // Hit B — still in cache (B was bumped, never evicted)
-      cache({ v: "B" });
+      cache.compile({ v: "B" });
       expect(spy).toHaveBeenCalledTimes(3);
 
       // Miss A — was evicted; recompiles. Evicts oldest (C). LRU order: [B, A]
-      cache({ v: "A" });
+      cache.compile({ v: "A" });
       expect(spy).toHaveBeenCalledTimes(4);
 
       // Hit B — still in cache
-      cache({ v: "B" });
+      cache.compile({ v: "B" });
       expect(spy).toHaveBeenCalledTimes(4);
     });
 
@@ -1786,20 +1786,20 @@ describe("Collection", () => {
       const cacheB = makeFilterCache(2, spyB);
 
       // Fill both caches
-      cacheA({ a: 1 });
-      cacheA({ a: 2 });
-      cacheB({ b: 1 });
-      cacheB({ b: 2 });
+      cacheA.compile({ a: 1 });
+      cacheA.compile({ a: 2 });
+      cacheB.compile({ b: 1 });
+      cacheB.compile({ b: 2 });
       expect(spyA).toHaveBeenCalledTimes(2);
       expect(spyB).toHaveBeenCalledTimes(2);
 
       // Evict from B (add a third entry to B — evicts b:1)
-      cacheB({ b: 3 });
+      cacheB.compile({ b: 3 });
       expect(spyB).toHaveBeenCalledTimes(3);
 
       // A's cache is unaffected — both entries still present
-      cacheA({ a: 1 });
-      cacheA({ a: 2 });
+      cacheA.compile({ a: 1 });
+      cacheA.compile({ a: 2 });
       expect(spyA).toHaveBeenCalledTimes(2); // no new A compilations
     });
 
