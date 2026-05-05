@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-05-06
+
 ### Fixed
 
 - **Task 303 — MemoryMonitor stale entries on LRU eviction** — `AgentDB.evictLru()` was closing the collection and removing its listener but not removing it from the `MemoryMonitor`. Evicted collections therefore accumulated zero-byte phantom entries in `memoryStats().collections` for the process lifetime. Fixed by calling `this.memoryMonitor.remove(evict)` before closing, matching the cleanup already done in `dropCollection`. 1 new test: open 3 collections with `maxOpenCollections:2`, force eviction of the LRU, assert the evicted name is absent from `memoryStats().collections`. Test count: 1468 → 1469.
