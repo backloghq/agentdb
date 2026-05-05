@@ -618,6 +618,108 @@ describe("Embedding Providers", () => {
     });
   });
 
+  describe("Batch chunking — providers respect per-provider BATCH_LIMIT", () => {
+    afterEach(() => { vi.unstubAllGlobals(); });
+
+    it("Voyage: 130 texts → 2 fetch calls (128 + 2)", async () => {
+      const callSizes: number[] = [];
+      vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        const n = body.input.length;
+        callSizes.push(n);
+        return new Response(JSON.stringify({
+          data: Array.from({ length: n }, (_, i) => ({ embedding: [i * 0.01] })),
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+
+      const provider = new VoyageEmbeddingProvider({ apiKey: "key", dimensions: 1 });
+      const texts = Array.from({ length: 130 }, (_, i) => `text${i}`);
+      const vectors = await provider.embed(texts);
+      expect(vectors).toHaveLength(130);
+      expect(callSizes).toEqual([128, 2]);
+    });
+
+    it("Cohere: 100 texts → 2 fetch calls (96 + 4)", async () => {
+      const callSizes: number[] = [];
+      vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        const n = body.texts.length;
+        callSizes.push(n);
+        return new Response(JSON.stringify({
+          embeddings: { float: Array.from({ length: n }, (_, i) => [i * 0.01]) },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+
+      const provider = new CohereEmbeddingProvider({ apiKey: "key", dimensions: 1 });
+      const texts = Array.from({ length: 100 }, (_, i) => `text${i}`);
+      const vectors = await provider.embed(texts);
+      expect(vectors).toHaveLength(100);
+      expect(callSizes).toEqual([96, 4]);
+    });
+
+    it("Gemini: 105 texts → 2 fetch calls (100 + 5)", async () => {
+      const callSizes: number[] = [];
+      vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        const n = body.content.parts.length;
+        callSizes.push(n);
+        return new Response(JSON.stringify({
+          embeddings: Array.from({ length: n }, (_, i) => ({ values: [i * 0.01] })),
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+
+      const { GeminiEmbeddingProvider } = await import("../src/embeddings/gemini.js");
+      const provider = new GeminiEmbeddingProvider({ apiKey: "key", dimensions: 1 });
+      const texts = Array.from({ length: 105 }, (_, i) => `text${i}`);
+      const vectors = await provider.embed(texts);
+      expect(vectors).toHaveLength(105);
+      expect(callSizes).toEqual([100, 5]);
+    });
+
+    it("HTTP: custom batchLimit=50 splits 120 texts into 3 calls (50+50+20)", async () => {
+      const callSizes: number[] = [];
+      vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        const n = body.texts.length;
+        callSizes.push(n);
+        return new Response(JSON.stringify({
+          embeddings: Array.from({ length: n }, (_, i) => [i * 0.01]),
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+
+      const provider = new HttpEmbeddingProvider({
+        url: "http://localhost:9999/embed",
+        dimensions: 1,
+        batchLimit: 50,
+      });
+      const texts = Array.from({ length: 120 }, (_, i) => `text${i}`);
+      const vectors = await provider.embed(texts);
+      expect(vectors).toHaveLength(120);
+      expect(callSizes).toEqual([50, 50, 20]);
+    });
+
+    it("HTTP: default batchLimit=100 splits 110 texts into 2 calls (100+10)", async () => {
+      const callSizes: number[] = [];
+      vi.stubGlobal("fetch", async (_url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string);
+        const n = body.texts.length;
+        callSizes.push(n);
+        return new Response(JSON.stringify({
+          embeddings: Array.from({ length: n }, (_, i) => [i * 0.01]),
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+
+      const provider = new HttpEmbeddingProvider({
+        url: "http://localhost:9999/embed",
+        dimensions: 1,
+      });
+      const texts = Array.from({ length: 110 }, (_, i) => `text${i}`);
+      const vectors = await provider.embed(texts);
+      expect(vectors).toHaveLength(110);
+      expect(callSizes).toEqual([100, 10]);
+    });
+  });
+
   describe("AgentDB embedding config", () => {
     it("AgentDB accepts embedding config", async () => {
       const { AgentDB } = await import("../src/agentdb.js");
