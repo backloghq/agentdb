@@ -29,20 +29,8 @@ import {
   type CompactionOptions,
 } from "./disk-io.js";
 import type { IndexManager } from "./collection-indexes.js";
-import type { TextIndex } from "./text-index.js";
 import { FsBackend } from "@backloghq/opslog";
 import type { StorageBackend } from "@backloghq/opslog";
-
-export class IndexFileTooLargeError extends Error {
-  constructor(filename: string, actual: number, limit: number) {
-    super(
-      `Text index file ${filename} exceeds MAX_INDEX_FILE_SIZE (${actual} > ${limit} bytes). ` +
-      `Disable text search on the collection or re-index with a smaller corpus. ` +
-      `See https://github.com/backloghq/agentdb#bm25-index-size-limits for recovery options.`,
-    );
-    this.name = "IndexFileTooLargeError";
-  }
-}
 
 export interface DiskStoreOptions {
   /** Max records in LRU cache (default: 1000). */
@@ -68,7 +56,6 @@ export class DiskStore {
   /** Pending index files for lazy loading — loaded on first query. */
   private _pendingIndexFiles: Map<string, string> = new Map(); // field → filename
   private _indexManager: IndexManager | null = null;
-  private _textIndex: TextIndex | null = null;
 
   constructor(backend: StorageBackend, options?: DiskStoreOptions) {
     this.backend = backend;
@@ -484,11 +471,8 @@ export class DiskStore {
 
   // --- Index persistence ---
 
-  /** Max index file size to load (256MB). Exposed for test overrides. */
-  static MAX_INDEX_FILE_SIZE = 256 * 1024 * 1024;
-
   /** Save index data to disk. Also updates cardinality for all indexed fields. */
-  async saveIndexes(indexManager: IndexManager, textIndex?: TextIndex | null): Promise<void> {
+  async saveIndexes(indexManager: IndexManager): Promise<void> {
     const { btree, array } = indexManager.serializeIndexes();
     // Update cardinality from all B-tree indexes
     if (this.compactionMeta) {
@@ -505,15 +489,11 @@ export class DiskStore {
     for (const { data } of array) {
       await this.backend.writeBlob(`indexes/array-${data.field}.json`, Buffer.from(JSON.stringify(data)));
     }
-    if (textIndex) {
-      await this.backend.writeBlob("indexes/text-index.json", Buffer.from(JSON.stringify(textIndex.toJSON())));
-    }
   }
 
   /** Discover persisted index files for lazy loading. Actual deserialization deferred to first query. */
-  async loadIndexes(indexManager: IndexManager, textIndex?: TextIndex | null): Promise<boolean> {
+  async loadIndexes(indexManager: IndexManager): Promise<boolean> {
     this._indexManager = indexManager;
-    this._textIndex = textIndex ?? null;
     let found = false;
 
     try {
@@ -528,10 +508,6 @@ export class DiskStore {
         }
         if (f.startsWith("array-") && f.endsWith(".json")) {
           this._pendingIndexFiles.set(`array:${f.slice(6, -5)}`, f);
-          found = true;
-        }
-        if (f === "text-index.json") {
-          this._pendingIndexFiles.set("text", f);
           found = true;
         }
       }
@@ -564,19 +540,10 @@ export class DiskStore {
       } catch {
         continue;
       }
-      if (content.length > DiskStore.MAX_INDEX_FILE_SIZE) {
-        if (key === "text") {
-          throw new IndexFileTooLargeError(filename, content.length, DiskStore.MAX_INDEX_FILE_SIZE);
-        }
-        console.warn(`agentdb: skipping oversized index file ${filename} (${content.length} bytes)`);
-        continue;
-      }
       if (key.startsWith("btree:")) {
         im.loadBTreeIndex(JSON.parse(content.toString("utf-8")));
       } else if (key.startsWith("array:")) {
         im.loadArrayIndex(JSON.parse(content.toString("utf-8")));
-      } else if (key === "text" && this._textIndex) {
-        this._textIndex.loadFromJSON(JSON.parse(content.toString("utf-8")));
       }
     }
     this._pendingIndexFiles.clear();

@@ -274,7 +274,7 @@ describe("bm25 schema option — Collection plumbing", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("k1/b from schema flow into TextIndex and change scores vs defaults", async () => {
+  it("k1/b from schema flow into termlog and change scores vs defaults", async () => {
     // b=1.0 = full length normalization — long docs are penalized
     const schema = defineSchema({
       name: "bm25tune",

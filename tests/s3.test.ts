@@ -278,7 +278,7 @@ describe.skipIf(!runS3)("S3 backend benchmarks", () => {
     // Compact to Parquet on S3
     const allRecords = await col1.findAll();
     await ds1.compact(allRecords.map((r) => [r._id as string, r]));
-    await ds1.saveIndexes(col1.getIndexManager(), col1.getTextIndex());
+    await ds1.saveIndexes(col1.getIndexManager());
     await col1.close();
     console.log("  Session 1: 20 records compacted to Parquet on S3");
 
