@@ -1,6 +1,6 @@
 /**
- * Progress callback tests for reembedAll, rebuildTextIndex, and AgentDB.import.
- * Verifies: spy called, monotonic completed, correct final value, correct phase.
+ * Progress callback and AbortSignal tests for reembedAll, rebuildTextIndex, find, and AgentDB.import.
+ * Verifies: spy called, monotonic completed, correct final value, correct phase, abort semantics.
  */
 import { describe, it, expect, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -208,6 +208,132 @@ describe("Progress callbacks", () => {
       // grandTotal = 2 + 1 = 3, so every event has total=3
       expect(totals).toHaveLength(3);
       expect(totals.every((t) => t === 3)).toBe(true);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe("AbortSignal — reembedAll", () => {
+    it("returns aborted:true with partial count when signal fires mid-run", async () => {
+      const dir = await makeTmpDir();
+      const N = 50;
+      const BATCH = 10; // 5 batches total; abort after first
+
+      const db = new AgentDB(dir, {
+        embeddings: { provider: hashProvider },
+        embeddingBatchSize: BATCH,
+      });
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "abort-reembed",
+        fields: { body: { type: "string" } },
+      }));
+      for (let i = 0; i < N; i++) await col.insert({ body: `record ${i} some text` });
+
+      const controller = new AbortController();
+      const result = await col.reembedAll({
+        signal: controller.signal,
+        onProgress: (e) => {
+          // Abort after the first batch completes — next iteration check stops the loop
+          if (e.completed >= BATCH) controller.abort();
+        },
+      });
+
+      expect(result.aborted).toBe(true);
+      expect(result.embedded).toBeGreaterThanOrEqual(BATCH);
+      expect(result.embedded).toBeLessThan(N);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("returns aborted:true immediately when signal is already aborted", async () => {
+      const dir = await makeTmpDir();
+
+      const db = new AgentDB(dir, { embeddings: { provider: hashProvider } });
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "abort-pre",
+        fields: { v: { type: "string" } },
+      }));
+      for (let i = 0; i < 10; i++) await col.insert({ v: `text ${i}` });
+
+      const controller = new AbortController();
+      controller.abort(); // abort before calling
+
+      const result = await col.reembedAll({ signal: controller.signal });
+      expect(result.aborted).toBe(true);
+      expect(result.embedded).toBe(0);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe("AbortSignal — rebuildTextIndex", () => {
+    it("throws DOMException AbortError when signal is aborted during rebuild", async () => {
+      const dir = await makeTmpDir();
+      const N = 20;
+
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "abort-rebuild",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      for (let i = 0; i < N; i++) await col.insert({ title: `doc ${i}` });
+
+      const controller = new AbortController();
+      // Abort after 1 record indexed — signal fires inside the per-record loop
+      let abortFired = false;
+      const err = await col.rebuildTextIndex({
+        signal: controller.signal,
+        onProgress: () => {
+          if (!abortFired) {
+            abortFired = true;
+            controller.abort();
+          }
+        },
+      }).catch((e) => e);
+
+      expect(err).toBeInstanceOf(DOMException);
+      expect((err as DOMException).name).toBe("AbortError");
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe("AbortSignal — find (disk path)", () => {
+    it("returns truncated:true when signal is aborted during full disk scan", async () => {
+      const dir = await makeTmpDir();
+      const N = 10;
+      const schema = defineSchema({
+        name: "abort-find",
+        fields: { v: { type: "string" } },
+        storageMode: "disk",
+      });
+
+      // Session 1: write records and close to trigger Parquet compaction
+      let db = new AgentDB(dir);
+      await db.init();
+      let col = await db.collection(schema);
+      for (let i = 0; i < N; i++) await col.insert({ v: `item ${i}` });
+      await db.close();
+
+      // Session 2: reopen — records are now in Parquet (hasParquetData=true)
+      db = new AgentDB(dir);
+      await db.init();
+      col = await db.collection(schema);
+
+      const controller = new AbortController();
+      controller.abort(); // already aborted — disk scan check fires immediately
+
+      const result = await col.find({ signal: controller.signal, limit: 100 });
+      // WAL is empty (new session), disk scan was aborted → truncated=true
+      expect(result.truncated).toBe(true);
 
       await db.close();
       await rm(dir, { recursive: true, force: true });

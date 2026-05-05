@@ -56,6 +56,8 @@ export interface FindOpts {
   maxTokens?: number;
   /** Sort by field. Prefix with "-" for descending. E.g. "name" or "-score". */
   sort?: string;
+  /** Cancellation signal. When aborted during a disk scan, returns a partial result with truncated=true. */
+  signal?: AbortSignal;
 }
 
 /** Result of a find query. */
@@ -88,6 +90,8 @@ export interface ReembedResult {
   failed: number;
   /** Per-batch error details. Empty when `failed === 0`. */
   errors: Array<{ batchIndex: number; recordIds: string[]; reason: string }>;
+  /** True when the operation was cancelled via AbortSignal before completing. */
+  aborted?: boolean;
 }
 
 /** Options for configuring collection middleware. */
@@ -340,9 +344,10 @@ export class Collection {
    *
    * @returns The number of documents indexed during the rebuild.
    */
-  async rebuildTextIndex(opts?: { onProgress?: ProgressCallback }): Promise<number> {
+  async rebuildTextIndex(opts?: { onProgress?: ProgressCallback; signal?: AbortSignal }): Promise<number> {
     if (!this._dir) return 0;
     const onProgress = opts?.onProgress;
+    const signal = opts?.signal;
     // Close existing TermLog if open, then wipe and recreate the text directory.
     if (this.textIdx) await this.textIdx.close();
     const textDir = pathJoin(this._dir, "text");
@@ -377,6 +382,12 @@ export class Collection {
       : Array.from(this.store.entries());
     const total = records.length;
     for (const [id, record] of records) {
+      if (signal?.aborted) {
+        // Close partial index so the collection is in a known clean state.
+        await this.textIdx.close();
+        this.textIdx = null;
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
       if (!isExpired(record)) {
         await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
         count++;
@@ -736,6 +747,7 @@ export class Collection {
     const offset = opts?.offset ?? 0;
     const useSummary = opts?.summary ?? false;
     const maxTokens = opts?.maxTokens;
+    const signal = opts?.signal;
 
     // Extract $text from filter for combined text + attribute search
     let textQuery: string | undefined;
@@ -766,6 +778,7 @@ export class Collection {
 
     const candidateIds = this.indexedCandidates(attrFilter);
     let records: StoredRecord[];
+    let abortedEarly = false;
 
     if (this._diskStore?.hasParquetData) {
       // Disk mode with Parquet: merge DiskStore (Parquet) + Map (session writes)
@@ -796,6 +809,7 @@ export class Collection {
       if (candidateSource) {
         const BATCH = Math.max(needed * 2, 50); // fetch 2x needed or at least 50
         for (let i = 0; i < candidateSource.length && records.length < needed; i += BATCH) {
+          if (signal?.aborted) { abortedEarly = true; break; }
           const batch = candidateSource.slice(i, i + BATCH);
           const fetched = await this._diskStore.getMany(batch);
           for (const [, r] of fetched) {
@@ -811,6 +825,7 @@ export class Collection {
           console.warn(`agentdb: full scan on disk-backed collection '${this.name}' (${this._diskStore.recordCount} records). Consider creating an index.`);
         }
         for await (const [id, record] of this._diskStore.entries()) {
+          if (signal?.aborted) { abortedEarly = true; break; }
           if (seen.has(id)) continue;
           const r = record as StoredRecord;
           if (!isExpired(r) && predicate(r)) {
@@ -903,7 +918,7 @@ export class Collection {
       mapped.push(result);
     }
 
-    const truncated = total > offset + limit || tokenTruncated;
+    const truncated = total > offset + limit || tokenTruncated || abortedEarly;
     if (truncated && requestedLimit > limit) {
       console.warn(
         `agentdb: find() truncated at maxFindLimit=${MAX_LIMIT} — set CollectionOptions.maxFindLimit to raise or lower this cap`,
@@ -1799,13 +1814,14 @@ export class Collection {
    * Per-batch provider failures are recorded in the returned {@link ReembedResult} rather than
    * thrown, so the caller can distinguish partial success from total failure.
    */
-  async reembedAll(opts?: { onProgress?: ProgressCallback }): Promise<ReembedResult> {
+  async reembedAll(opts?: { onProgress?: ProgressCallback; signal?: AbortSignal }): Promise<ReembedResult> {
     if (!this.embeddingProvider || !this.hnswIdx) {
       throw new Error("reembedAll requires an embedding provider to be configured");
     }
 
     const batchSize = this.opts.embeddingBatchSize ?? 256;
     const onProgress = opts?.onProgress;
+    const signal = opts?.signal;
     // Reset HNSW so stale vectors don't persist
     this.hnswIdx = new HnswIndex({ dimensions: this.embeddingProvider.dimensions });
     let embedded = 0;
@@ -1825,6 +1841,7 @@ export class Collection {
     const walTotal = walToEmbed.length;
 
     for (let i = 0; i < walToEmbed.length; i += batchSize) {
+      if (signal?.aborted) return { embedded, failed, errors, aborted: true };
       const batch = walToEmbed.slice(i, i + batchSize);
       const batchIndex = Math.floor(i / batchSize);
       let vectors: number[][];
@@ -1859,8 +1876,9 @@ export class Collection {
       let diskBatchIndex = Math.ceil(walToEmbed.length / batchSize);
       const diskBatch: { id: string; text: string; record: StoredRecord }[] = [];
 
-      const flushDiskBatch = async (): Promise<void> => {
-        if (diskBatch.length === 0) return;
+      const flushDiskBatch = async (): Promise<boolean> => {
+        if (diskBatch.length === 0) return false;
+        if (signal?.aborted) return true; // signal abort before embedding
         let vectors: number[][];
         try {
           vectors = await this.embeddingProvider!.embed(diskBatch.map((b) => b.text));
@@ -1872,7 +1890,7 @@ export class Collection {
           diskBatch.length = 0;
           diskBatchIndex++;
           onProgress?.({ completed: embedded + failed, total: null, phase: "disk" });
-          return;
+          return false;
         }
         const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
           const q = quantize(vectors[j]);
@@ -1892,11 +1910,13 @@ export class Collection {
         diskBatch.length = 0;
         diskBatchIndex++;
         onProgress?.({ completed: embedded + failed, total: null, phase: "disk" });
+        return false;
       };
 
       // Single pass: process every non-expired disk record (skip WAL-shadowed ids)
       const diskSeen = new Set<string>();
       for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+        if (signal?.aborted) break;
         if (walSeen.has(id) || diskSeen.has(id)) continue;
         diskSeen.add(id);
         if (isExpired(record as StoredRecord)) continue;
@@ -1904,9 +1924,13 @@ export class Collection {
         const text = extractTextFromRecord(clean);
         if (!text) continue;
         diskBatch.push({ id, text, record: record as StoredRecord });
-        if (diskBatch.length >= batchSize) await flushDiskBatch();
+        if (diskBatch.length >= batchSize) {
+          const aborted = await flushDiskBatch();
+          if (aborted) return { embedded, failed, errors, aborted: true };
+        }
       }
-      await flushDiskBatch();
+      const aborted = await flushDiskBatch();
+      if (aborted || signal?.aborted) return { embedded, failed, errors, aborted: true };
     }
 
     return { embedded, failed, errors };
