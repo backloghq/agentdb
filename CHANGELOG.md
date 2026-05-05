@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com),
 and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Changed
+
+- **`Collection` text index backend replaced with `@backloghq/termlog` (phase 3)** — `private textIdx: TextIndex | null` replaced with `TermLog | null`. TermLog is opened at `<dir>/text/` in `Collection.open()` and closed in `Collection.close()`. `rebuildTextIndex()` and `incrementalIndexUpdate()` are now async. All `textIdx.add/remove` call sites await the TermLog async API. `DiskStore.loadIndexes`/`saveIndexes` no longer receive a text-index argument — TermLog owns its own directory. `find()/$text`, `search()`, and `bm25Search()` flush the TermLog write buffer before querying so buffered writes are immediately visible without an explicit flush call. Added `Collection.flushTextIndex()` public method (used by AgentDB.close and WAL replay). `Collection.getTextIndex()` return type is now `TermLog | null`.
+- **`bm25Search()` uses OR semantics via TermLog (phase 4)** — BM25 ranked recall calls `tl.search(query, { mode: "or", limit: candidateLimit })`. `$text` filter and `search()` use `mode: "and"` (precision). `hybridSearch()` BM25 arm routes through `bm25Search()` with graceful arm-failure degradation unchanged. `db_bm25_search` and `db_hybrid_search` tools verified compile-clean against the new TermLog-backed paths. `searchable`-field projection (`textRecord()`) is preserved — TermLog indexes only the fields opted-in via `searchableFields`.
+
 ## [1.4.0] - 2026-05-04
 
 ### Changed
