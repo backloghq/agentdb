@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rm, mkdir } from "node:fs/promises";
+import { rm, mkdir, rename as fsRename } from "node:fs/promises";
 import { join as pathJoin } from "node:path";
 import { Store, FsBackend } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
@@ -417,28 +417,70 @@ export class Collection {
     if (!this._dir) return 0;
     const onProgress = opts?.onProgress;
     const signal = opts?.signal;
-    // Close existing TermLog if open, then wipe and recreate the text directory.
-    if (this.textIdx) await this.textIdx.close();
     const textDir = pathJoin(this._dir, "text");
+
     if (this._termlogBackend) {
-      // S3 mode: delete all blobs under the termlog prefix so TermLog.open starts clean.
-      // Use a 16-parallel batch loop to avoid unbounded fan-out on large indexes.
+      // S3 mode: no atomic rename is possible for blob stores. Use the original
+      // destructive approach (wipe then rebuild). An abort here leaves textIdx=null
+      // and the S3 prefix empty — the caller must retry rebuildTextIndex to restore search.
+      if (this.textIdx) await this.textIdx.close();
       const blobs = await this._termlogBackend.listBlobs("").catch(() => [] as string[]);
       const CONCURRENCY = 16;
       for (let i = 0; i < blobs.length; i += CONCURRENCY) {
         const batch = blobs.slice(i, i + CONCURRENCY);
         await Promise.all(batch.map((b) => this._termlogBackend!.deleteBlob(b).catch(() => {})));
       }
-    } else {
-      await rm(textDir, { recursive: true, force: true });
-      await mkdir(textDir, { recursive: true });
+      this.textIdx = await TermLog.open({
+        dir: textDir,
+        backend: this._termlogBackend,
+        k1: this.opts.bm25K1 ?? 1.2,
+        b: this.opts.bm25B ?? 0.75,
+      });
+      let count = 0;
+      const records = this._diskStore
+        ? await (async () => {
+            const out: Array<[string, StoredRecord]> = [];
+            for await (const [id, record] of this._diskStore!.entries()) {
+              out.push([id, record as StoredRecord]);
+            }
+            return out;
+          })()
+        : Array.from(this.store.entries());
+      const total = records.length;
+      for (const [id, record] of records) {
+        if (signal?.aborted) {
+          await this.textIdx.close();
+          this.textIdx = null;
+          console.warn(
+            `agentdb [${this.name}]: rebuildTextIndex aborted in S3 mode — ` +
+            `text index wiped, indexed ${count}/${total}. Call rebuildTextIndex() again to restore search.`,
+          );
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
+        if (!isExpired(record)) {
+          await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+          count++;
+          try { onProgress?.({ completed: count, total, phase: "rebuilding" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
+        }
+      }
+      await this.textIdx.flush();
+      await this.backend.deleteBlob("indexes/text-index.json").catch(() => {});
+      return count;
     }
-    this.textIdx = await TermLog.open({
-      dir: textDir,
-      backend: this._termlogBackend,
+
+    // FS mode: snapshot-then-swap.
+    // Build the new index into text.new/ while the existing text/ (and this.textIdx) remain
+    // untouched and queryable. On abort, discard text.new/ and leave the original intact.
+    // On success, close both, rm text/, rename text.new/→text/, reopen.
+    const textNewDir = pathJoin(this._dir, "text.new");
+    await rm(textNewDir, { recursive: true, force: true }); // clean up any previous stale temp dir
+    await mkdir(textNewDir, { recursive: true });
+    const newIdx = await TermLog.open({
+      dir: textNewDir,
       k1: this.opts.bm25K1 ?? 1.2,
       b: this.opts.bm25B ?? 0.75,
     });
+
     let count = 0;
     const records = this._diskStore
       ? await (async () => {
@@ -450,20 +492,34 @@ export class Collection {
         })()
       : Array.from(this.store.entries());
     const total = records.length;
+
     for (const [id, record] of records) {
       if (signal?.aborted) {
-        // Close partial index so the collection is in a known clean state.
-        await this.textIdx.close();
-        this.textIdx = null;
+        // Abort: discard temp dir, leave existing textIdx untouched.
+        await newIdx.close();
+        await rm(textNewDir, { recursive: true, force: true });
         throw new DOMException("The operation was aborted.", "AbortError");
       }
       if (!isExpired(record)) {
-        await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+        await newIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
         count++;
         try { onProgress?.({ completed: count, total, phase: "rebuilding" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
       }
     }
-    await this.textIdx.flush();
+
+    await newIdx.flush();
+
+    // Atomic swap: close old → close new → rm old dir → rename new→canonical → reopen.
+    if (this.textIdx) await this.textIdx.close();
+    await newIdx.close();
+    await rm(textDir, { recursive: true, force: true });
+    await fsRename(textNewDir, textDir);
+    this.textIdx = await TermLog.open({
+      dir: textDir,
+      k1: this.opts.bm25K1 ?? 1.2,
+      b: this.opts.bm25B ?? 0.75,
+    });
+
     // Delete any legacy v1.4 blob so subsequent opens don't re-throw LegacyTextIndexError.
     await this.backend.deleteBlob("indexes/text-index.json").catch(() => {});
     return count;

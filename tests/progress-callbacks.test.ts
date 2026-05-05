@@ -304,6 +304,53 @@ describe("Progress callbacks", () => {
       await db.close();
       await rm(dir, { recursive: true, force: true });
     });
+
+    it("snapshot-then-swap: abort preserves the original index (not empty)", async () => {
+      // Verify that aborting rebuildTextIndex mid-run does NOT destroy the existing text index.
+      // The collection must still be able to bm25Search using the pre-abort index.
+      const dir = await makeTmpDir();
+      const N = 20;
+
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "abort-preserve",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      for (let i = 0; i < N; i++) await col.insert({ title: `doc ${i}` });
+
+      // Initial rebuild to populate a known-good index.
+      const initialCount = await col.rebuildTextIndex();
+      expect(initialCount).toBe(N);
+
+      // Sanity: search works before abort.
+      const before = await col.bm25Search("doc");
+      expect(before.records.length).toBeGreaterThan(0);
+
+      // Abort the second rebuild after the first record is indexed.
+      const controller = new AbortController();
+      let abortFired = false;
+      const err = await col.rebuildTextIndex({
+        signal: controller.signal,
+        onProgress: () => {
+          if (!abortFired) {
+            abortFired = true;
+            controller.abort();
+          }
+        },
+      }).catch((e) => e);
+
+      expect(err).toBeInstanceOf(DOMException);
+      expect((err as DOMException).name).toBe("AbortError");
+
+      // The original index must still be intact: search returns results.
+      const after = await col.bm25Search("doc");
+      expect(after.records.length).toBeGreaterThan(0);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
   });
 
   describe("AbortSignal — find (disk path)", () => {
