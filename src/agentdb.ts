@@ -148,6 +148,8 @@ export class AgentDB {
   private lru: string[] = []; // Most recently used at end
   private meta: MetaManifest = { collections: [], dropped: [] };
   private _opened = false;
+  /** In-flight init promise — shared by concurrent first callers to prevent double-init. */
+  private _initPromise: Promise<void> | null = null;
 
   constructor(dir: string, opts?: AgentDBOptions) {
     this.dir = dir;
@@ -206,8 +208,47 @@ export class AgentDB {
     return this.embeddingProvider;
   }
 
-  /** Initialize the database directory and load metadata. */
+  /**
+   * Static factory — constructs and initializes the database in a single awaitable call.
+   *
+   * ```ts
+   * const db = await AgentDB.open("./data", opts);
+   * const col = await db.collection("items"); // ready immediately
+   * ```
+   *
+   * Equivalent to `new AgentDB(dir, opts); await db.init();` but removes the footgun
+   * of forgetting `init()`.
+   */
+  static async open(dir: string, opts?: AgentDBOptions): Promise<AgentDB> {
+    const db = new AgentDB(dir, opts);
+    await db.init();
+    return db;
+  }
+
+  /**
+   * Initialize the database directory and load metadata.
+   *
+   * **Idempotent** — subsequent calls on an already-initialized instance return immediately
+   * without re-running setup. Concurrent first calls share the same init promise so the
+   * underlying filesystem work runs exactly once.
+   *
+   * A failed init does **not** cache the rejection — the next call retries from scratch,
+   * allowing recovery from transient failures (e.g., permissions fixed after first attempt).
+   */
   async init(): Promise<void> {
+    if (this._opened) return; // already initialized — fast path
+    if (this._initPromise) return this._initPromise; // in-flight — join the existing promise
+    const p = this._doInit();
+    this._initPromise = p;
+    return p.catch(err => {
+      // Don't cache rejections — allow callers to retry after transient failures.
+      this._initPromise = null;
+      throw err;
+    });
+  }
+
+  /** Internal init body. Called exactly once per lifecycle; errors clear _initPromise for retry. */
+  private async _doInit(): Promise<void> {
     await mkdir(join(this.dir, META_DIR), { recursive: true });
     await mkdir(join(this.dir, COLLECTIONS_DIR), { recursive: true });
 
@@ -247,6 +288,16 @@ export class AgentDB {
   }
 
   /**
+   * Ensure the database is initialized before proceeding.
+   * Async public methods call this instead of the synchronous `ensureOpen()` so that
+   * callers who skipped `await db.init()` still get a working instance.
+   */
+  private async _ensureInit(): Promise<void> {
+    if (this._opened) return; // fast path — already initialized
+    return this.init();
+  }
+
+  /**
    * Get or create a named collection.
    * Accepts a name + options, or a CollectionSchema from defineSchema().
    *
@@ -260,7 +311,7 @@ export class AgentDB {
    *   or set them on `AgentDBOptions` as db-wide defaults.
    */
   async collection(nameOrSchema: string | CollectionSchema, colOpts?: CollectionOptions): Promise<Collection> {
-    this.ensureOpen();
+    await this._ensureInit();
 
     let name: string;
     let schema: CollectionSchema | undefined;
@@ -588,7 +639,7 @@ export class AgentDB {
 
   /** Create a collection explicitly (idempotent). */
   async createCollection(name: string): Promise<void> {
-    this.ensureOpen();
+    await this._ensureInit();
     await this.collection(name);
   }
 
@@ -597,7 +648,7 @@ export class AgentDB {
    * The collection is closed if open.
    */
   async dropCollection(name: string): Promise<void> {
-    this.ensureOpen();
+    await this._ensureInit();
 
     // Close if open (clean up listener + memory tracking like evictLru does)
     const existing = this.open.get(name);
@@ -633,7 +684,7 @@ export class AgentDB {
 
   /** Permanently delete a soft-dropped collection. */
   async purgeCollection(droppedName: string): Promise<void> {
-    this.ensureOpen();
+    await this._ensureInit();
     // Exact match on full dropped name, or match by original collection name prefix
     const match = this.meta.dropped.find((d) => d === droppedName || d.startsWith(`${DROPPED_PREFIX}${droppedName}_`));
     if (!match) {
@@ -650,7 +701,7 @@ export class AgentDB {
 
   /** List all active collections with record counts. */
   async listCollections(): Promise<CollectionInfo[]> {
-    this.ensureOpen();
+    await this._ensureInit();
     const infos: CollectionInfo[] = [];
     for (const name of this.meta.collections) {
       const col = await this.collection(name);
@@ -679,7 +730,7 @@ export class AgentDB {
    * Internal calls (auto-persist on collection open) skip the permission check.
    */
   async persistSchema(collectionName: string, schema: PersistedSchema, opts?: { agent?: string }): Promise<void> {
-    this.ensureOpen();
+    await this._ensureInit();
     if (opts?.agent) this.permissions.require(opts.agent, "admin", "persistSchema");
     validateCollectionName(collectionName);
     validatePersistedSchema(schema);
@@ -696,7 +747,7 @@ export class AgentDB {
 
   /** Load the persisted schema for a collection. Returns undefined if none stored. */
   async loadPersistedSchema(collectionName: string): Promise<PersistedSchema | undefined> {
-    this.ensureOpen();
+    await this._ensureInit();
     validateCollectionName(collectionName);
     const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
     try {
@@ -712,7 +763,7 @@ export class AgentDB {
 
   /** Delete the persisted schema for a collection. No-op if none exists. */
   async deletePersistedSchema(collectionName: string, opts?: { agent?: string }): Promise<void> {
-    this.ensureOpen();
+    await this._ensureInit();
     if (opts?.agent) this.permissions.require(opts.agent, "admin", "deletePersistedSchema");
     validateCollectionName(collectionName);
     const schemaPath = join(this.dir, META_DIR, `${collectionName}.schema.json`);
@@ -730,7 +781,7 @@ export class AgentDB {
    * Per-file isolation: one bad file never blocks the rest.
    */
   async loadSchemasFromFiles(paths: string[]): Promise<SchemaLoadResult> {
-    this.ensureOpen();
+    await this._ensureInit();
     let loaded = 0;
     let skipped = 0;
     const failed: Array<{ path: string; error: string }> = [];
@@ -810,7 +861,7 @@ export class AgentDB {
 
   /** Database-level stats. */
   async stats(): Promise<{ collections: number; totalRecords: number; textIndexBytes: number }> {
-    this.ensureOpen();
+    await this._ensureInit();
     let totalRecords = 0;
     let textIndexBytes = 0;
     for (const name of this.meta.collections) {
@@ -846,7 +897,7 @@ export class AgentDB {
    * @returns The number of documents indexed.
    */
   async rebuildTextIndex(name: string): Promise<number> {
-    this.ensureOpen();
+    await this._ensureInit();
     validateCollectionName(name);
 
     // Open without textSearch so the legacy-blob check doesn't throw.
@@ -889,7 +940,7 @@ export class AgentDB {
 
   /** Export all (or named) collections as a self-contained JSON object. */
   async export(collections?: string[]): Promise<ExportData> {
-    this.ensureOpen();
+    await this._ensureInit();
     const names = collections ?? this.meta.collections;
     const data: ExportData = {
       version: 1,
@@ -905,7 +956,7 @@ export class AgentDB {
 
   /** Import collections from export data. Skips existing records by default. */
   async import(data: ExportData, opts?: { overwrite?: boolean; onProgress?: ProgressCallback }): Promise<{ collections: number; records: number }> {
-    this.ensureOpen();
+    await this._ensureInit();
     const onProgress = opts?.onProgress;
     let totalRecords = 0;
     const colNames = Object.keys(data.collections);
@@ -965,6 +1016,7 @@ export class AgentDB {
     this.collectionListeners.clear();
     this.lru = [];
     this._opened = false;
+    this._initPromise = null; // allow re-init if this instance is reused after close
   }
 
   // --- LRU management ---

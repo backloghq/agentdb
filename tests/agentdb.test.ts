@@ -486,3 +486,72 @@ describe("AgentDB.collection — schema-vs-opts precedence (#202)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 300 — AgentDB.open() static factory + lazy auto-init
+// ---------------------------------------------------------------------------
+
+describe("AgentDB.open() and lazy auto-init (task 300)", () => {
+  it("AgentDB.open() returns a ready-to-use instance — collection() works without explicit init", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agentdb-open-"));
+    try {
+      const db = await AgentDB.open(dir);
+      const col = await db.collection("items");
+      await col.insert({ name: "test" });
+      expect(await col.count()).toBe(1);
+      await db.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lazy auto-init: new AgentDB(...).collection(...) works without explicit init()", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agentdb-lazy-"));
+    try {
+      const db = new AgentDB(dir);
+      // No await db.init() — collection() must trigger lazy init internally
+      const col = await db.collection("items");
+      await col.insert({ name: "lazy-init-test" });
+      expect(await col.count()).toBe(1);
+      await db.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("init() is idempotent — multiple calls run setup exactly once", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agentdb-init-idem-"));
+    try {
+      const db = new AgentDB(dir);
+      await db.init();
+      await db.init(); // second call — must be a no-op
+      await db.init(); // third call — must be a no-op
+      // Instance is still usable
+      const col = await db.collection("items");
+      await col.insert({ x: 1 });
+      expect(await col.count()).toBe(1);
+      await db.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("concurrent first calls share one init — no double-init race", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agentdb-concurrent-"));
+    try {
+      const db = new AgentDB(dir);
+      // Fire two collections simultaneously — init must run exactly once
+      const [colA, colB] = await Promise.all([
+        db.collection("alpha"),
+        db.collection("beta"),
+      ]);
+      await colA.insert({ v: "a" });
+      await colB.insert({ v: "b" });
+      expect(await colA.count()).toBe(1);
+      expect(await colB.count()).toBe(1);
+      await db.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

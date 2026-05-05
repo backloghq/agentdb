@@ -16,8 +16,8 @@ npm install @backloghq/agentdb
 ```typescript
 import { AgentDB } from "@backloghq/agentdb";
 
-const db = new AgentDB("./data");
-await db.init();
+// Recommended: one-call factory that constructs and initializes
+const db = await AgentDB.open("./data");
 
 const tasks = await db.collection("tasks");
 
@@ -49,8 +49,7 @@ Define typed, validated collections in one place:
 ```typescript
 import { AgentDB, defineSchema } from "@backloghq/agentdb";
 
-const db = new AgentDB("./data");
-await db.init();
+const db = await AgentDB.open("./data");
 
 const tasks = await db.collection(defineSchema({
   name: "tasks",
@@ -118,8 +117,7 @@ Full programmatic access. Use `AgentDB` to manage collections, `Collection` for 
 import { AgentDB } from "@backloghq/agentdb";
 import { getTools } from "@backloghq/agentdb/tools";
 
-const db = new AgentDB("./data");
-await db.init();
+const db = await AgentDB.open("./data");
 
 const tools = getTools(db);
 // → Array of { name, description, schema, annotations, execute }
@@ -1146,8 +1144,7 @@ v2.0 replaces the in-house `TextIndex` JSON blob with `@backloghq/termlog` (segm
 import { AgentDB, LegacyTextIndexError, defineSchema } from "@backloghq/agentdb";
 
 const schema = defineSchema({ name: "notes", textSearch: true, fields: { ... } });
-const db = new AgentDB("./data");
-await db.init();
+const db = await AgentDB.open("./data");
 
 try {
   await db.collection(schema);
