@@ -66,6 +66,8 @@ export interface FindResult {
   records: Record<string, unknown>[];
   total: number;
   truncated: boolean;
+  /** True when a find() was cut short by an AbortSignal rather than by a hard limit or token budget. */
+  aborted?: boolean;
   /** Approximate token count of the returned records (4 chars/token heuristic). */
   estimatedTokens?: number;
 }
@@ -435,7 +437,7 @@ export class Collection {
       if (!isExpired(record)) {
         await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
         count++;
-        onProgress?.({ completed: count, total, phase: "rebuilding" });
+        try { onProgress?.({ completed: count, total, phase: "rebuilding" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
       }
     }
     await this.textIdx.flush();
@@ -963,7 +965,9 @@ export class Collection {
     }
 
     const truncated = total > offset + limit || tokenTruncated || abortedEarly;
-    if (truncated && requestedLimit > limit) {
+    // Only count and warn for the maxFindLimit cap — not for token budget or abort truncations.
+    const capCaused = (total > offset + limit) && requestedLimit > limit && !tokenTruncated && !abortedEarly;
+    if (capCaused) {
       this._findTruncations++;
       console.warn(
         `agentdb: find() truncated at maxFindLimit=${MAX_LIMIT} — set CollectionOptions.maxFindLimit to raise or lower this cap`,
@@ -973,6 +977,7 @@ export class Collection {
       records: mapped,
       total,
       truncated,
+      ...(abortedEarly ? { aborted: true } : {}),
       estimatedTokens: maxTokens ? tokenCount : undefined,
     };
   }
@@ -1897,7 +1902,7 @@ export class Collection {
         console.warn(`agentdb: reembedAll WAL batch ${batchIndex} failed: ${reason}`);
         errors.push({ batchIndex, recordIds: batch.map((b) => b.id), reason });
         failed += batch.length;
-        onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" });
+        try { onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
         continue;
       }
       await this.store.batch(() => {
@@ -1913,7 +1918,7 @@ export class Collection {
         this.hnswIdx!.add(batch[j].id, vectors[j]);
       }
       embedded += batch.length;
-      onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" });
+      try { onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
     }
 
     // --- Disk records (compacted Parquet/JSONL) ---
@@ -1934,7 +1939,7 @@ export class Collection {
           failed += diskBatch.length;
           diskBatch.length = 0;
           diskBatchIndex++;
-          onProgress?.({ completed: embedded + failed, total: null, phase: "disk" });
+          try { onProgress?.({ completed: embedded + failed, total: null, phase: "disk" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
           return false;
         }
         const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
@@ -1954,7 +1959,7 @@ export class Collection {
         embedded += diskBatch.length;
         diskBatch.length = 0;
         diskBatchIndex++;
-        onProgress?.({ completed: embedded + failed, total: null, phase: "disk" });
+        try { onProgress?.({ completed: embedded + failed, total: null, phase: "disk" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
         return false;
       };
 

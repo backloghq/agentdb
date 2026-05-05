@@ -134,16 +134,18 @@ export function getVectorTools(db: AgentDB): AgentTool[] {
         embedded: z.number(),
         failed: z.number(),
         errors: z.array(z.object({ batchIndex: z.number(), recordIds: z.array(z.string()), reason: z.string() })),
+        aborted: z.boolean().optional(),
       }),
       annotations: DESTRUCTIVE,
       execute: safe("db_reembed_all", DESTRUCTIVE)(async (args) => {
         const col = await db.collection(args.collection as string);
-        return col.reembedAll({
+        const result = await col.reembedAll({
           onProgress: ({ completed, total, phase }) => {
             const pct = total !== null ? ` (${Math.round((completed / total) * 100)}%)` : "";
             console.error(`agentdb: db_reembed_all ${phase} ${completed}/${total ?? "?"}${pct}`);
           },
         });
+        return result;
       }),
     },
 

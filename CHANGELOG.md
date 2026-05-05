@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 - **`AgentDBOptions.cacheSize` JSDoc** reported wrong default (`10000`); actual value enforced by `_openCollection` is `1_000`. Corrected.
 - **`AgentDBOptions.diskConcurrency` JSDoc** reported wrong default (`16`); actual value enforced by `DiskStore` constructor is `20`. Corrected.
+- **`db_reembed_all` tool silently dropped `aborted:true`** — the zod `outputSchema` did not include `aborted`, so a cancelled reembed run was indistinguishable from a completed one. Added `aborted: z.boolean().optional()` to the schema; the full `ReembedResult` is now returned as-is.
+- **`onProgress` callbacks were unguarded** — if a user-supplied callback threw, the exception aborted the operation mid-flight (and in `reembedAll` left the HNSW index partially cleared). All six call sites in `collection.ts` and `agentdb.ts` are now wrapped in `try/catch`; errors are logged to `console.error` and swallowed.
+- **`find()` `_findTruncations` counter and cap warning fired on abort** — `truncated` was set when aborted, and the counter/warn fired whenever `requestedLimit > limit`, including on abort. Separated: `_findTruncations` and the cap warning now only fire when the `maxFindLimit` cap was the actual cause (`total > offset + limit && requestedLimit > limit && !tokenTruncated && !abortedEarly`). `FindResult` gains an optional `aborted?: boolean` field (symmetry with `ReembedResult.aborted`) set to `true` only when an `AbortSignal` cut the scan short.
 
 ## [2.0.0] - 2026-05-05
 

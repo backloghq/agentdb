@@ -883,7 +883,7 @@ export class AgentDB {
           }
         }
         totalRecords++;
-        onProgress?.({ completed: totalRecords, total: grandTotal, phase: "importing" });
+        try { onProgress?.({ completed: totalRecords, total: grandTotal, phase: "importing" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
       }
       // Per-record inserts already drove tl.add() — no rebuild needed.
     }
