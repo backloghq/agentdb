@@ -603,6 +603,26 @@ startHttp(dir, {
 });
 ```
 
+### Auth priority when multiple mechanisms are configured
+
+If more than one mechanism is set in the same config, the CLI enforces a fixed priority and emits a warning at startup:
+
+```
+jwt > multi-token > bearer
+```
+
+| What you configured | What is enforced |
+|---|---|
+| `AGENTDB_HTTP_JWT_SECRET` only | JWT |
+| `AGENTDB_HTTP_MULTI_TOKEN` only | multi-token |
+| `AGENTDB_AUTH_TOKEN` only | bearer |
+| JWT + multi-token (or bearer) | JWT wins; others are silently ignored after warning |
+| multi-token + bearer | multi-token wins; bearer is silently ignored after warning |
+
+The warning is emitted to stderr and names the active mechanisms, the winner, and the priority order.
+
+**JWT secret minimum length:** use at least 32 characters (256 bits) for HMAC-SHA256 secrets. Shorter keys are cryptographically weak and may be rejected by strict JWT libraries. A good default: `openssl rand -hex 32`.
+
 ### Group commit (faster writes)
 
 Buffer writes in memory and flush as a single disk write. ~12x faster for sustained writes. Single-writer only — auto-disabled when `agentId` is set.
@@ -813,6 +833,12 @@ docker run -p 3000:3000 -v ./data:/data agentdb --path /data --http --host 0.0.0
 
 # With auth:
 docker run -p 3000:3000 -e AGENTDB_AUTH_TOKEN=secret -v ./data:/data agentdb --path /data --http --host 0.0.0.0
+
+# With a config file (mount the file and point --config at it):
+docker run -p 3000:3000 \
+  -v ./data:/data \
+  -v ./agentdb.config.json:/etc/agentdb/config.json:ro \
+  agentdb --path /data --http --host 0.0.0.0 --config /etc/agentdb/config.json
 
 # With S3:
 docker run -p 3000:3000 \
@@ -1090,6 +1116,8 @@ console.log(m.bm25DocCount, m.bm25NeedsMerge);
 console.log(m.writeMode);
 ```
 
+**Verifying configuration changes:** after adjusting a knob (e.g. raising `cacheSize` or `filterCacheSize`), call `col.metrics()` after a warm-up period of representative traffic. Compare `recordCacheHits / recordCacheFetches` or `filterCacheHits / (filterCacheHits + filterCompilations)` before and after to confirm the new limit is having the intended effect. All counters are lifetime values since the collection was opened.
+
 ## Limits and Ceilings
 
 Every hard cap in the system, what triggers it, and how to change it.
@@ -1125,11 +1153,15 @@ try {
   await db.collection(schema);
 } catch (e) {
   if (e instanceof LegacyTextIndexError) {
-    await db.rebuildTextIndex("notes");  // wipes old index, re-indexes all records
+    await db.rebuildTextIndex("notes");  // re-indexes all records into a fresh TermLog
     await db.collection(schema);         // succeeds now
   }
 }
 ```
+
+**Disk space:** in FS mode, `rebuildTextIndex` builds the new index in `text.new/` while the original `text/` remains intact and queryable. Both directories coexist until the atomic rename swap completes — plan for ~2× your current text-index size in free disk space during the rebuild. In S3 mode, the old index is wiped before rebuilding (no rename is possible for blob stores).
+
+**Write safety:** records inserted, updated, or deleted during an in-flight rebuild are captured in the new index. Concurrent `bm25Search` calls during a rebuild are safe — they read from the old index until the swap completes.
 
 **Rebuild via MCP tool** (no code change required):
 
