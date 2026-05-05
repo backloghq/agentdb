@@ -6,6 +6,7 @@ import { describe, it, expect, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { TermLog } from "@backloghq/termlog";
 import { AgentDB } from "../src/agentdb.js";
 import { defineSchema } from "../src/schema.js";
 import type { EmbeddingProvider } from "../src/embeddings/types.js";
@@ -432,6 +433,128 @@ describe("Progress callbacks", () => {
       expect(after.records.length).toBeGreaterThan(0);
 
       await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe("R7/1 — rebuildTextIndex concurrency hardening", () => {
+    it("A: _rebuildingIdx is null after newIdx.add throws mid-rebuild; rebuild can be called again", async () => {
+      // If newIdx.add() throws (ENOSPC, OOM, corruption) the _rebuildingIdx field must be
+      // cleared by the finally block — otherwise live writes keep calling add() on a zombie
+      // TermLog whose text.new/ may be partially corrupted.
+      const dir = await makeTmpDir();
+      const N = 10;
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "exception-mid-rebuild",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      for (let i = 0; i < N; i++) await col.insert({ title: `doc ${i}` });
+
+      // Spy is set up AFTER inserts so the counter only counts rebuild-loop calls.
+      let addsSeen = 0;
+      const origAdd = TermLog.prototype.add;
+      const addSpy = vi.spyOn(TermLog.prototype, "add").mockImplementation(async function (this: TermLog, id: string, text: string) {
+        addsSeen++;
+        if (addsSeen === 5) throw new Error("simulated ENOSPC on add");
+        return origAdd.call(this, id, text);
+      });
+
+      let rebuiltError: unknown;
+      try {
+        await col.rebuildTextIndex();
+      } catch (e) {
+        rebuiltError = e;
+      } finally {
+        addSpy.mockRestore();
+      }
+
+      // Exception propagated out of rebuildTextIndex.
+      expect(rebuiltError).toBeInstanceOf(Error);
+      expect((rebuiltError as Error).message).toContain("ENOSPC");
+
+      // _rebuildingIdx must be null — the finally block must have cleared it.
+      expect((col as unknown as Record<string, unknown>)._rebuildingIdx).toBeNull();
+
+      // No stuck _rebuilding flag — calling again must succeed.
+      const count = await col.rebuildTextIndex();
+      expect(count).toBe(N);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("B: concurrent rebuildTextIndex calls — second rejects with 'already in progress'", async () => {
+      // Without a single-flight guard, two concurrent calls both write into text.new/ and
+      // both attempt the rename dance — the second rename corrupts the first's new index.
+      const dir = await makeTmpDir();
+      const N = 20;
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "concurrent-rebuild-guard",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      for (let i = 0; i < N; i++) await col.insert({ title: `doc ${i}` });
+
+      // Kick off two rebuilds simultaneously. The first sets _rebuilding = true before any
+      // await, so the second hits the guard synchronously and rejects immediately.
+      const [r1, r2] = await Promise.allSettled([
+        col.rebuildTextIndex(),
+        col.rebuildTextIndex(),
+      ]);
+
+      const rejected = [r1, r2].find((r) => r.status === "rejected");
+      const fulfilled = [r1, r2].find((r) => r.status === "fulfilled");
+
+      expect(rejected).toBeDefined();
+      expect((rejected as PromiseRejectedResult).reason.message).toContain("already in progress");
+      expect(fulfilled).toBeDefined();
+      expect((fulfilled as PromiseFulfilledResult<number>).value).toBe(N);
+
+      await db.close();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it("C: db.close() during in-flight rebuild aborts it and completes cleanly", async () => {
+      // close() must not race against a rebuild: it should abort the rebuild and await
+      // its teardown before closing the store and textIdx.
+      const dir = await makeTmpDir();
+      const N = 20;
+      const db = new AgentDB(dir);
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "close-during-rebuild",
+        fields: { title: { type: "string" } },
+        textSearch: true,
+      }));
+      for (let i = 0; i < N; i++) await col.insert({ title: `doc ${i}` });
+
+      // Use onProgress to know the rebuild has started processing records.
+      let resolveStarted!: () => void;
+      const rebuildStarted = new Promise<void>((res) => { resolveStarted = res; });
+
+      const rebuildPromise = col.rebuildTextIndex({
+        onProgress: () => { resolveStarted(); },
+      });
+      // Register .catch() immediately so there is never an unhandled-rejection window
+      // between close() aborting the rebuild and us awaiting the result below.
+      const rebuildResult = rebuildPromise.catch((e: unknown) => e);
+
+      // Wait until the rebuild has processed at least one record (i.e. is truly in flight).
+      await rebuildStarted;
+
+      // Close must complete cleanly — it aborts the rebuild and awaits settlement.
+      await db.close();
+
+      // Rebuild must have been aborted (not a silent hang or undefined behaviour).
+      const result = await rebuildResult;
+      expect(result).toBeInstanceOf(DOMException);
+      expect((result as DOMException).name).toBe("AbortError");
+
       await rm(dir, { recursive: true, force: true });
     });
   });

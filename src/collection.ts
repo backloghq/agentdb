@@ -216,6 +216,14 @@ export class Collection {
    *  All live writes (insert/update/delete) shadow-write here so concurrent mutations
    *  are captured. Null when no rebuild is in progress. */
   private _rebuildingIdx: TermLog | null = null;
+  /** True while any rebuildTextIndex call is in flight (guards against concurrent rebuilds). */
+  private _rebuilding = false;
+  /** AbortController for the in-flight FS-mode rebuild; null otherwise.
+   *  close() uses this to interrupt a running rebuild before closing the store. */
+  private _rebuildAbortCtrl: AbortController | null = null;
+  /** Resolves when the current rebuild finishes (success or error). Used by close() to await
+   *  teardown after signalling _rebuildAbortCtrl. */
+  private _rebuildSettled: Promise<void> | null = null;
   private _dir = "";
   private views = new ViewManager();
   private hnswIdx: HnswIndex | null = null;
@@ -417,6 +425,11 @@ export class Collection {
    */
   async rebuildTextIndex(opts?: { onProgress?: ProgressCallback; signal?: AbortSignal }): Promise<number> {
     if (!this._dir) return 0;
+    // B: single-flight guard — concurrent callers get a clear error rather than racing into
+    // the same temp directory and rename sequence.
+    if (this._rebuilding) throw new Error("agentdb: rebuildTextIndex already in progress");
+    this._rebuilding = true;
+
     const onProgress = opts?.onProgress;
     const signal = opts?.signal;
     const textDir = pathJoin(this._dir, "text");
@@ -425,49 +438,53 @@ export class Collection {
       // S3 mode: no atomic rename is possible for blob stores. Use the original
       // destructive approach (wipe then rebuild). An abort here leaves textIdx=null
       // and the S3 prefix empty — the caller must retry rebuildTextIndex to restore search.
-      if (this.textIdx) await this.textIdx.close();
-      const blobs = await this._termlogBackend.listBlobs("").catch(() => [] as string[]);
-      const CONCURRENCY = 16;
-      for (let i = 0; i < blobs.length; i += CONCURRENCY) {
-        const batch = blobs.slice(i, i + CONCURRENCY);
-        await Promise.all(batch.map((b) => this._termlogBackend!.deleteBlob(b).catch(() => {})));
-      }
-      this.textIdx = await TermLog.open({
-        dir: textDir,
-        backend: this._termlogBackend,
-        k1: this.opts.bm25K1 ?? 1.2,
-        b: this.opts.bm25B ?? 0.75,
-      });
-      let count = 0;
-      const records = this._diskStore
-        ? await (async () => {
-            const out: Array<[string, StoredRecord]> = [];
-            for await (const [id, record] of this._diskStore!.entries()) {
-              out.push([id, record as StoredRecord]);
-            }
-            return out;
-          })()
-        : Array.from(this.store.entries());
-      const total = records.length;
-      for (const [id, record] of records) {
-        if (signal?.aborted) {
-          await this.textIdx.close();
-          this.textIdx = null;
-          console.warn(
-            `agentdb [${this.name}]: rebuildTextIndex aborted in S3 mode — ` +
-            `text index wiped, indexed ${count}/${total}. Call rebuildTextIndex() again to restore search.`,
-          );
-          throw new DOMException("The operation was aborted.", "AbortError");
+      try {
+        if (this.textIdx) await this.textIdx.close();
+        const blobs = await this._termlogBackend.listBlobs("").catch(() => [] as string[]);
+        const CONCURRENCY = 16;
+        for (let i = 0; i < blobs.length; i += CONCURRENCY) {
+          const batch = blobs.slice(i, i + CONCURRENCY);
+          await Promise.all(batch.map((b) => this._termlogBackend!.deleteBlob(b).catch(() => {})));
         }
-        if (!isExpired(record)) {
-          await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
-          count++;
-          try { onProgress?.({ completed: count, total, phase: "rebuilding" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
+        this.textIdx = await TermLog.open({
+          dir: textDir,
+          backend: this._termlogBackend,
+          k1: this.opts.bm25K1 ?? 1.2,
+          b: this.opts.bm25B ?? 0.75,
+        });
+        let count = 0;
+        const records = this._diskStore
+          ? await (async () => {
+              const out: Array<[string, StoredRecord]> = [];
+              for await (const [id, record] of this._diskStore!.entries()) {
+                out.push([id, record as StoredRecord]);
+              }
+              return out;
+            })()
+          : Array.from(this.store.entries());
+        const total = records.length;
+        for (const [id, record] of records) {
+          if (signal?.aborted) {
+            await this.textIdx.close();
+            this.textIdx = null;
+            console.warn(
+              `agentdb [${this.name}]: rebuildTextIndex aborted in S3 mode — ` +
+              `text index wiped, indexed ${count}/${total}. Call rebuildTextIndex() again to restore search.`,
+            );
+            throw new DOMException("The operation was aborted.", "AbortError");
+          }
+          if (!isExpired(record)) {
+            await this.textIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+            count++;
+            try { onProgress?.({ completed: count, total, phase: "rebuilding" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
+          }
         }
+        await this.textIdx.flush();
+        await this.backend.deleteBlob("indexes/text-index.json").catch(() => {});
+        return count;
+      } finally {
+        this._rebuilding = false;
       }
-      await this.textIdx.flush();
-      await this.backend.deleteBlob("indexes/text-index.json").catch(() => {});
-      return count;
     }
 
     // FS mode: snapshot-then-swap.
@@ -483,101 +500,121 @@ export class Collection {
       b: this.opts.bm25B ?? 0.75,
     });
 
+    // C: close() interlock — create an AbortController for this rebuild so close() can
+    // interrupt it. Also create a promise that resolves when the rebuild finishes so
+    // close() can await teardown before proceeding.
+    const rebuildCtrl = new AbortController();
+    this._rebuildAbortCtrl = rebuildCtrl;
+    let settleRebuild!: () => void;
+    this._rebuildSettled = new Promise<void>((res) => { settleRebuild = res; });
+
     // Shadow-write: all live writes (insert/update/delete) that arrive during the rebuild
     // window will call textIndexAdd/textIndexRemove, which forward to _rebuildingIdx as well.
     // This ensures concurrent mutations land in the new index before the swap.
     this._rebuildingIdx = newIdx;
 
     let count = 0;
-    const records = this._diskStore
-      ? await (async () => {
-          const out: Array<[string, StoredRecord]> = [];
-          for await (const [id, record] of this._diskStore!.entries()) {
-            out.push([id, record as StoredRecord]);
-          }
-          return out;
-        })()
-      : Array.from(this.store.entries());
-    const total = records.length;
+    try {
+      const records = this._diskStore
+        ? await (async () => {
+            const out: Array<[string, StoredRecord]> = [];
+            for await (const [id, record] of this._diskStore!.entries()) {
+              out.push([id, record as StoredRecord]);
+            }
+            return out;
+          })()
+        : Array.from(this.store.entries());
+      const total = records.length;
 
-    for (const [id, record] of records) {
-      if (signal?.aborted) {
-        // Abort: discard temp dir, leave existing textIdx untouched.
-        this._rebuildingIdx = null;
-        await newIdx.close();
-        await rm(textNewDir, { recursive: true, force: true });
-        throw new DOMException("The operation was aborted.", "AbortError");
-      }
-      if (!isExpired(record)) {
-        await newIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
-        count++;
-        try { onProgress?.({ completed: count, total, phase: "rebuilding" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
-      }
-    }
-
-    // Post-loop delta reconciliation (in-memory mode only):
-    // opslog's _set() updates the in-memory Map synchronously inside its serialize chain,
-    // before the WAL write resolves. So a concurrent insert's record IS in this.store.entries()
-    // after the first yield point following the store.set() call — even if col.insert() is
-    // still awaiting the WAL flush. We scan for IDs not in the original snapshot and replay
-    // them into newIdx. Shadow-write (_rebuildingIdx) covers cases where textIndexAdd ran
-    // during the loop; this delta scan covers the complement.
-    if (!this._diskStore) {
-      const snapshotIds = new Set(records.map(([id]) => id));
-      for (const [id, record] of this.store.entries()) {
-        if (!snapshotIds.has(id) && !isExpired(record)) {
+      for (const [id, record] of records) {
+        // Check both caller signal and the internal close() abort signal.
+        if (signal?.aborted || rebuildCtrl.signal.aborted) {
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
+        if (!isExpired(record)) {
           await newIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
           count++;
+          try { onProgress?.({ completed: count, total, phase: "rebuilding" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
         }
       }
-      for (const [id] of records) {
-        if (!this.store.get(id)) {
-          // Record deleted during rebuild — remove from new index
-          await newIdx.remove(id);
+
+      // Post-loop delta reconciliation (in-memory mode only):
+      // opslog's _set() updates the in-memory Map synchronously inside its serialize chain,
+      // before the WAL write resolves. So a concurrent insert's record IS in this.store.entries()
+      // after the first yield point following the store.set() call — even if col.insert() is
+      // still awaiting the WAL flush. We scan for IDs not in the original snapshot and replay
+      // them into newIdx. Shadow-write (_rebuildingIdx) covers cases where textIndexAdd ran
+      // during the loop; this delta scan covers the complement.
+      if (!this._diskStore) {
+        const snapshotIds = new Set(records.map(([id]) => id));
+        for (const [id, record] of this.store.entries()) {
+          if (!snapshotIds.has(id) && !isExpired(record)) {
+            await newIdx.add(id, extractTextFromRecord(this.textRecord(stripMeta(record))));
+            count++;
+          }
+        }
+        for (const [id] of records) {
+          if (!this.store.get(id)) {
+            // Record deleted during rebuild — remove from new index
+            await newIdx.remove(id);
+          }
         }
       }
-    }
 
-    // Clear shadow before flush+swap. Any writes from this point route to textIdx (old) only
-    // until the swap completes — the window is negligible (close + rename + reopen).
-    this._rebuildingIdx = null;
-    await newIdx.flush();
+      // Clear shadow before flush+swap. Any writes from this point route to textIdx (old) only
+      // until the swap completes — the window is negligible (close + rename + reopen).
+      this._rebuildingIdx = null;
+      await newIdx.flush();
 
-    // Atomic swap: rename text/→text.old/ → rename text.new/→text/ → rm text.old/.
-    // text/ is absent for at most one rename syscall (vs the previous rm-then-rename which
-    // left it absent across two separate calls). On rollback, text.old/ is renamed back to
-    // text/ so the collection remains queryable. Stale text.old/ from a previous crashed
-    // swap is removed before step 1; open() also does crash-recovery on next startup.
-    // Step 1 is skipped when text/ does not exist (first-time build or text search disabled).
-    if (this.textIdx) await this.textIdx.close();
-    this.textIdx = null;
-    await newIdx.close();
-    const textOldDir = pathJoin(this._dir, "text.old");
-    const hadExistingIndex = await access(textDir).then(() => true, () => false);
-    if (hadExistingIndex) {
-      await rm(textOldDir, { recursive: true, force: true }); // remove any stale backup
-      await fsRename(textDir, textOldDir);                    // step 1: backup old
-    }
-    try {
-      await fsRename(textNewDir, textDir);                    // step 2: promote new
-    } catch (swapErr) {
-      // Rollback: restore old index so the collection remains queryable.
-      if (hadExistingIndex) await fsRename(textOldDir, textDir).catch(() => {});
+      // Atomic swap: rename text/→text.old/ → rename text.new/→text/ → rm text.old/.
+      // text/ is absent for at most one rename syscall (vs the previous rm-then-rename which
+      // left it absent across two separate calls). On rollback, text.old/ is renamed back to
+      // text/ so the collection remains queryable. Stale text.old/ from a previous crashed
+      // swap is removed before step 1; open() also does crash-recovery on next startup.
+      // Step 1 is skipped when text/ does not exist (first-time build or text search disabled).
+      if (this.textIdx) await this.textIdx.close();
+      this.textIdx = null;
+      await newIdx.close();
+      const textOldDir = pathJoin(this._dir, "text.old");
+      const hadExistingIndex = await access(textDir).then(() => true, () => false);
+      if (hadExistingIndex) {
+        await rm(textOldDir, { recursive: true, force: true }); // remove any stale backup
+        await fsRename(textDir, textOldDir);                    // step 1: backup old
+      }
+      try {
+        await fsRename(textNewDir, textDir);                    // step 2: promote new
+      } catch (swapErr) {
+        // Rollback: restore old index so the collection remains queryable.
+        if (hadExistingIndex) await fsRename(textOldDir, textDir).catch(() => {});
+        await rm(textNewDir, { recursive: true, force: true }).catch(() => {});
+        throw swapErr;
+      }
+      if (hadExistingIndex) {
+        await rm(textOldDir, { recursive: true, force: true }); // step 3: drop backup
+      }
+      this.textIdx = await TermLog.open({
+        dir: textDir,
+        k1: this.opts.bm25K1 ?? 1.2,
+        b: this.opts.bm25B ?? 0.75,
+      });
+
+      // Delete any legacy v1.4 blob so subsequent opens don't re-throw LegacyTextIndexError.
+      await this.backend.deleteBlob("indexes/text-index.json").catch(() => {});
+      return count;
+
+    } finally {
+      // A: always clear _rebuildingIdx — guards against dangling shadow-writes if newIdx.add()
+      // or any later step threw an unexpected exception mid-rebuild.
+      this._rebuildingIdx = null;
+      this._rebuilding = false;
+      this._rebuildAbortCtrl = null;
+      this._rebuildSettled = null;
+      settleRebuild(); // unblock any close() waiting for the rebuild to finish
+      // Clean up temp state. rm is a no-op if textNewDir was already renamed (success path).
+      // newIdx.close() is a no-op / suppressed if already closed in the success path.
+      await newIdx.close().catch(() => {});
       await rm(textNewDir, { recursive: true, force: true }).catch(() => {});
-      throw swapErr;
     }
-    if (hadExistingIndex) {
-      await rm(textOldDir, { recursive: true, force: true }); // step 3: drop backup
-    }
-    this.textIdx = await TermLog.open({
-      dir: textDir,
-      k1: this.opts.bm25K1 ?? 1.2,
-      b: this.opts.bm25B ?? 0.75,
-    });
-
-    // Delete any legacy v1.4 blob so subsequent opens don't re-throw LegacyTextIndexError.
-    await this.backend.deleteBlob("indexes/text-index.json").catch(() => {});
-    return count;
   }
 
   /** Rebuild all indexes from current store contents. Delegates to IndexManager. */
@@ -812,6 +849,14 @@ export class Collection {
 
   /** Close the underlying store. */
   async close(): Promise<void> {
+    // C: interlock with an in-flight FS-mode rebuild. Capture the settled promise BEFORE
+    // aborting (the finally block clears _rebuildSettled before resolving it, so we must
+    // hold a local reference). Abort causes the rebuild loop to throw AbortError; the
+    // finally block resolves settleRebuild, unblocking the await below.
+    const waitForRebuild = this._rebuildSettled;
+    if (this._rebuildAbortCtrl) this._rebuildAbortCtrl.abort();
+    if (waitForRebuild) await waitForRebuild;
+
     if (this.textIdx) {
       await this.textIdx.close();
       this.textIdx = null;
