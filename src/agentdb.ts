@@ -1060,6 +1060,7 @@ export class AgentDB {
       const listener = this.collectionListeners.get(evict);
       if (listener) col.off("change", listener);
       this.collectionListeners.delete(evict);
+      this.memoryMonitor.remove(evict);
       await col.close();
       this.open.delete(evict);
     }
