@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status: v2.2.0-dev — all v2.1.1 capabilities plus bloom filter query planner integration (short-circuit on definite-miss), `HnswOptions.persistEvery` for bounded crash exposure (periodic full-graph flush), efSearch recall differential test, composite+bloom durable persistence in DiskStore, and S3 + v2.1 options matrix test coverage (task 320).**
+**Status: v2.2.0 — all v2.1.1 capabilities plus bloom filter query planner integration (short-circuit on definite-miss), `HnswOptions.persistEvery` for bounded crash exposure (periodic full-graph flush) with configurable `persistTimeoutMs`, efSearch recall differential test, composite+bloom durable persistence in DiskStore (with field-mismatch validation), and S3 + v2.1 options matrix test coverage. Known issue: HNSW `graph.bin` sidecar is FS-only — S3 deployments rebuild graphs from vectors on container restart; S3-native sidecar deferred to v2.3.**
 
 **Configuration:** see [README.md § Configuration](./README.md#configuration) for the three-layer config pipeline (CLI flags > env vars > config file), the full `AGENTDB_*` env var reference, `agentdb.config.json` shape, and `loadAgentDBConfig` library API.
 

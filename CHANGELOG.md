@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-05-06
+
 ### Fixed
 
 - **v2.2.0 review — B1: `createBloomFilter`/`createCompositeIndex` shell-overwrite** — in disk mode, both methods first built an index from the in-session WAL, then called `tryLoad*` which unconditionally overwrote the index with the stale on-disk JSON, erasing any in-session inserts made before the call. Fix: try-load first; if loaded, merge the WAL on top via `populateBloomFilterFromDisk`/`populateCompositeIndexFromDisk` with an async generator over the snapshotted WAL entries. If not loaded, the existing v2.1.1 fallback runs (build from WAL then disk scan). 2 new tests in `disk-mode.test.ts`: B1a (bloom — in-session value survives createBloomFilter loading prior-session JSON) and B1b (composite — in-session record is findable after createCompositeIndex loads prior-session JSON).
