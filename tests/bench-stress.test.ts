@@ -185,9 +185,10 @@ describe("Long-running agent simulation — 3 min stress", () => {
       console.log(`  ${tool.padEnd(10)} n=${String(lats.length).padStart(4)}  p50=${p50.toFixed(1)}ms  p99=${p99.toFixed(1)}ms`);
     }
 
-    // Check for latency degradation: compare first 10% vs last 10% of find latencies.
-    // Uses p99 (not p50) to detect tail regression; 0.5ms floor prevents false alarms
-    // when both baselines are sub-millisecond noise.
+    // Diagnostic measurements only. Find-latency drift on a growing collection is
+    // expected (more records to scan); RSS growth reflects working buffers (opslog WAL,
+    // termlog segments, parquet) plus V8 page retention. Neither is a leak signal on
+    // this workload — for targeted leak detection see `scripts/bench-leak.mjs`.
     if (latencies.find.length >= 20) {
       const tenPct = Math.floor(latencies.find.length * 0.1);
       const early  = latencies.find.slice(0, tenPct);
@@ -196,16 +197,9 @@ describe("Long-running agent simulation — 3 min stress", () => {
       const lateP99  = Math.max(p50p99(late).p99, 0.5);
       const drift = lateP99 / earlyP99;
       console.log(`\n  find latency drift (early vs late p99): ${earlyP99.toFixed(1)}ms → ${lateP99.toFixed(1)}ms (${drift.toFixed(2)}×)`);
-      if (drift > 2) console.log(`  ⚠ find latency degraded >2× over session`);
-      else console.log(`  ✓ find latency stable`);
     }
 
-    const rssDelta = rssEnd - rssStart;
-    if (rssDelta > 100) {
-      console.log(`\n  ⚠ RSS grew ${rssDelta.toFixed(0)}MB — potential leak`);
-    } else {
-      console.log(`\n  ✓ RSS delta=${rssDelta.toFixed(0)}MB — stable`);
-    }
+    console.log(`  RSS delta: ${(rssEnd - rssStart).toFixed(0)}MB`);
 
     await db.close();
     await rm(tmpDir, { recursive: true, force: true });
