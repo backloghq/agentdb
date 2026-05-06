@@ -558,6 +558,29 @@ async function main() {
 
   const out = { a, b, c, d, e, f, g, h, i, j, k, l };
   console.log("\n# JSON RESULT:\n" + JSON.stringify(out));
+
+  // Aggregate pass criteria. A-D don't carry an explicit `pass` field; derive from
+  // their counter values. E-L carry `pass`. Exit 1 if any regress so CI can gate on it.
+  const checks = {
+    a: a.final === 2000 && a.afterDelete1 === 0,
+    b: b.monitorSize === b.openSize,
+    c: c.listenersAfterClose === 0,
+    d: d.pinsSize === 0 && d.subsSize === 0 && d.listenersSize === 0,
+    e: e.pass,
+    f: f.pass,
+    g: g.pass,
+    h: h.pass,
+    i: i.pass,
+    j: j.pass,
+    k: k.pass,
+    l: l.lazyReaps,
+  };
+  const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([id]) => id.toUpperCase());
+  if (failed.length > 0) {
+    console.error(`\n# REGRESSION: scenarios ${failed.join(", ")} did not meet pass criteria.`);
+    process.exit(1);
+  }
+  console.log("\n# All 12 scenarios PASS.");
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
