@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
@@ -866,6 +866,193 @@ describe("Disk-backed mode", () => {
       } finally {
         warnSpy.mockRestore();
       }
+    });
+
+    // ---- Task 319: composite + bloom durable persistence ----
+
+    it("task 319 — round-trip composite: loaded from JSON on reopen, no disk scan", async () => {
+      const schema319 = defineSchema({
+        name: "t319-composite",
+        fields: { status: { type: "string" }, priority: { type: "string" } },
+        storageMode: "disk",
+        compositeIndexes: [["status", "priority"]],
+      });
+
+      // Session 1: insert records and close → saveIndexes writes composite JSON
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      let col = await db.collection(schema319);
+      await col.insert({ status: "open", priority: "high" });
+      await col.insert({ status: "open", priority: "high" });
+      await col.insert({ status: "closed", priority: "low" });
+      await db.close();
+
+      // Verify the composite JSON file was written
+      const compositeFile = join(tmpDir, "collections", "t319-composite", "indexes", "composite-status__priority.json");
+      const raw = JSON.parse(await readFile(compositeFile, "utf-8"));
+      expect(raw.version).toBe(1);
+      expect(raw.fields).toEqual(["status", "priority"]);
+      expect(raw.entries.length).toBeGreaterThan(0);
+
+      // Session 2: reopen — composite must be loaded from JSON, NOT via O(N) disk scan
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      col = await db.collection(schema319);
+
+      // Spy AFTER collection is loaded so we only catch post-open calls
+      const ds = col.getDiskStore()!;
+      const entriesSpy = vi.spyOn(ds, "entries");
+
+      // Query using composite index
+      const results = await col.find({ filter: { status: "open", priority: "high" } });
+      expect(results.records.length).toBe(2);
+      expect(results.records.every((r) => r.status === "open" && r.priority === "high")).toBe(true);
+
+      // entries() was NOT called (composite loaded from JSON, not from disk scan)
+      const compositeScanCalls = entriesSpy.mock.calls.filter((a) =>
+        JSON.stringify(a).includes("skipCache"),
+      );
+      expect(compositeScanCalls).toHaveLength(0);
+      entriesSpy.mockRestore();
+    });
+
+    it("task 319 — round-trip bloom: mightHave answers preserved across close/reopen", async () => {
+      // Session 1: insert, create bloom, close → saveIndexes writes bloom JSON
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      let col = await db.collection(defineSchema({
+        name: "t319-bloom",
+        fields: { tag: { type: "string" } },
+        storageMode: "disk",
+      }));
+      await col.insert({ tag: "alpha" });
+      await col.insert({ tag: "beta" });
+      await col.createBloomFilter("tag");
+      expect(col.mightHave("tag", "alpha")).toBe(true);
+      expect(col.mightHave("tag", "zzz-absent")).toBe(false);
+      await db.close();
+
+      // Verify bloom JSON file was written
+      const bloomFile = join(tmpDir, "collections", "t319-bloom", "indexes", "bloom-tag.json");
+      const raw = JSON.parse(await readFile(bloomFile, "utf-8"));
+      expect(raw.version).toBe(1);
+      expect(raw.field).toBe("tag");
+      expect(typeof raw.bits).toBe("string");
+
+      // Session 2: reopen, recreate bloom from JSON (not from disk scan)
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      col = await db.collection(defineSchema({
+        name: "t319-bloom",
+        fields: { tag: { type: "string" } },
+        storageMode: "disk",
+      }));
+      await col.createBloomFilter("tag");
+
+      // mightHave answers are preserved (loaded from JSON bit array)
+      expect(col.mightHave("tag", "alpha")).toBe(true);
+      expect(col.mightHave("tag", "beta")).toBe(true);
+      expect(col.mightHave("tag", "zzz-absent")).toBe(false);
+    });
+
+    it("task 319 — fallback when composite JSON absent: disk scan populates correctly", async () => {
+      const schema319f = defineSchema({
+        name: "t319-fallback",
+        fields: { a: { type: "string" }, b: { type: "string" } },
+        storageMode: "disk",
+        compositeIndexes: [["a", "b"]],
+      });
+
+      // Session 1: insert, close
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col1 = await db.collection(schema319f);
+      await col1.insert({ a: "x", b: "1" });
+      await col1.insert({ a: "x", b: "2" });
+      await db.close();
+
+      // Delete the composite JSON file (simulates first open on v2.1 data)
+      const compositeFile = join(tmpDir, "collections", "t319-fallback", "indexes", "composite-a__b.json");
+      await rm(compositeFile, { force: true });
+
+      // Session 2: reopen — file absent → falls back to disk scan
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection(schema319f);
+
+      const results = await col2.find({ filter: { a: "x", b: "1" } });
+      expect(results.records.length).toBe(1);
+      expect(results.records[0].b).toBe("1");
+    });
+
+    it("task 319 — version mismatch: logs warn and falls back to disk scan", async () => {
+      const schema319v = defineSchema({
+        name: "t319-version",
+        fields: { p: { type: "string" }, q: { type: "string" } },
+        storageMode: "disk",
+        compositeIndexes: [["p", "q"]],
+      });
+
+      // Session 1: insert, close
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col1 = await db.collection(schema319v);
+      await col1.insert({ p: "foo", q: "bar" });
+      await db.close();
+
+      // Overwrite composite file with unsupported version
+      const compositeFile = join(tmpDir, "collections", "t319-version", "indexes", "composite-p__q.json");
+      const existing = JSON.parse(await readFile(compositeFile, "utf-8"));
+      await writeFile(compositeFile, JSON.stringify({ ...existing, version: 99 }), "utf-8");
+
+      // Session 2: reopen — version mismatch → warn + fallback
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        db = new AgentDB(tmpDir, { storageMode: "disk" });
+        await db.init();
+        const col2 = await db.collection(schema319v);
+
+        // Query still works (disk scan fallback populated the index)
+        const results = await col2.find({ filter: { p: "foo", q: "bar" } });
+        expect(results.records.length).toBe(1);
+
+        // Warning was emitted
+        const mismatchWarns = warnSpy.mock.calls.filter((c) => String(c[0]).includes("version mismatch"));
+        expect(mismatchWarns.length).toBeGreaterThan(0);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("task 319 — mutations persisted: insert + delete round-trips correctly via JSON", async () => {
+      const schema319m = defineSchema({
+        name: "t319-mutations",
+        fields: { cat: { type: "string" }, tier: { type: "string" } },
+        storageMode: "disk",
+        compositeIndexes: [["cat", "tier"]],
+      });
+
+      // Session 1: insert 3 records, delete 1, close
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col1 = await db.collection(schema319m);
+      const id1 = await col1.insert({ cat: "A", tier: "gold" });
+      const id2 = await col1.insert({ cat: "A", tier: "gold" });
+      await col1.insert({ cat: "B", tier: "silver" });
+      await col1.deleteById(id2);
+      await db.close();
+
+      // Session 2: reopen — composite loaded from JSON reflects post-delete state
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection(schema319m);
+
+      const results = await col2.find({ filter: { cat: "A", tier: "gold" } });
+      expect(results.records.length).toBe(1);
+      expect(results.records[0]._id).toBe(id1);
+
+      const silverResults = await col2.find({ filter: { cat: "B", tier: "silver" } });
+      expect(silverResults.records.length).toBe(1);
     });
   });
 });

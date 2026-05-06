@@ -48,6 +48,27 @@ export class BloomFilter {
     this.bits.fill(0);
   }
 
+  /** Serialize to JSON for disk persistence. */
+  toJSON(field: string): { version: 1; field: string; size: number; hashCount: number; bits: string } {
+    return {
+      version: 1,
+      field,
+      size: this.size,
+      hashCount: this.hashCount,
+      bits: Buffer.from(this.bits).toString("base64"),
+    };
+  }
+
+  /** Deserialize from JSON produced by `toJSON()`. Throws on version mismatch. */
+  static fromJSON(data: { version: number; field: string; size: number; hashCount: number; bits: string }): BloomFilter {
+    if (data.version !== 1) throw new Error(`Unsupported BloomFilter version ${data.version}`);
+    const bf = new BloomFilter(1); // placeholder; fields overwritten below
+    bf.size = data.size;
+    bf.hashCount = data.hashCount;
+    bf.bits = new Uint8Array(Buffer.from(data.bits, "base64"));
+    return bf;
+  }
+
   /** Get bit positions for a value using double hashing. */
   private getPositions(value: string): number[] {
     const h1 = this.hash1(value);

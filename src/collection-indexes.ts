@@ -492,4 +492,37 @@ export class IndexManager {
   loadArrayIndex(data: ReturnType<ArrayIndex["toJSON"]>): void {
     this.arrayIndexes.set(data.field, ArrayIndex.fromJSON(data));
   }
+
+  /** Serialize all composite indexes for disk persistence. */
+  serializeCompositeIndexes(): Array<{ fields: string[]; entries: Array<{ key: unknown; ids: string[] }> }> {
+    return [...this.compositeIndexes.values()].map(({ fields, idx }) => ({
+      fields,
+      entries: idx.toJSON().entries,
+    }));
+  }
+
+  /** Serialize all bloom filters for disk persistence. */
+  serializeBloomFilters(): Array<ReturnType<BloomFilter["toJSON"]>> {
+    return [...this.bloomFilters.entries()].map(([field, bf]) => bf.toJSON(field));
+  }
+
+  /**
+   * Load a composite index from serialized JSON (fast path — skips O(N) disk scan).
+   * Replaces the empty index shell created by createCompositeIndex with persisted data.
+   */
+  loadCompositeIndex(data: { version: number; fields: string[]; entries: Array<{ key: unknown; ids: string[] }> }): void {
+    if (data.version !== 1) throw new Error(`Unsupported composite index version ${data.version}`);
+    const { fields, entries } = data;
+    const key = compositeIndexKey(fields);
+    const idx = BTreeIndex.fromJSON({ field: key, entries });
+    this.compositeIndexes.set(key, { fields, idx });
+  }
+
+  /**
+   * Load a bloom filter from serialized JSON (fast path — skips O(N) disk scan).
+   * Replaces the empty filter created by createBloomFilter with persisted data.
+   */
+  loadBloomFilter(data: ReturnType<BloomFilter["toJSON"]>): void {
+    this.bloomFilters.set(data.field, BloomFilter.fromJSON(data));
+  }
 }

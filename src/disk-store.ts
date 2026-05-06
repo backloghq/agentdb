@@ -531,6 +531,62 @@ export class DiskStore {
     for (const { data } of array) {
       await this.backend.writeBlob(`indexes/array-${data.field}.json`, Buffer.from(JSON.stringify(data)));
     }
+    // Composite indexes — one file per composite (fields joined with "__" for safe filenames)
+    for (const data of indexManager.serializeCompositeIndexes()) {
+      const safeKey = data.fields.join("__");
+      await this.backend.writeBlob(
+        `indexes/composite-${safeKey}.json`,
+        Buffer.from(JSON.stringify({ version: 1, ...data })),
+      );
+    }
+    // Bloom filters — one file per field
+    for (const data of indexManager.serializeBloomFilters()) {
+      await this.backend.writeBlob(
+        `indexes/bloom-${data.field}.json`,
+        Buffer.from(JSON.stringify(data)),
+      );
+    }
+  }
+
+  /**
+   * Try to load a composite index from its persisted JSON file.
+   * Returns true if the file existed and was loaded successfully.
+   * Returns false (and logs a warning on version mismatch) so the caller falls back to
+   * the v2.1.1 O(N) disk scan.
+   */
+  async tryLoadCompositeIndex(indexManager: IndexManager, fields: string[]): Promise<boolean> {
+    const safeKey = fields.join("__");
+    try {
+      const content = await this.backend.readBlob(`indexes/composite-${safeKey}.json`);
+      const data = JSON.parse(content.toString("utf-8"));
+      indexManager.loadCompositeIndex(data); // throws on version mismatch
+      return true;
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("Unsupported composite")) {
+        console.warn(`agentdb: composite index version mismatch, rebuilding from disk: ${err.message}`);
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Try to load a bloom filter from its persisted JSON file.
+   * Returns true if the file existed and was loaded successfully.
+   * Returns false (and logs a warning on version mismatch) so the caller falls back to
+   * the v2.1.1 O(N) disk scan.
+   */
+  async tryLoadBloomFilter(indexManager: IndexManager, field: string): Promise<boolean> {
+    try {
+      const content = await this.backend.readBlob(`indexes/bloom-${field}.json`);
+      const data = JSON.parse(content.toString("utf-8"));
+      indexManager.loadBloomFilter(data); // throws on version mismatch
+      return true;
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("Unsupported BloomFilter")) {
+        console.warn(`agentdb: bloom filter version mismatch, rebuilding from disk: ${err.message}`);
+      }
+      return false;
+    }
   }
 
   /** Discover persisted index files for lazy loading. Actual deserialization deferred to first query. */

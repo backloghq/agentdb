@@ -2109,10 +2109,14 @@ export class Collection {
   listIndexes(): string[] { return this.indexes.listIndexes(); }
   async createCompositeIndex(fields: string[]): Promise<void> {
     this.indexes.createCompositeIndex(fields, this.store.entries());
-    // In disk mode the in-memory store is empty (skipLoad: true). Backfill the index from
-    // Parquet/JSONL so composite-field queries can use the index rather than returning zero results.
+    // In disk mode the in-memory store is empty (skipLoad: true). Fast path: load from
+    // persisted JSON file written on last close(). Falls back to O(N) disk scan (v2.1.1 path)
+    // when the file is absent (first open after v2.2 upgrade) or version-mismatched.
     if (this._diskStore) {
-      await this.indexes.populateCompositeIndexFromDisk(fields, this._diskStore.entries({ skipCache: true }));
+      const loaded = await this._diskStore.tryLoadCompositeIndex(this.indexes, fields);
+      if (!loaded) {
+        await this.indexes.populateCompositeIndexFromDisk(fields, this._diskStore.entries({ skipCache: true }));
+      }
     }
   }
   dropCompositeIndex(fields: string[]): boolean { return this.indexes.dropCompositeIndex(fields); }
@@ -2122,10 +2126,13 @@ export class Collection {
   listArrayIndexes(): string[] { return this.indexes.listArrayIndexes(); }
   async createBloomFilter(field: string, expectedItems = 10000): Promise<void> {
     this.indexes.createBloomFilter(field, this.store.entries(), expectedItems);
-    // In disk mode the in-memory store is empty. Backfill so the bloom filter reflects
-    // all persisted records, not just the empty in-memory store.
+    // In disk mode the in-memory store is empty. Fast path: load from persisted JSON file.
+    // Falls back to O(N) disk scan (v2.1.1 path) when the file is absent or version-mismatched.
     if (this._diskStore) {
-      await this.indexes.populateBloomFilterFromDisk(field, this._diskStore.entries({ skipCache: true }));
+      const loaded = await this._diskStore.tryLoadBloomFilter(this.indexes, field);
+      if (!loaded) {
+        await this.indexes.populateBloomFilterFromDisk(field, this._diskStore.entries({ skipCache: true }));
+      }
     }
   }
   mightHave(field: string, value: string): boolean { return this.indexes.mightHave(field, value); }
