@@ -262,11 +262,18 @@ export class Collection {
     if (!this._diskStore) return;
     if (this._textIdxLoaded) return;
     await this._diskStore.ensureIndexesLoaded();
-    // Replay in-memory (WAL) entries into text index — these may predate this load call
-    for (const [id, record] of this.store.entries()) {
-      if (!isExpired(record)) {
-        const clean = stripMeta(record);
-        await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(clean)));
+    // Skip WAL replay when termlog segments are already populated on disk.
+    // Without this guard, every record would be re-added on first BM25 query —
+    // each re-add of an existing string id allocates a fresh numId and tombstones
+    // the old one, doubling segment.docCount (`bm25DocCount` metric reads ~2N at
+    // every scale). Same condition as the open-time guard at ~line 860.
+    const termlogAlreadyIndexed = (this.textIdx?.docCount() ?? 0) > 0;
+    if (!termlogAlreadyIndexed) {
+      for (const [id, record] of this.store.entries()) {
+        if (!isExpired(record)) {
+          const clean = stripMeta(record);
+          await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(clean)));
+        }
       }
     }
     this._textIdxLoaded = true;

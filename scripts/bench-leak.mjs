@@ -17,6 +17,7 @@
  *   J. opslog WAL drains in async mode
  *   K. termlog segment count drops after compaction
  *   L. RateLimiter per-IP map behaviour
+ *   M. bm25DocCount stable after same-session bm25Search (fix 310)
  *
  * Each scenario records:
  *   - a deterministic counter (hnswNodeCount, monitor map size, listenerCount,
@@ -534,6 +535,53 @@ async function benchRateLimiterMap() {
   return { sizeAfterFill, sizeAfterWindow, sizeAfterTriggerSweep: sizeAfterTrigger, lazyReaps };
 }
 
+// ---------- M. bm25DocCount stable after same-session bm25Search ----------
+// Pre-fix: ensureDiskIndexesLoaded fired on first bm25Search and re-added all
+// WAL records, allocating fresh numIds and tombstoning the old ones — segments
+// roughly doubled. Trigger: insert N → bm25Search (same session) → close →
+// reopen → metric reads ~2N. With the fix, metric stays at N.
+
+async function benchBm25CountSameSession() {
+  const N = 5000;
+  const dir = await tmp("bm25-count");
+  const { defineSchema } = await import("../dist/schema.js");
+  const schema = defineSchema({
+    description: "bench",
+    fields: { _id: { type: "string" }, text: { type: "string", searchable: true } },
+  });
+
+  // Phase 1: insert + same-session bm25Search + close.
+  let phase1Count;
+  {
+    const db = await AgentDB.open(dir, { storageMode: "disk" });
+    const col = await db.collection("docs", { textSearch: true, schema });
+    const records = Array.from({ length: N }, (_, i) => ({
+      _id: `doc-${i}`,
+      text: `lorem ${i} alpha`,
+    }));
+    await col.insertMany(records);
+    await col.bm25Search("alpha");
+    phase1Count = col.metrics().bm25DocCount;
+    await db.close();
+  }
+
+  // Phase 2: reopen, read metric.
+  let phase2Count;
+  {
+    const db = await AgentDB.open(dir, { storageMode: "disk" });
+    const col = await db.collection("docs", { textSearch: true, schema });
+    phase2Count = col.metrics().bm25DocCount;
+    await db.close();
+  }
+
+  await rm(dir, { recursive: true, force: true });
+
+  // Pass: count never exceeded N at any observation point.
+  const pass = phase1Count === N && phase2Count === N;
+  console.log(`[M Bm25Count] N=${N} phase1AfterSearch=${phase1Count} phase2AfterReopen=${phase2Count} pass=${pass}`);
+  return { N, phase1AfterSearch: phase1Count, phase2AfterReopen: phase2Count, pass };
+}
+
 // ---------- main ----------------------------------------------------------
 
 async function main() {
@@ -555,8 +603,9 @@ async function main() {
   const j = await benchAsyncWalDrain();
   const k = await benchTermlogCompaction();
   const l = await benchRateLimiterMap();
+  const m = await benchBm25CountSameSession();
 
-  const out = { a, b, c, d, e, f, g, h, i, j, k, l };
+  const out = { a, b, c, d, e, f, g, h, i, j, k, l, m };
   console.log("\n# JSON RESULT:\n" + JSON.stringify(out));
 
   // Aggregate pass criteria. A-D don't carry an explicit `pass` field; derive from
@@ -574,13 +623,14 @@ async function main() {
     j: j.pass,
     k: k.pass,
     l: l.lazyReaps,
+    m: m.pass,
   };
   const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([id]) => id.toUpperCase());
   if (failed.length > 0) {
     console.error(`\n# REGRESSION: scenarios ${failed.join(", ")} did not meet pass criteria.`);
     process.exit(1);
   }
-  console.log("\n# All 12 scenarios PASS.");
+  console.log(`\n# All ${Object.keys(checks).length} scenarios PASS.`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

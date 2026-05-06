@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [2.1.1] - 2026-05-06
 
+### Fixed
+
+- **Task 310 — `bm25DocCount` 2× inflation after first BM25 search in same session** — `Collection.open()` correctly skipped WAL-replay add when termlog segments existed on disk, but `_textIdxLoaded` stayed false. The first `bm25Search` (or `search`) call ran `ensureDiskIndexesLoaded()` which unconditionally re-added every WAL record. Each re-add tombstoned the old numId and allocated a fresh one, doubling segment.docCount. Queries returned correct hits (old numIds were tombstoned, postings filtered) but the metric and segment footprint were wrong; the inflation persisted across close/reopen. Fix: `ensureDiskIndexesLoaded` now checks `(this.textIdx?.docCount() ?? 0) > 0` before the WAL-replay loop, mirroring the existing open-time guard. Reproduction `tests/bm25-count-after-reopen.test.ts` (insert N → bm25Search → close → reopen → metric stays at N, fails before fix at 2N). Bench scenario M added to `scripts/bench-leak.mjs`.
+
 ### Added
 
 - **`scripts/bench-leak.mjs` — targeted memory-leak regression bench** — 12 scenarios covering the v2.1.1 leak fixes (HNSW orphans, MemoryMonitor on eviction, close() listeners, subscription pins) plus bounded-surface verifications (filter cache LRU, record cache LRU, audit ring buffer, MCP session cleanup, HNSW dedup on update, opslog WAL drain, termlog compaction, RateLimiter lazy sweep). Run via `npm run bench:leak` — deterministic, ~10s total, JSON output for CI parsing. Each scenario reports counter-based PASS/FAIL plus RSS/heap deltas for diagnostic visibility.
