@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Task 312 — composite and bloom indexes silently empty in disk mode after reopen** — in disk mode, the in-memory WAL store is opened with `skipLoad:true`, so `store.entries()` is always empty. `createCompositeIndex` and `createBloomFilter` both iterated `store.entries()` at creation time and therefore produced permanently-empty indexes; queries using those indexes returned zero results or skipped their pre-filter. Fixed by making both methods async and adding a disk-backfill pass: after the (empty) store pass, if a `_diskStore` is present, `IndexManager.populateCompositeIndexFromDisk` / `populateBloomFilterFromDisk` iterate `diskStore.entries({ skipCache: true })` (bypasses LRU, reads directly from Parquet/JSONL). `AgentDB` schema-open loop now `await`s `createCompositeIndex`. The pre-existing `rejects composite index with fewer than 2 fields` test updated to `async` / `rejects.toThrow` to match the now-async signature. 3 new tests in `disk-mode.test.ts`: disk-mode composite populated from Parquet on reopen, bloom filter populated from Parquet, memory-mode composite regression (unchanged behaviour).
+
 ## [2.1.1] - 2026-05-06
 
 ### Fixed

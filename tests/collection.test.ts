@@ -894,8 +894,8 @@ describe("Collection", () => {
       expect(col.listCompositeIndexes()).toHaveLength(0);
     });
 
-    it("rejects composite index with fewer than 2 fields", () => {
-      expect(() => col.createCompositeIndex(["role"])).toThrow("at least 2 fields");
+    it("rejects composite index with fewer than 2 fields", async () => {
+      await expect(col.createCompositeIndex(["role"])).rejects.toThrow("at least 2 fields");
     });
 
     it("range query on indexed field with no matching records returns empty", async () => {

@@ -1974,13 +1974,27 @@ export class Collection {
   createIndex(field: string): void { this.indexes.createIndex(field, this.store.entries()); }
   dropIndex(field: string): boolean { return this.indexes.dropIndex(field); }
   listIndexes(): string[] { return this.indexes.listIndexes(); }
-  createCompositeIndex(fields: string[]): void { this.indexes.createCompositeIndex(fields, this.store.entries()); }
+  async createCompositeIndex(fields: string[]): Promise<void> {
+    this.indexes.createCompositeIndex(fields, this.store.entries());
+    // In disk mode the in-memory store is empty (skipLoad: true). Backfill the index from
+    // Parquet/JSONL so composite-field queries can use the index rather than returning zero results.
+    if (this._diskStore) {
+      await this.indexes.populateCompositeIndexFromDisk(fields, this._diskStore.entries({ skipCache: true }));
+    }
+  }
   dropCompositeIndex(fields: string[]): boolean { return this.indexes.dropCompositeIndex(fields); }
   listCompositeIndexes(): string[][] { return this.indexes.listCompositeIndexes(); }
   createArrayIndex(field: string): void { this.indexes.createArrayIndex(field, this.store.entries()); }
   dropArrayIndex(field: string): boolean { return this.indexes.dropArrayIndex(field); }
   listArrayIndexes(): string[] { return this.indexes.listArrayIndexes(); }
-  createBloomFilter(field: string, expectedItems = 10000): void { this.indexes.createBloomFilter(field, this.store.entries(), expectedItems); }
+  async createBloomFilter(field: string, expectedItems = 10000): Promise<void> {
+    this.indexes.createBloomFilter(field, this.store.entries(), expectedItems);
+    // In disk mode the in-memory store is empty. Backfill so the bloom filter reflects
+    // all persisted records, not just the empty in-memory store.
+    if (this._diskStore) {
+      await this.indexes.populateBloomFilterFromDisk(field, this._diskStore.entries({ skipCache: true }));
+    }
+  }
   mightHave(field: string, value: string): boolean { return this.indexes.mightHave(field, value); }
   suggestIndexes(threshold = 100): Array<{ field: string; count: number }> { return this.indexes.suggestIndexes(threshold); }
 

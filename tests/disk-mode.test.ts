@@ -765,6 +765,87 @@ describe("Disk-backed mode", () => {
       }
     });
 
+    it("task 312 — composite index populated from disk on reopen (correctness)", async () => {
+      // In disk mode the store is opened with skipLoad:true, so createCompositeIndex
+      // used to iterate an empty store → silently empty composite index → queries
+      // using that index returned zero results (correctness bug, not just perf).
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const schema312 = defineSchema({
+        name: "tasks312",
+        fields: {
+          status: { type: "string" },
+          priority: { type: "string" },
+          title: { type: "string" },
+        },
+        compositeIndexes: [["status", "priority"]],
+      });
+      const col = await db.collection(schema312);
+      await col.insert({ status: "open", priority: "high", title: "A" });
+      await col.insert({ status: "open", priority: "high", title: "B" });
+      await col.insert({ status: "closed", priority: "low", title: "C" });
+      await db.close();
+
+      // Reopen — composite index must be populated from Parquet
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection(schema312);
+
+      // This query uses the composite index {status, priority}. Without the fix,
+      // the empty index causes disk-mode find() to return zero results.
+      const results = await col2.find({ filter: { status: "open", priority: "high" } });
+      expect(results.records.length).toBe(2);
+      expect(results.records.every((r) => r.status === "open" && r.priority === "high")).toBe(true);
+
+      // Negative: different composite key should return zero
+      const none = await col2.find({ filter: { status: "open", priority: "low" } });
+      expect(none.records.length).toBe(0);
+    });
+
+    it("task 312 — bloom filter populated from disk on createBloomFilter in disk mode", async () => {
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "bloom312",
+        fields: { role: { type: "string" } },
+      }));
+      await col.insert({ role: "admin" });
+      await col.insert({ role: "user" });
+      await col.insert({ role: "user" });
+      await db.close();
+
+      // Reopen and create bloom filter — must reflect persisted records
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection(defineSchema({
+        name: "bloom312",
+        fields: { role: { type: "string" } },
+      }));
+      await col2.createBloomFilter("role");
+
+      expect(col2.mightHave("role", "admin")).toBe(true);
+      expect(col2.mightHave("role", "user")).toBe(true);
+      // A value never inserted must not be a false positive (probability ~1e-6 with 3 items)
+      expect(col2.mightHave("role", "zzz-never-inserted-xyz")).toBe(false);
+    });
+
+    it("task 312 — memory-mode composite index regression: unchanged behaviour", async () => {
+      db = new AgentDB(tmpDir); // memory mode (default)
+      await db.init();
+      const col = await db.collection(defineSchema({
+        name: "mem312",
+        fields: { a: { type: "string" }, b: { type: "string" } },
+        compositeIndexes: [["a", "b"]],
+      }));
+      await col.insert({ a: "x", b: "1" });
+      await col.insert({ a: "x", b: "2" });
+      await col.insert({ a: "y", b: "1" });
+
+      const results = await col.find({ filter: { a: "x", b: "1" } });
+      expect(results.records.length).toBe(1);
+      expect(results.records[0].a).toBe("x");
+    });
+
     it("does not warn when maxIndexCardinality is high enough", async () => {
       db = new AgentDB(tmpDir);
       await db.init();

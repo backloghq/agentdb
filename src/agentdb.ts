@@ -561,7 +561,7 @@ export class AgentDB {
         if (ds && !ds.shouldUseInMemoryIndex(field)) continue;
         col.createIndex(field);
       }
-      for (const fields of schema.compositeIndexes) col.createCompositeIndex(fields);
+      for (const fields of schema.compositeIndexes) await col.createCompositeIndex(fields);
       for (const field of schema.arrayIndexes) col.createArrayIndex(field);
       // Initialize auto-increment counters from existing records (sorted desc, limit 1)
       if (schema.autoIncrementFields.length > 0) {
