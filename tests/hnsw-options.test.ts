@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentDB } from "../src/agentdb.js";
 import { defineSchema } from "../src/schema.js";
+import { HnswIndex } from "../src/hnsw.js";
 import type { EmbeddingProvider } from "../src/embeddings/types.js";
 
 async function makeTmpDir(): Promise<string> {
@@ -266,5 +267,76 @@ describe("Task 302 — HNSW node cleanup on delete and text-change", () => {
 
     await db.close();
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("Task 311 — HNSW determinism via seeded PRNG", () => {
+  it("same seed produces identical layer assignments (and identical search ranking) for same insert order", () => {
+    // Build two independent indexes with the same seed and identical insert sequences.
+    // Layer assignments are determined by randomLevel() calls during add().
+    // Because mulberry32 is stateful and deterministic, both indexes must produce
+    // the same graph topology and therefore identical search rankings.
+    const dims = 4;
+    const vectors: Array<{ id: string; vec: number[] }> = [
+      { id: "a", vec: [1, 0, 0, 0] },
+      { id: "b", vec: [0, 1, 0, 0] },
+      { id: "c", vec: [0, 0, 1, 0] },
+      { id: "d", vec: [0, 0, 0, 1] },
+      { id: "e", vec: [0.7071, 0.7071, 0, 0] },
+    ];
+    const query = [1, 0.1, 0, 0];
+
+    const buildAndSearch = (seed: number) => {
+      const idx = new HnswIndex({ dimensions: dims, M: 4, efConstruction: 20, efSearch: 20, seed });
+      for (const { id, vec } of vectors) idx.add(id, vec);
+      return idx.search(query, 3).map((r) => r.id);
+    };
+
+    const run1 = buildAndSearch(42);
+    const run2 = buildAndSearch(42);
+    expect(run1).toEqual(run2);
+  });
+
+  it("different seeds produce different layer topologies (maxLayer diverges across a large sample)", () => {
+    // Two distinct seeds produce different PRNG sequences → different layer assignments.
+    // The observable proxy for layer assignment is HnswIndex.currentMaxLayer.
+    // With enough inserts, the probability that two different mulberry32 sequences
+    // both produce identical max-layer outcomes is negligible.
+    // We sweep 10 seed pairs and assert at least one produces a different maxLayer.
+    const dims = 4;
+    // Deterministic vector source (no Math.random dependency in test body)
+    let xs = 0xDEADBEEF;
+    const nextF = () => { xs ^= xs << 13; xs ^= xs >>> 17; xs ^= xs << 5; return (xs >>> 0) / 0x100000000; };
+    const vectors = Array.from({ length: 200 }, (_, i) => ({
+      id: `v${i}`,
+      vec: Array.from({ length: dims }, () => nextF() * 2 - 1),
+    }));
+
+    const maxLayerForSeed = (seed: number) => {
+      const idx = new HnswIndex({ dimensions: dims, M: 4, efConstruction: 10, seed });
+      for (const { id, vec } of vectors) idx.add(id, vec);
+      return idx.currentMaxLayer;
+    };
+
+    // Check 10 seed pairs — expect at least one to diverge
+    let anyDiffer = false;
+    for (let base = 1; base <= 10; base++) {
+      if (maxLayerForSeed(base) !== maxLayerForSeed(base + 100)) {
+        anyDiffer = true;
+        break;
+      }
+    }
+    expect(anyDiffer).toBe(true);
+  });
+
+  it("unseeded index returns plausible results and does not throw", () => {
+    const idx = new HnswIndex({ dimensions: 3, M: 4, efConstruction: 10, efSearch: 10 });
+    idx.add("x", [1, 0, 0]);
+    idx.add("y", [0, 1, 0]);
+    idx.add("z", [0, 0, 1]);
+    const results = idx.search([1, 0, 0], 2);
+    expect(results.length).toBe(2);
+    // "x" should be top-1 (closest to [1,0,0])
+    expect(results[0].id).toBe("x");
   });
 });

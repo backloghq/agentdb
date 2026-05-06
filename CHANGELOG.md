@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+
+- **`HnswOptions.seed` — deterministic HNSW layer assignment (task 311)** — `HnswIndex` now accepts an optional `seed?: number`. When set, `randomLevel()` uses a mulberry32 PRNG seeded with that value instead of `Math.random`, producing identical layer assignments for the same insert order across processes. Unseeded behaviour is unchanged (`Math.random` called via a thunk to preserve vi.spyOn compatibility). Setting `seed` makes graph topology reproducible; callers must also control insert order to fully determine topology. `HnswOptions.seed` is forwarded through `CollectionOptions.hnsw.seed` and `AgentDBOptions.hnsw.seed`. 3 new tests in `hnsw-options.test.ts`: same seed + same inserts → identical search ranking; different seeds → different `currentMaxLayer` across a sweep of seed pairs (200 inserts each); unseeded index returns correct results and does not throw.
+
 ### Fixed
 
 - **Task 312 — composite and bloom indexes silently empty in disk mode after reopen** — in disk mode, the in-memory WAL store is opened with `skipLoad:true`, so `store.entries()` is always empty. `createCompositeIndex` and `createBloomFilter` both iterated `store.entries()` at creation time and therefore produced permanently-empty indexes; queries using those indexes returned zero results or skipped their pre-filter. Fixed by making both methods async and adding a disk-backfill pass: after the (empty) store pass, if a `_diskStore` is present, `IndexManager.populateCompositeIndexFromDisk` / `populateBloomFilterFromDisk` iterate `diskStore.entries({ skipCache: true })` (bypasses LRU, reads directly from Parquet/JSONL). `AgentDB` schema-open loop now `await`s `createCompositeIndex`. The pre-existing `rejects composite index with fewer than 2 fields` test updated to `async` / `rejects.toThrow` to match the now-async signature. 3 new tests in `disk-mode.test.ts`: disk-mode composite populated from Parquet on reopen, bloom filter populated from Parquet, memory-mode composite regression (unchanged behaviour).

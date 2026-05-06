@@ -62,6 +62,14 @@ export interface HnswOptions {
   dimensions: number;
   /** Maximum HNSW layer a node can be assigned to (default: derived as max(16, floor(log(1e6)/log(M)))). */
   maxLevel?: number;
+  /**
+   * PRNG seed for deterministic layer assignment. When set, `randomLevel()` uses
+   * mulberry32 instead of `Math.random`, producing the same layer assignments for
+   * the same insert order across processes. Omit for the previous un-seeded behaviour.
+   * Note: insert ORDER still affects graph topology — deterministic results require
+   * both a fixed seed AND a deterministic insert sequence.
+   */
+  seed?: number;
 }
 
 interface HnswNode {
@@ -79,6 +87,17 @@ interface SearchCandidate {
 /**
  * HNSW index for approximate nearest neighbor search using cosine similarity.
  */
+/** mulberry32 — fast, well-distributed 32-bit PRNG suitable for HNSW level generation. */
+function mulberry32(seed: number): () => number {
+  let s = seed;
+  return () => {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 export class HnswIndex {
   private M: number;
   private efConstruction: number;
@@ -89,6 +108,7 @@ export class HnswIndex {
   private maxLayer = 0;
   private mL: number; // normalization factor for level generation
   private maxLevelCap: number;
+  private rng: () => number;
 
   constructor(opts: HnswOptions) {
     this.M = opts.M ?? 16;
@@ -97,6 +117,7 @@ export class HnswIndex {
     this.dimensions = opts.dimensions;
     this.mL = 1 / Math.log(this.M);
     this.maxLevelCap = opts.maxLevel ?? Math.max(16, Math.floor(Math.log(1e6) / Math.log(this.M)));
+    this.rng = opts.seed !== undefined ? mulberry32(opts.seed) : () => Math.random();
   }
 
   /** Number of indexed vectors. */
@@ -272,7 +293,7 @@ export class HnswIndex {
 
   private randomLevel(): number {
     // Standard HNSW level generation: floor(-ln(uniform) * mL)
-    return Math.min(Math.floor(-Math.log(Math.random()) * this.mL), this.maxLevelCap);
+    return Math.min(Math.floor(-Math.log(this.rng()) * this.mL), this.maxLevelCap);
   }
 
   /** Greedy search at a layer: find the single closest node. */
