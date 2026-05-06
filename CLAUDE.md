@@ -2,7 +2,7 @@
 
 AI-first embedded database for LLM agents. Library-first architecture: core library, framework-agnostic tool definitions, MCP adapter. Built on opslog (`@backloghq/opslog`) with optional S3 backend (`@backloghq/opslog-s3`).
 
-**Status: v2.1 — all v2.0 capabilities plus configurable limits, progress callbacks, AbortSignal support, `col.metrics()` observability API, `AgentDB.open()` static factory, and lazy auto-init.**
+**Status: v2.1.1 — all v2.0 capabilities plus configurable limits, progress callbacks, AbortSignal support, `col.metrics()` observability API, `AgentDB.open()` static factory, lazy auto-init, HNSW graph persistence (skip rebuild on reopen), HNSW determinism via `seed`, and a memory-leak regression bench gated by CI.**
 
 **Configuration:** see [README.md § Configuration](./README.md#configuration) for the three-layer config pipeline (CLI flags > env vars > config file), the full `AGENTDB_*` env var reference, `agentdb.config.json` shape, and `loadAgentDBConfig` library API.
 
