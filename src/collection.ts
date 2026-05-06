@@ -1052,7 +1052,10 @@ export class Collection {
       this.textIdx = null;
     }
     // Wait for any in-progress periodic flush, then write the authoritative close-time snapshot.
-    await this.awaitHnswFlush();
+    // Use _hnswFlushPromise directly (not awaitHnswFlush) so that a configured persistTimeoutMs
+    // is never applied here: at close time we must wait for the orphan flush to complete before
+    // calling persistHnsw(), otherwise both share graph.bin.new and can collide (B-NEW).
+    await this._hnswFlushPromise;
     // Persist HNSW graph topology (disk mode only). Errors are logged, never thrown.
     await this.persistHnsw().catch((err: unknown) => {
       console.warn(`agentdb [${this.name}]: failed to persist HNSW graph: ${(err as Error).message}`);

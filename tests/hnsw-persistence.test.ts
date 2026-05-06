@@ -45,7 +45,7 @@ async function makeTmpDir(): Promise<string> {
 }
 
 /** Open a disk-mode AgentDB with the hashProvider. */
-async function openDb(dir: string, hnswOpts?: { seed?: number; persistEvery?: number }): Promise<AgentDB> {
+async function openDb(dir: string, hnswOpts?: { seed?: number; persistEvery?: number; persistTimeoutMs?: number }): Promise<AgentDB> {
   const db = new AgentDB(dir, {
     embeddings: { provider: hashProvider },
     hnsw: hnswOpts,
@@ -530,6 +530,51 @@ describe("Task 318 — HNSW periodic-flush (persistEvery)", () => {
       const results = await col2.semanticSearch("pre-0", { limit: 8 });
       expect(results.records.length).toBe(8);
       await db2.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("B-NEW — close() waits for orphan flush via _hnswFlushPromise, not awaitHnswFlush(timeout)", async () => {
+    // Regression test for B-NEW: when awaitHnswFlush(timeoutMs) times out while a periodic
+    // flush is still running, the old close() code would call persistHnsw() concurrently,
+    // and both would try to rename graph.bin.new → graph.bin.old → collision.
+    //
+    // Fix: close() uses `await this._hnswFlushPromise` directly, bypassing persistTimeoutMs,
+    // so the orphan flush always completes before the close-time persistHnsw() starts.
+    //
+    // Verification strategy: configure persistEvery=5 + persistTimeoutMs=1 so that
+    // awaitHnswFlush() would apply a 1ms cutoff. Trigger flush, call awaitHnswFlush(1)
+    // to simulate what the old close() would have done (return early on timeout),
+    // then call db.close(). Assert: graph.bin has the correct nodeCount and no leftover
+    // .new or .old sidecar files (collision leaves behind these tombstones).
+    const dir = await makeTmpDir();
+    try {
+      const db = await openDb(dir, { persistEvery: 5, persistTimeoutMs: 1 });
+      const col = await db.collection(schema);
+
+      // Insert + embed exactly 5 records — the 5th add() fires _tickHnswPersist.
+      for (let i = 0; i < 5; i++) await col.insert({ title: `bnew-${i}` });
+      await col.embedUnembedded();
+
+      // Simulate the old close() timeout path: awaitHnswFlush(1) resolves after 1ms
+      // even if the flush is still in-flight. This call does NOT cancel the flush.
+      await col.awaitHnswFlush(1);
+
+      // db.close() must wait for the in-flight flush via _hnswFlushPromise (no timeout),
+      // then write its own authoritative snapshot — no collision.
+      await db.close();
+
+      const hnswDir = join(dir, "collections", "sem", "hnsw");
+
+      // graph.bin must exist with all 5 nodes.
+      expect(await graphBinNodeCount(dir)).toBe(5);
+
+      // No leftover partial-write sidecar files.
+      const newGone = await readFile(join(hnswDir, "graph.bin.new")).then(() => false, () => true);
+      expect(newGone).toBe(true);
+      const oldGone = await readFile(join(hnswDir, "graph.bin.old")).then(() => false, () => true);
+      expect(oldGone).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
