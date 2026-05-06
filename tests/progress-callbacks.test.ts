@@ -6,7 +6,8 @@ import { describe, it, expect, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TermLog } from "@backloghq/termlog";
+import { TermLog, FsBackend } from "@backloghq/termlog";
+import type { StorageBackend, BlobWriteStream } from "@backloghq/termlog";
 import { AgentDB } from "../src/agentdb.js";
 import { defineSchema } from "../src/schema.js";
 import type { EmbeddingProvider } from "../src/embeddings/types.js";
@@ -890,5 +891,110 @@ describe("Progress callbacks", () => {
       "this scenario is already covered by rebuild-atomicity.test.ts",
       () => {},
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 306 — S3 rebuildTextIndex close interlock
+// ---------------------------------------------------------------------------
+
+describe("Task 306 — S3 rebuildTextIndex respects close() interlock", () => {
+  /**
+   * Build a minimal StorageBackend that delegates all real I/O to a real FsBackend
+   * but intercepts listBlobs with a gate so tests can control timing.
+   */
+  async function makeGatedBackend(termlogDir: string): Promise<{
+    backend: StorageBackend;
+    resolveListBlobs: () => void;
+  }> {
+    await import("node:fs/promises").then(({ mkdir }) => mkdir(termlogDir, { recursive: true }));
+    const real = new FsBackend(termlogDir);
+    let resolveListBlobs!: () => void;
+    const gate = new Promise<string[]>((r) => { resolveListBlobs = () => r([]); });
+    const backend: StorageBackend = {
+      readBlob: (p: string) => real.readBlob(p),
+      writeBlob: (p: string, d: Buffer) => real.writeBlob(p, d),
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      listBlobs: (_prefix: string) => gate,
+      deleteBlob: (p: string) => real.deleteBlob(p),
+      createWriteStream: (p: string): Promise<BlobWriteStream> => real.createWriteStream(p),
+      appendBlob: (p: string, d: Buffer) => real.appendBlob!(p, d),
+      isLocalFs: () => false,
+    };
+    return { backend, resolveListBlobs };
+  }
+
+  it("(a) pre-abort signal: rebuildTextIndex rejects with AbortError without entering the record loop", async () => {
+    const dir = await makeTmpDir();
+    const termlogDir = join(dir, "termlog-backend");
+    const { backend } = await makeGatedBackend(termlogDir);
+
+    const db = new AgentDB(dir);
+    await db.init();
+    const col = await db.collection(
+      defineSchema({ name: "s3-preabort", fields: { title: { type: "string" } }, textSearch: true }),
+    );
+    // Wire the mock as the termlog backend before opening text index
+    col.setTermlogBackend(backend);
+
+    // Insert a record (won't matter — pre-abort fires before the loop)
+    await col.insert({ title: "record-a" });
+
+    // Pre-aborted signal
+    const signal = AbortSignal.abort();
+
+    // The abort check fires at the top of rebuildTextIndex (pre-S3-ops or pre-loop)
+    const err = await col.rebuildTextIndex({ signal }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DOMException);
+    expect((err as DOMException).name).toBe("AbortError");
+
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("(b) close() during S3 rebuild: interlock resolves so close() completes and rebuild rejects", async () => {
+    const dir = await makeTmpDir();
+    const termlogDir = join(dir, "termlog-backend");
+
+    // Use a real FsBackend for the initial open (so TermLog.open during col.open() succeeds).
+    // After open(), swap to the gated mock so rebuildTextIndex's listBlobs blocks.
+    const realBackend = new FsBackend(termlogDir);
+    await import("node:fs/promises").then(({ mkdir }) => mkdir(termlogDir, { recursive: true }));
+
+    const db = new AgentDB(dir);
+    await db.init();
+    const schema = defineSchema({ name: "s3-interlock", fields: { title: { type: "string" } }, textSearch: true });
+    const col = await db.collection(schema);
+
+    // Wire real FsBackend so col.open()'s TermLog.open call works
+    col.setTermlogBackend(realBackend);
+    // (col was already opened by db.collection() — setTermlogBackend sets _termlogBackend
+    //  so rebuildTextIndex's S3 branch fires even though open already ran)
+
+    // Now swap to gated backend to control rebuildTextIndex timing
+    const { backend: gatedBackend, resolveListBlobs } = await makeGatedBackend(join(dir, "termlog-gate"));
+    col.setTermlogBackend(gatedBackend);
+
+    // Start rebuild — _rebuildAbortCtrl is set synchronously before the first await.
+    const rebuildPromise = col.rebuildTextIndex();
+    // Attach .catch() immediately to prevent an "unhandled rejection" diagnostic
+    // in the window between the throw and our eventual await below.
+    const rebuildResult = rebuildPromise.catch((e: unknown) => e);
+
+    // Call close() immediately (no await in between). close() synchronously calls
+    // _rebuildAbortCtrl.abort(), then awaits _rebuildSettled. Both are guaranteed to be
+    // set because the interlock is now allocated before the first async yield.
+    const closePromise = col.close();
+
+    // Unblock listBlobs — abort is already signalled, so the rebuild will detect it
+    // at the pre-loop check and throw AbortError → finally → settleRebuild → close unblocks.
+    resolveListBlobs();
+
+    await closePromise; // must complete without hanging
+    const err = await rebuildResult;
+    expect(err).toBeInstanceOf(DOMException);
+    expect((err as DOMException).name).toBe("AbortError");
+
+    await rm(dir, { recursive: true, force: true });
   });
 });

@@ -34,6 +34,10 @@ export class SubscriptionManager {
     if (list.some((s) => s.sessionId === sessionId)) return;
     list.push({ sessionId, collection, mcpServer });
 
+    // Pin the collection against LRU eviction for this subscriber.
+    // Each subscriber adds one pin; the matching unpin is called in unsubscribe/removeSession/destroy.
+    this.db.pinForSubscription(collection);
+
     // Register collection change listener on first subscription
     if (!this.listeners.has(key)) {
       const col = await this.db.collection(collection);
@@ -50,6 +54,7 @@ export class SubscriptionManager {
     const list = this.subs.get(collection);
     if (!list) return;
     const filtered = list.filter((s) => s.sessionId !== sessionId);
+    const removedCount = list.length - filtered.length;
     if (filtered.length === 0) {
       this.subs.delete(collection);
       // Remove change listener if no more subscribers
@@ -58,18 +63,27 @@ export class SubscriptionManager {
     } else {
       this.subs.set(collection, filtered);
     }
+    // Unpin once per subscriber removed
+    for (let i = 0; i < removedCount; i++) {
+      this.db.unpinForSubscription(collection);
+    }
   }
 
   /** Remove all subscriptions for a session (on disconnect). */
   removeSession(sessionId: string): void {
     for (const [collection, list] of this.subs) {
       const filtered = list.filter((s) => s.sessionId !== sessionId);
+      const removedCount = list.length - filtered.length;
       if (filtered.length === 0) {
         this.subs.delete(collection);
         const cleanup = this.listeners.get(collection);
         if (cleanup) { cleanup(); this.listeners.delete(collection); }
       } else {
         this.subs.set(collection, filtered);
+      }
+      // Unpin once per subscriber removed from this collection
+      for (let i = 0; i < removedCount; i++) {
+        this.db.unpinForSubscription(collection);
       }
     }
   }
@@ -102,6 +116,12 @@ export class SubscriptionManager {
 
   /** Clean up all subscriptions and listeners. */
   destroy(): void {
+    // Unpin all active subscribers before clearing.
+    for (const [collection, list] of this.subs) {
+      for (let i = 0; i < list.length; i++) {
+        this.db.unpinForSubscription(collection);
+      }
+    }
     for (const cleanup of this.listeners.values()) {
       cleanup();
     }

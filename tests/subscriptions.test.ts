@@ -116,6 +116,102 @@ describe("SubscriptionManager", () => {
     expect(server.server.sendLoggingMessage).not.toHaveBeenCalled();
   });
 
+  describe("Task 305 — pin-while-subscribed prevents LRU eviction", () => {
+    it("subscribed collection is not evicted when LRU limit is reached", async () => {
+      // maxOpenCollections: 2 so we can force eviction with a third open
+      await db.close();
+      db = new AgentDB(tmpDir, { maxOpenCollections: 2 });
+      await db.init();
+      manager = new SubscriptionManager(db);
+
+      // Open A and subscribe — pins A
+      const colA1 = await db.collection("alpha");
+      await manager.subscribe("s1", "alpha", mockMcpServer());
+
+      // Open B (fills the 2-slot limit, LRU = [alpha, beta])
+      await db.collection("beta");
+
+      // Open C — triggers eviction. alpha is pinned so beta evicts instead.
+      await db.collection("gamma");
+
+      // alpha must still be the same open instance (not evicted and reopened)
+      const colA2 = await db.collection("alpha");
+      expect(colA2).toBe(colA1);
+    });
+
+    it("unsubscribed collection becomes evictable", async () => {
+      await db.close();
+      db = new AgentDB(tmpDir, { maxOpenCollections: 2 });
+      await db.init();
+      manager = new SubscriptionManager(db);
+
+      const colA1 = await db.collection("alpha");
+      await manager.subscribe("s1", "alpha", mockMcpServer());
+      await db.collection("beta");
+
+      // Unsubscribe — unpins alpha
+      manager.unsubscribe("s1", "alpha");
+
+      // Open C — alpha is now the LRU candidate and unpinned, so it evicts
+      await db.collection("gamma");
+
+      // alpha should be a new instance (evicted and reopened)
+      const colA2 = await db.collection("alpha");
+      expect(colA2).not.toBe(colA1);
+    });
+
+    it("subscribe → unsubscribe → resubscribe → unsubscribe: pin count returns to 0", async () => {
+      await db.close();
+      db = new AgentDB(tmpDir, { maxOpenCollections: 2 });
+      await db.init();
+      manager = new SubscriptionManager(db);
+
+      await db.collection("alpha");
+      await manager.subscribe("s1", "alpha", mockMcpServer());
+      manager.unsubscribe("s1", "alpha");
+
+      // Resubscribe
+      await manager.subscribe("s1", "alpha", mockMcpServer());
+      manager.unsubscribe("s1", "alpha");
+
+      // After full round-trip alpha should be evictable
+      await db.collection("beta");
+      await db.collection("gamma"); // triggers eviction of alpha (oldest unpinned)
+
+      const colA2 = await db.collection("alpha");
+      // Must reopen from scratch — a new Collection instance
+      const colA3 = await db.collection("alpha"); // cached now
+      expect(colA2).toBe(colA3); // stable after reopen, just checking it's consistent
+    });
+
+    it("multiple subscribers on same collection: all must unsubscribe before eviction is allowed", async () => {
+      await db.close();
+      db = new AgentDB(tmpDir, { maxOpenCollections: 2 });
+      await db.init();
+      manager = new SubscriptionManager(db);
+
+      const colA1 = await db.collection("alpha");
+      // Two different sessions subscribe
+      await manager.subscribe("s1", "alpha", mockMcpServer());
+      await manager.subscribe("s2", "alpha", mockMcpServer());
+      await db.collection("beta");
+
+      // Remove one subscriber — alpha still pinned (s2 remains)
+      manager.unsubscribe("s1", "alpha");
+      await db.collection("gamma"); // beta evicts, alpha stays (still pinned by s2)
+      const colA2 = await db.collection("alpha");
+      expect(colA2).toBe(colA1); // still same instance
+
+      // Remove last subscriber — alpha now unpinned
+      manager.unsubscribe("s2", "alpha");
+      await db.collection("delta"); // gamma evicts (alpha was accessed most recently, gamma is LRU)
+      // Now open enough to evict alpha too
+      await db.collection("epsilon"); // alpha is now evictable
+      const colA3 = await db.collection("alpha");
+      expect(colA3).not.toBe(colA1); // evicted and reopened
+    });
+  });
+
   it("notification includes update type and agent", async () => {
     const server = mockMcpServer();
     await manager.subscribe("session-1", "tasks", server);

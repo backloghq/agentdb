@@ -1168,6 +1168,14 @@ try {
 
 Returns `{ rebuiltDocCount: N }`. Requires admin permission.
 
+**What's new in v2.1.1 (patch):**
+- HNSW graph persistence — disk-mode collections now persist the graph to `<dir>/hnsw/graph.bin` on close and load it on reopen, eliminating the O(N) rebuild for embedded collections
+- HNSW determinism — new `HnswOptions.seed` for reproducible layer assignments across processes
+- `bm25DocCount` no longer inflates 2× after the first BM25 search in a session
+- Composite and bloom indexes now populate from disk on reopen (were silently empty in disk mode)
+- Five memory-leak fixes (HNSW orphans on delete, MemoryMonitor LRU cleanup, close() listener teardown, subscription pin-while-subscribed, S3 rebuild close interlock)
+- Targeted leak regression bench (`npm run bench:leak`) gated by CI
+
 **What's new in v2.1:**
 - `AgentDB.open(dir, opts)` static factory — async one-call entry point; replaces the `new AgentDB(...); await db.init()` two-step
 - Lazy auto-init — calling `db.collection(...)` without explicit `init()` now Just Works

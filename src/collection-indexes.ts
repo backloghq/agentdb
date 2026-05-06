@@ -99,6 +99,45 @@ export class IndexManager {
     this.bloomFilters.set(field, bf);
   }
 
+  /**
+   * Populate a composite index from an async iterable.
+   * Called after createCompositeIndex when in disk mode so that the index is seeded
+   * from Parquet/JSONL records (which are not in the in-memory store in disk mode).
+   */
+  async populateCompositeIndexFromDisk(
+    fields: string[],
+    entries: AsyncIterable<[string, StoredRecord]>,
+  ): Promise<void> {
+    const key = compositeIndexKey(fields);
+    const entry = this.compositeIndexes.get(key);
+    if (!entry) return; // index not registered — nothing to backfill
+    const { idx } = entry;
+    for await (const [id, record] of entries) {
+      if (isExpired(record)) continue;
+      const clean = stripMeta(record);
+      idx.add(compositeKey(fields.map((f) => getNestedValue(clean, f))), id);
+    }
+  }
+
+  /**
+   * Populate a bloom filter from an async iterable.
+   * Called after createBloomFilter when in disk mode so that the filter is seeded
+   * from Parquet/JSONL records (which are not in the in-memory store in disk mode).
+   */
+  async populateBloomFilterFromDisk(
+    field: string,
+    entries: AsyncIterable<[string, StoredRecord]>,
+  ): Promise<void> {
+    const bf = this.bloomFilters.get(field);
+    if (!bf) return;
+    for await (const [, record] of entries) {
+      if (isExpired(record)) continue;
+      const clean = stripMeta(record);
+      const value = getNestedValue(clean, field);
+      if (value !== undefined) bf.add(String(value));
+    }
+  }
+
   mightHave(field: string, value: string): boolean {
     const bf = this.bloomFilters.get(field);
     if (!bf) return true;

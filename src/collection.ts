@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rm, mkdir, rename as fsRename, access } from "node:fs/promises";
+import { rm, mkdir, rename as fsRename, access, readFile, writeFile } from "node:fs/promises";
 import { join as pathJoin } from "node:path";
 import { Store, FsBackend } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
@@ -262,11 +262,18 @@ export class Collection {
     if (!this._diskStore) return;
     if (this._textIdxLoaded) return;
     await this._diskStore.ensureIndexesLoaded();
-    // Replay in-memory (WAL) entries into text index — these may predate this load call
-    for (const [id, record] of this.store.entries()) {
-      if (!isExpired(record)) {
-        const clean = stripMeta(record);
-        await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(clean)));
+    // Skip WAL replay when termlog segments are already populated on disk.
+    // Without this guard, every record would be re-added on first BM25 query —
+    // each re-add of an existing string id allocates a fresh numId and tombstones
+    // the old one, doubling segment.docCount (`bm25DocCount` metric reads ~2N at
+    // every scale). Same condition as the open-time guard at ~line 860.
+    const termlogAlreadyIndexed = (this.textIdx?.docCount() ?? 0) > 0;
+    if (!termlogAlreadyIndexed) {
+      for (const [id, record] of this.store.entries()) {
+        if (!isExpired(record)) {
+          const clean = stripMeta(record);
+          await this.textIndexAdd(id, extractTextFromRecord(this.textRecord(clean)));
+        }
       }
     }
     this._textIdxLoaded = true;
@@ -286,6 +293,96 @@ export class Collection {
       }
       this.hnswIdx.add(id, vec);
     }
+  }
+
+  /**
+   * Persist the HNSW graph topology to `<dir>/hnsw/graph.bin` using an atomic rename dance.
+   * Only runs in disk mode (requires `_diskStore` and a populated `hnswIdx`).
+   * Errors are logged as warnings — persistence failure never throws to the caller.
+   */
+  private async persistHnsw(): Promise<void> {
+    if (!this.hnswIdx || this.hnswIdx.size === 0 || !this._dir || !this._diskStore) return;
+    const hnswDir = pathJoin(this._dir, "hnsw");
+    await mkdir(hnswDir, { recursive: true });
+    const graphBin = pathJoin(hnswDir, "graph.bin");
+    const graphBinNew = pathJoin(hnswDir, "graph.bin.new");
+    const graphBinOld = pathJoin(hnswDir, "graph.bin.old");
+    const buf = this.hnswIdx.toBuffer();
+    await writeFile(graphBinNew, buf);
+    // Atomic swap: old → .old, new → canon, rm .old
+    try { await fsRename(graphBin, graphBinOld); } catch { /* no existing graph.bin */ }
+    await fsRename(graphBinNew, graphBin);
+    await rm(graphBinOld, { force: true }).catch(() => {});
+  }
+
+  /**
+   * Try to load the HNSW graph topology from `<dir>/hnsw/graph.bin` and hydrate vectors
+   * from disk records. Only valid in disk mode. Includes crash recovery for interrupted writes.
+   *
+   * Returns `true` if the graph was loaded and installed as `this.hnswIdx`.
+   * Returns `false` on any error (absent file, format mismatch, stale nodeCount) — caller
+   * should fall back to `rebuildHnswFromDisk()`.
+   */
+  async loadHnswFromDisk(): Promise<boolean> {
+    if (!this._diskStore || !this.hnswIdx || !this._dir) return false;
+    const hnswDir = pathJoin(this._dir, "hnsw");
+    const graphBin = pathJoin(hnswDir, "graph.bin");
+    const graphBinNew = pathJoin(hnswDir, "graph.bin.new");
+    const graphBinOld = pathJoin(hnswDir, "graph.bin.old");
+
+    // Crash recovery: remove incomplete write (graph.bin.new means crash during writeFile/rename)
+    await rm(graphBinNew, { force: true }).catch(() => {});
+
+    // Crash recovery for the atomic swap:
+    //   graph.bin.old only → crash after rename(canon→old) but before rename(new→canon) → restore
+    //   both exist → crash after rename(new→canon) but before rm(.old) → rm leftover .old
+    const oldExists = await access(graphBinOld).then(() => true, () => false);
+    if (oldExists) {
+      const canonExists = await access(graphBin).then(() => true, () => false);
+      if (canonExists) {
+        await rm(graphBinOld, { force: true }).catch(() => {});
+      } else {
+        await fsRename(graphBinOld, graphBin).catch(() => {});
+      }
+    }
+
+    // Read graph file
+    let buf: Buffer;
+    try {
+      buf = await readFile(graphBin);
+    } catch {
+      return false; // file absent — normal on first open
+    }
+
+    // Deserialize — validates magic, format-version, M, and dimensions
+    let loadedIdx: HnswIndex;
+    let nodeCount: number;
+    try {
+      ({ idx: loadedIdx, nodeCount } = HnswIndex.fromBuffer(buf, this.hnswOpts(this.hnswIdx.dims)));
+    } catch (err) {
+      console.warn(`agentdb [${this.name}]: HNSW graph.bin invalid, rebuilding: ${(err as Error).message}`);
+      return false;
+    }
+
+    // Hydrate vectors from disk records — O(N) reads, no distance computations
+    let hydrated = 0;
+    for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+      if (isExpired(record as StoredRecord)) continue;
+      const stored = (record as StoredRecord)[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
+      if (!stored) continue;
+      const q = deserializeQuantized(stored);
+      const vec = Array.from(q.data).map((v) => v / q.scale);
+      if (loadedIdx.hydrateVector(id, vec)) hydrated++;
+    }
+
+    // Validate: every graph node must have been hydrated (catches stale graphs from crashes)
+    if (hydrated !== nodeCount) {
+      console.warn(`agentdb [${this.name}]: HNSW graph.bin stale (file nodes=${nodeCount}, hydrated=${hydrated}), rebuilding`);
+      return false;
+    }
+
+    this.hnswIdx = loadedIdx;
+    return true;
   }
 
   /** Get disk store (if in disk mode). */
@@ -430,15 +527,27 @@ export class Collection {
     if (this._rebuilding) throw new Error("agentdb: rebuildTextIndex already in progress");
     this._rebuilding = true;
 
+    // C: close() interlock — shared by both S3 and FS branches so close() can interrupt
+    // either rebuild path. Allocated synchronously before the first await so close() always
+    // sees the controller set by the time rebuildTextIndex() yields its first Promise.
+    const rebuildCtrl = new AbortController();
+    this._rebuildAbortCtrl = rebuildCtrl;
+    let settleRebuild!: () => void;
+    this._rebuildSettled = new Promise<void>((res) => { settleRebuild = res; });
+
     const onProgress = opts?.onProgress;
     const signal = opts?.signal;
     const textDir = pathJoin(this._dir, "text");
 
     if (this._termlogBackend) {
       // S3 mode: no atomic rename is possible for blob stores. Use the original
-      // destructive approach (wipe then rebuild). An abort here leaves textIdx=null
-      // and the S3 prefix empty — the caller must retry rebuildTextIndex to restore search.
+      // destructive approach (wipe then rebuild). An abort leaves textIdx=null and the S3
+      // prefix empty — the caller must retry rebuildTextIndex to restore search.
       try {
+        // Quick abort check before starting the destructive S3 wipe phase.
+        if (signal?.aborted || rebuildCtrl.signal.aborted) {
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
         if (this.textIdx) await this.textIdx.close();
         const blobs = await this._termlogBackend.listBlobs("").catch(() => [] as string[]);
         const CONCURRENCY = 16;
@@ -463,8 +572,19 @@ export class Collection {
             })()
           : Array.from(this.store.entries());
         const total = records.length;
+        // Check abort before entering the record loop — covers zero-record collections
+        // and the window where close() signalled abort during listBlobs/TermLog.open.
+        if (signal?.aborted || rebuildCtrl.signal.aborted) {
+          await this.textIdx.close();
+          this.textIdx = null;
+          console.warn(
+            `agentdb [${this.name}]: rebuildTextIndex aborted in S3 mode — ` +
+            `text index wiped, indexed 0/${total}. Call rebuildTextIndex() again to restore search.`,
+          );
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
         for (const [id, record] of records) {
-          if (signal?.aborted) {
+          if (signal?.aborted || rebuildCtrl.signal.aborted) {
             await this.textIdx.close();
             this.textIdx = null;
             console.warn(
@@ -484,6 +604,9 @@ export class Collection {
         return count;
       } finally {
         this._rebuilding = false;
+        this._rebuildAbortCtrl = null;
+        this._rebuildSettled = null;
+        settleRebuild();
       }
     }
 
@@ -499,14 +622,6 @@ export class Collection {
       k1: this.opts.bm25K1 ?? 1.2,
       b: this.opts.bm25B ?? 0.75,
     });
-
-    // C: close() interlock — create an AbortController for this rebuild so close() can
-    // interrupt it. Also create a promise that resolves when the rebuild finishes so
-    // close() can await teardown before proceeding.
-    const rebuildCtrl = new AbortController();
-    this._rebuildAbortCtrl = rebuildCtrl;
-    let settleRebuild!: () => void;
-    this._rebuildSettled = new Promise<void>((res) => { settleRebuild = res; });
 
     // Shadow-write: all live writes (insert/update/delete) that arrive during the rebuild
     // window will call textIndexAdd/textIndexRemove, which forward to _rebuildingIdx as well.
@@ -866,7 +981,7 @@ export class Collection {
   /** Close the underlying store. Idempotent — calling twice is a no-op. */
   async close(): Promise<void> {
     if (!this._opened) return;
-    // C: interlock with an in-flight FS-mode rebuild. Capture the settled promise BEFORE
+    // C: interlock with an in-flight rebuild (FS or S3 mode). Capture the settled promise BEFORE
     // aborting (the finally block clears _rebuildSettled before resolving it, so we must
     // hold a local reference). Abort causes the rebuild loop to throw AbortError; the
     // finally block resolves settleRebuild, unblocking the await below.
@@ -874,10 +989,19 @@ export class Collection {
     if (this._rebuildAbortCtrl) this._rebuildAbortCtrl.abort();
     if (waitForRebuild) await waitForRebuild;
 
+    // Stop the WAL polling interval before closing the store (unwatch needs the store).
+    this.unwatch();
+    // Remove all change listeners so closed Collection objects don't retain subscriber closures.
+    this.emitter.removeAllListeners();
+
     if (this.textIdx) {
       await this.textIdx.close();
       this.textIdx = null;
     }
+    // Persist HNSW graph topology (disk mode only). Errors are logged, never thrown.
+    await this.persistHnsw().catch((err: unknown) => {
+      console.warn(`agentdb [${this.name}]: failed to persist HNSW graph: ${(err as Error).message}`);
+    });
     await this.store.close();
     this._opened = false;
   }
@@ -1357,6 +1481,9 @@ export class Collection {
       // Invalidate embedding if text fields changed
       if (updated[META_EMBEDDING] && this.hasTextChanged(record, updated)) {
         delete updated[META_EMBEDDING];
+        // Remove the now-stale HNSW node immediately. A fresh node is added
+        // by the next embedUnembedded/vectorUpsert call when re-embedding runs.
+        this.hnswIdx?.remove(id);
       }
       this.validateRecord(updated);
       this.stampVersion(updated, id);
@@ -1390,6 +1517,7 @@ export class Collection {
     if (!record || isExpired(record)) return false;
     this.store.delete(id);
     await this.textIndexRemove(id);
+    this.hnswIdx?.remove(id);
     this.updateBTreeIndexes(id, record, undefined);
     if (record._blobs) this.deleteBlobsForRecord(id).catch(() => {});
     this.emitChange("delete", [id], opts?.agent);
@@ -1940,13 +2068,27 @@ export class Collection {
   createIndex(field: string): void { this.indexes.createIndex(field, this.store.entries()); }
   dropIndex(field: string): boolean { return this.indexes.dropIndex(field); }
   listIndexes(): string[] { return this.indexes.listIndexes(); }
-  createCompositeIndex(fields: string[]): void { this.indexes.createCompositeIndex(fields, this.store.entries()); }
+  async createCompositeIndex(fields: string[]): Promise<void> {
+    this.indexes.createCompositeIndex(fields, this.store.entries());
+    // In disk mode the in-memory store is empty (skipLoad: true). Backfill the index from
+    // Parquet/JSONL so composite-field queries can use the index rather than returning zero results.
+    if (this._diskStore) {
+      await this.indexes.populateCompositeIndexFromDisk(fields, this._diskStore.entries({ skipCache: true }));
+    }
+  }
   dropCompositeIndex(fields: string[]): boolean { return this.indexes.dropCompositeIndex(fields); }
   listCompositeIndexes(): string[][] { return this.indexes.listCompositeIndexes(); }
   createArrayIndex(field: string): void { this.indexes.createArrayIndex(field, this.store.entries()); }
   dropArrayIndex(field: string): boolean { return this.indexes.dropArrayIndex(field); }
   listArrayIndexes(): string[] { return this.indexes.listArrayIndexes(); }
-  createBloomFilter(field: string, expectedItems = 10000): void { this.indexes.createBloomFilter(field, this.store.entries(), expectedItems); }
+  async createBloomFilter(field: string, expectedItems = 10000): Promise<void> {
+    this.indexes.createBloomFilter(field, this.store.entries(), expectedItems);
+    // In disk mode the in-memory store is empty. Backfill so the bloom filter reflects
+    // all persisted records, not just the empty in-memory store.
+    if (this._diskStore) {
+      await this.indexes.populateBloomFilterFromDisk(field, this._diskStore.entries({ skipCache: true }));
+    }
+  }
   mightHave(field: string, value: string): boolean { return this.indexes.mightHave(field, value); }
   suggestIndexes(threshold = 100): Array<{ field: string; count: number }> { return this.indexes.suggestIndexes(threshold); }
 
@@ -2015,17 +2157,19 @@ export class Collection {
         console.warn(`agentdb: embedUnembedded WAL batch ${Math.floor(i / batchSize)} failed: ${err}`);
         continue;
       }
+      // Pre-quantize so HNSW uses the same dequantized vectors as on reload.
+      const batchQ = vectors.map((v) => quantize(v));
       await this.store.batch(() => {
         for (let j = 0; j < batch.length; j++) {
           const { id, record } = batch[j];
-          const q = quantize(vectors[j]);
-          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
+          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(batchQ[j]) };
           this.store.set(id, updated);
         }
       });
       if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
       for (let j = 0; j < batch.length; j++) {
-        this.hnswIdx.add(batch[j].id, vectors[j]);
+        const { data, scale } = batchQ[j];
+        this.hnswIdx.add(batch[j].id, Array.from(data).map((v: number) => v / scale));
       }
       embedded += batch.length;
     }
@@ -2067,14 +2211,16 @@ export class Collection {
           diskBatch.length = 0;
           return;
         }
+        // Pre-quantize so HNSW uses the same dequantized vectors as on reload.
+        const diskBatchQ = vectors.map((v) => quantize(v));
         const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
-          const q = quantize(vectors[j]);
-          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(q) }];
+          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(diskBatchQ[j]) }];
         });
         await this._diskStore!.appendEmbeddings(updates);
         if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
         for (let j = 0; j < diskBatch.length; j++) {
-          this.hnswIdx!.add(diskBatch[j].id, vectors[j]);
+          const { data, scale } = diskBatchQ[j];
+          this.hnswIdx!.add(diskBatch[j].id, Array.from(data).map((v: number) => v / scale));
         }
         embedded += diskBatch.length;
         diskBatch.length = 0;
@@ -2140,17 +2286,19 @@ export class Collection {
         try { onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
         continue;
       }
+      // Pre-quantize so HNSW uses the same dequantized vectors as on reload.
+      const reembedBatchQ = vectors.map((v) => quantize(v));
       await this.store.batch(() => {
         for (let j = 0; j < batch.length; j++) {
           const { id, record } = batch[j];
-          const q = quantize(vectors[j]);
-          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
+          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(reembedBatchQ[j]) };
           this.store.set(id, updated);
         }
       });
       if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
       for (let j = 0; j < batch.length; j++) {
-        this.hnswIdx!.add(batch[j].id, vectors[j]);
+        const { data, scale } = reembedBatchQ[j];
+        this.hnswIdx!.add(batch[j].id, Array.from(data).map((v: number) => v / scale));
       }
       embedded += batch.length;
       try { onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
@@ -2177,9 +2325,10 @@ export class Collection {
           try { onProgress?.({ completed: embedded + failed, total: null, phase: "disk" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
           return false;
         }
+        // Pre-quantize so HNSW uses the same dequantized vectors as on reload.
+        const reembedDiskBatchQ = vectors.map((v) => quantize(v));
         const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
-          const q = quantize(vectors[j]);
-          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(q) }];
+          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(reembedDiskBatchQ[j]) }];
         });
         await this._diskStore!.appendEmbeddings(updates);
         // Mid-flight compaction: merge accumulated JSONL files when threshold hit,
@@ -2189,7 +2338,8 @@ export class Collection {
         }
         if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
         for (let j = 0; j < diskBatch.length; j++) {
-          this.hnswIdx!.add(diskBatch[j].id, vectors[j]);
+          const { data, scale } = reembedDiskBatchQ[j];
+          this.hnswIdx!.add(diskBatch[j].id, Array.from(data).map((v: number) => v / scale));
         }
         embedded += diskBatch.length;
         diskBatch.length = 0;

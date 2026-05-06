@@ -134,6 +134,31 @@ describe("AgentDB", () => {
       await dbLru.close();
       await rm(lruDir, { recursive: true, force: true });
     });
+
+    it("task 303 — LRU eviction removes the collection from memoryStats()", async () => {
+      const lruDir = tmpDir + "-lru-mem";
+      await rm(lruDir, { recursive: true, force: true }).catch(() => null);
+      const dbLru = new AgentDB(lruDir, { maxOpenCollections: 2 });
+      await dbLru.init();
+
+      // Open two collections — both are tracked in memoryStats
+      await dbLru.collection("alpha");
+      await dbLru.collection("beta");
+      expect(dbLru.memoryStats().collections).toHaveProperty("alpha");
+      expect(dbLru.memoryStats().collections).toHaveProperty("beta");
+
+      // Opening a third forces eviction of "alpha" (LRU)
+      await dbLru.collection("gamma");
+
+      // "alpha" must no longer appear in memoryStats — stale entry cleaned up
+      expect(dbLru.memoryStats().collections).not.toHaveProperty("alpha");
+      // "beta" and "gamma" are still open — must remain
+      expect(dbLru.memoryStats().collections).toHaveProperty("beta");
+      expect(dbLru.memoryStats().collections).toHaveProperty("gamma");
+
+      await dbLru.close();
+      await rm(lruDir, { recursive: true, force: true });
+    });
   });
 
   describe("drop and purge", () => {
