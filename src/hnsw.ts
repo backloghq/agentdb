@@ -82,6 +82,13 @@ export interface HnswOptions {
    * a single final `close()` is sufficient.
    */
   persistEvery?: number;
+  /**
+   * Maximum milliseconds to wait for a periodic HNSW flush before `awaitHnswFlush()` resolves
+   * anyway. When the timeout fires, the flush continues in the background — the next `close()`
+   * or `awaitHnswFlush()` call will observe the completed state. Unset = wait indefinitely
+   * (default, v2.1.1 behavior). Useful in time-sensitive paths that must not block on I/O.
+   */
+  persistTimeoutMs?: number;
 }
 
 interface HnswNode {

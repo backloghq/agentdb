@@ -79,7 +79,7 @@ export interface AgentDBOptions {
   /** Number of incremental JSONL delta files before triggering a full merge (default: 8). Per-collection override via CollectionOptions.mergeJsonlThreshold. */
   mergeJsonlThreshold?: number;
   /** HNSW index parameters (M, efConstruction, efSearch, maxLevel, seed, persistEvery). Applied to all collections as a default. Per-collection override via CollectionOptions.hnsw. */
-  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number; seed?: number; persistEvery?: number };
+  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number; seed?: number; persistEvery?: number; persistTimeoutMs?: number };
   /**
    * Per-collection option overrides, keyed by collection name.
    *

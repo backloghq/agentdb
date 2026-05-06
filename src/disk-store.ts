@@ -579,6 +579,11 @@ export class DiskStore {
     } catch (err) {
       if (err instanceof Error && err.message.startsWith("Unsupported composite")) {
         console.warn(`agentdb: composite index version mismatch, rebuilding from disk: ${err.message}`);
+      } else if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        // File exists but couldn't be parsed or applied — log for diagnostics (B2 polish).
+        console.warn(
+          `agentdb: could not load composite index for [${fields.join(", ")}], rebuilding from disk: ${err}`,
+        );
       }
       return false;
     }
@@ -599,6 +604,11 @@ export class DiskStore {
     } catch (err) {
       if (err instanceof Error && err.message.startsWith("Unsupported BloomFilter")) {
         console.warn(`agentdb: bloom filter version mismatch, rebuilding from disk: ${err.message}`);
+      } else if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        // File exists but couldn't be parsed or applied — log for diagnostics (B2 polish).
+        console.warn(
+          `agentdb: could not load bloom filter for field '${field}', rebuilding from disk: ${err}`,
+        );
       }
       return false;
     }

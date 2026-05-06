@@ -170,7 +170,7 @@ export interface CollectionOptions {
   /** Number of incremental JSONL delta files before triggering a full merge (default: 8). Overrides AgentDBOptions.mergeJsonlThreshold for this collection. */
   mergeJsonlThreshold?: number;
   /** HNSW index parameters for approximate nearest neighbor search. Overrides AgentDBOptions.hnsw for this collection. */
-  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number; seed?: number; persistEvery?: number };
+  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number; seed?: number; persistEvery?: number; persistTimeoutMs?: number };
 }
 
 /** Change event emitted after mutations. */
@@ -300,12 +300,26 @@ export class Collection {
   }
 
   /**
-   * Await any in-progress periodic HNSW flush. Resolves immediately when no flush is pending.
+   * Await any in-progress periodic HNSW flush. Resolves when the flush completes or when
+   * `timeoutMs` elapses, whichever comes first. If `timeoutMs` is omitted, falls back to
+   * `hnsw.persistTimeoutMs` from collection options. With no timeout configured, waits
+   * indefinitely. When the timeout fires the flush continues in the background — the next
+   * `close()` will still write a correct authoritative snapshot.
+   *
    * Called by `close()` before the final persist to avoid a redundant concurrent write.
    * Also exposed for tests to synchronize after triggering periodic flushes.
+   *
+   * @internal
    */
-  awaitHnswFlush(): Promise<void> {
-    return this._hnswFlushPromise ?? Promise.resolve();
+  awaitHnswFlush(timeoutMs?: number): Promise<void> {
+    const flush = this._hnswFlushPromise;
+    if (!flush) return Promise.resolve();
+    const timeout = timeoutMs ?? this.opts.hnsw?.persistTimeoutMs;
+    if (!timeout) return flush;
+    return Promise.race([
+      flush,
+      new Promise<void>((resolve) => setTimeout(resolve, timeout)),
+    ]);
   }
 
   /**
