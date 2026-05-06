@@ -343,10 +343,10 @@ describe.skipIf(!integration)("AgentDB S3 — v2.1 options matrix (task 320)", (
     await col.insert({ _id: "a", status: "active", role: "admin", tier: "gold" });
     await col.insert({ _id: "b", status: "inactive", role: "user", tier: "silver" });
 
-    await col.find({ status: "active" }); // compilation 1; cache: [status]
-    await col.find({ role: "admin" });    // compilation 2; cache: [status, role] (full)
-    await col.find({ tier: "gold" });     // compilation 3; evicts status; cache: [role, tier]
-    await col.find({ status: "active" }); // compilation 4 — status was evicted, must recompile
+    await col.find({ filter: { status: "active" } }); // compilation 1; cache: [status]
+    await col.find({ filter: { role: "admin" } });    // compilation 2; cache: [status, role] (full)
+    await col.find({ filter: { tier: "gold" } });     // compilation 3; evicts status; cache: [role, tier]
+    await col.find({ filter: { status: "active" } }); // compilation 4 — status was evicted, must recompile
 
     expect(col.metrics().filterCompilations).toBe(4);
 
@@ -377,12 +377,12 @@ describe.skipIf(!integration)("AgentDB S3 — v2.1 options matrix (task 320)", (
     const db2 = await makeS3Db(subprefix);
     const col2 = await db2.collection(schema);
 
-    const exact = await col2.find({ category: "tech", priority: 1 });
+    const exact = await col2.find({ filter: { category: "tech", priority: 1 } });
     expect(exact.records.length).toBe(1);
     expect(exact.records[0]._id).toBe("t1");
 
-    const techAll = await col2.find({ category: "tech" });
-    expect(techAll.total).toBe(2);
+    const techAll = await col2.find({ filter: { category: "tech" } });
+    expect(techAll.records.length).toBe(2);
 
     await db2.close();
     await cleanupPrefix(client, `${s3Prefix}${subprefix}`);

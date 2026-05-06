@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- **S3 disk-mode first-open ENOENT — `streamSnapshot()` reads local FS with S3 backend** — `opslog`'s `Store.streamSnapshot()` calls `streamSnapshotFile(this.dir, ...)` which unconditionally reads the snapshot from the local filesystem regardless of the configured storage backend. With S3Backend, the snapshot is written to S3 by `backend.writeSnapshot()` and the local path is never created → ENOENT on the first open of any disk-mode collection backed by S3. Root cause is an opslog bug (tracked in the v2.3 backlog as an upstream fix); workaround in agentdb: catch ENOENT from `streamSnapshot()` and continue with an empty record map. This is safe because disk-mode opslog stores are always opened with `skipLoad:true` + `checkpointOnClose:false`, so opslog never compacts in disk mode — the opslog snapshot is always the initial empty `new Map()` written by `initFreshStore()`, and all records arrive via `getWalOps()` which routes through the backend and is S3-aware. FS behavior is unchanged (FS never throws ENOENT here because the snapshot is on local FS). No new tests added — the 4 failing task-320 S3 integration tests (`mergeParquetThreshold=2`, composite round-trip, HNSW sidecar investigation, and filterCacheSize) are the regression tests once they pass.
+
+### Known Issues
+
+- **Memory→disk migration with S3 backend drops compacted records** — if a collection was previously used in memory mode (where opslog DOES compact the WAL into a snapshot) and then reopened in disk mode with an S3 backend, the catch-ENOENT workaround above silently drops any records that were compacted into the opslog snapshot. Records added since the last compaction survive via WAL replay. This scenario was already broken (ENOENT) before the workaround; the workaround does not make it worse. Proper fix requires opslog to route `streamSnapshot()` through `backend.loadSnapshot()` for non-FS backends (v2.3 upstream task).
+
 ## [2.2.0] - 2026-05-06
 
 ### Fixed
