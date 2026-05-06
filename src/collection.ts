@@ -339,12 +339,14 @@ export class Collection {
    */
   private async persistHnsw(): Promise<void> {
     if (!this.hnswIdx || this.hnswIdx.size === 0 || !this._dir || !this._diskStore) return;
+    // Capture topology synchronously before the first await so that concurrent hnswIdx.add()
+    // calls that run during async I/O cannot produce a torn snapshot (H1).
+    const buf = this.hnswIdx.toBuffer();
     const hnswDir = pathJoin(this._dir, "hnsw");
     await mkdir(hnswDir, { recursive: true });
     const graphBin = pathJoin(hnswDir, "graph.bin");
     const graphBinNew = pathJoin(hnswDir, "graph.bin.new");
     const graphBinOld = pathJoin(hnswDir, "graph.bin.old");
-    const buf = this.hnswIdx.toBuffer();
     await writeFile(graphBinNew, buf);
     // Atomic swap: old → .old, new → canon, rm .old
     try { await fsRename(graphBin, graphBinOld); } catch { /* no existing graph.bin */ }
@@ -2108,15 +2110,28 @@ export class Collection {
   dropIndex(field: string): boolean { return this.indexes.dropIndex(field); }
   listIndexes(): string[] { return this.indexes.listIndexes(); }
   async createCompositeIndex(fields: string[]): Promise<void> {
-    this.indexes.createCompositeIndex(fields, this.store.entries());
-    // In disk mode the in-memory store is empty (skipLoad: true). Fast path: load from
-    // persisted JSON file written on last close(). Falls back to O(N) disk scan (v2.1.1 path)
-    // when the file is absent (first open after v2.2 upgrade) or version-mismatched.
     if (this._diskStore) {
+      // Snapshot WAL before any async work — store.entries() includes in-session inserts/deletes (B1).
+      const walEntries = [...this.store.entries()] as Array<[string, StoredRecord]>;
+      // Fast path: load from persisted JSON written on last close.
       const loaded = await this._diskStore.tryLoadCompositeIndex(this.indexes, fields);
-      if (!loaded) {
+      if (loaded) {
+        // Historical records loaded from JSON. Merge in-session WAL on top so that inserts
+        // made in the current session before this call are reflected immediately.
+        if (walEntries.length > 0) {
+          await this.indexes.populateCompositeIndexFromDisk(
+            fields,
+            (async function* () { for (const e of walEntries) yield e; })(),
+          );
+        }
+      } else {
+        // v2.1.1 fallback (absent file or version mismatch): build shell from WAL then
+        // backfill from full disk scan (Parquet + JSONL).
+        this.indexes.createCompositeIndex(fields, walEntries);
         await this.indexes.populateCompositeIndexFromDisk(fields, this._diskStore.entries({ skipCache: true }));
       }
+    } else {
+      this.indexes.createCompositeIndex(fields, this.store.entries());
     }
   }
   dropCompositeIndex(fields: string[]): boolean { return this.indexes.dropCompositeIndex(fields); }
@@ -2125,14 +2140,26 @@ export class Collection {
   dropArrayIndex(field: string): boolean { return this.indexes.dropArrayIndex(field); }
   listArrayIndexes(): string[] { return this.indexes.listArrayIndexes(); }
   async createBloomFilter(field: string, expectedItems = 10000): Promise<void> {
-    this.indexes.createBloomFilter(field, this.store.entries(), expectedItems);
-    // In disk mode the in-memory store is empty. Fast path: load from persisted JSON file.
-    // Falls back to O(N) disk scan (v2.1.1 path) when the file is absent or version-mismatched.
     if (this._diskStore) {
+      // Snapshot WAL before any async work — store.entries() includes in-session inserts/deletes (B1).
+      const walEntries = [...this.store.entries()] as Array<[string, StoredRecord]>;
+      // Fast path: load from persisted JSON written on last close.
       const loaded = await this._diskStore.tryLoadBloomFilter(this.indexes, field);
-      if (!loaded) {
+      if (loaded) {
+        // Historical bits loaded from JSON. Merge in-session WAL on top.
+        if (walEntries.length > 0) {
+          await this.indexes.populateBloomFilterFromDisk(
+            field,
+            (async function* () { for (const e of walEntries) yield e; })(),
+          );
+        }
+      } else {
+        // v2.1.1 fallback: build fresh filter from WAL then seed from full disk scan.
+        this.indexes.createBloomFilter(field, walEntries, expectedItems);
         await this.indexes.populateBloomFilterFromDisk(field, this._diskStore.entries({ skipCache: true }));
       }
+    } else {
+      this.indexes.createBloomFilter(field, this.store.entries(), expectedItems);
     }
   }
   mightHave(field: string, value: string): boolean { return this.indexes.mightHave(field, value); }

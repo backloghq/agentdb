@@ -558,8 +558,23 @@ export class DiskStore {
     const safeKey = fields.join("__");
     try {
       const content = await this.backend.readBlob(`indexes/composite-${safeKey}.json`);
-      const data = JSON.parse(content.toString("utf-8"));
-      indexManager.loadCompositeIndex(data); // throws on version mismatch
+      const data = JSON.parse(content.toString("utf-8")) as { version: number; fields?: unknown; entries?: unknown };
+      // Guard against __ separator collision (e.g. field "foo__bar" vs fields ["foo","bar"]
+      // both produce the same filename). Validate stored fields match the requested fields
+      // exactly — if they don't, rebuild from disk rather than silently loading wrong data (B2).
+      if (!Array.isArray(data.fields) ||
+          data.fields.length !== fields.length ||
+          !(data.fields as unknown[]).every((f, i) => f === fields[i])) {
+        console.warn(
+          `agentdb: composite index field mismatch in indexes/composite-${safeKey}.json ` +
+          `(file: ${JSON.stringify(data.fields)}, requested: ${JSON.stringify(fields)}) — rebuilding from disk`,
+        );
+        return false;
+      }
+      // fields validated above — cast is safe
+      indexManager.loadCompositeIndex(
+        data as { version: number; fields: string[]; entries: Array<{ key: unknown; ids: string[] }> },
+      ); // throws on version mismatch
       return true;
     } catch (err) {
       if (err instanceof Error && err.message.startsWith("Unsupported composite")) {

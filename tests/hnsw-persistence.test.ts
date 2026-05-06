@@ -440,4 +440,30 @@ describe("Task 318 — HNSW periodic-flush (persistEvery)", () => {
       await rm(dir2, { recursive: true, force: true });
     }
   });
+
+  it("H1 — persistHnsw: buf captured synchronously before mkdir — snapshot tied to flush-trigger count", async () => {
+    const dir = await makeTmpDir();
+    try {
+      const db = await openDb(dir, { persistEvery: 5, seed: 42 });
+      const col = await db.collection(schema);
+      // Insert + embed exactly 5 records — the 5th add() fires _tickHnswPersist,
+      // which captures toBuffer() synchronously before any await.
+      for (let i = 0; i < 5; i++) await col.insert({ _id: `n${i}`, title: `item ${i}` });
+      await col.embedUnembedded();
+      // Add 3 more and embed them before the flush has flushed to disk.
+      // With the H1 fix, toBuffer() was already captured with 5 nodes, so
+      // these additions must NOT appear in the pending flush's snapshot.
+      for (let i = 5; i < 8; i++) await col.insert({ _id: `n${i}`, title: `item ${i}` });
+      await col.embedUnembedded();
+      // Wait for the flush triggered at node 5 to complete.
+      await col.awaitHnswFlush();
+      const count = await graphBinNodeCount(dir);
+      expect(count).toBe(5); // flush snapshot captured at exactly 5 nodes
+      // close() flushes again with all 8 nodes.
+      await db.close();
+      expect(await graphBinNodeCount(dir)).toBe(8);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });

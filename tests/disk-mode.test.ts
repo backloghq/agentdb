@@ -1055,4 +1055,91 @@ describe("Disk-backed mode", () => {
       expect(silverResults.records.length).toBe(1);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // v2.2.0 review fixes — commit 1
+  // ---------------------------------------------------------------------------
+
+  describe("B1 — createBloomFilter/createCompositeIndex: in-session inserts not overwritten by stale JSON", () => {
+    it("B1a — bloom: in-session insert visible after createBloomFilter loads prior-session JSON", async () => {
+      // Session 1: insert, createBloomFilter, close → writes bloom JSON to disk
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col1 = await db.collection(defineSchema({ name: "items" }));
+      await col1.insert({ _id: "old", tag: "existing" });
+      await col1.createBloomFilter("tag");
+      await db.close();
+
+      // Session 2: open, insert NEW record BEFORE calling createBloomFilter
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection(defineSchema({ name: "items" }));
+      await col2.insert({ _id: "new", tag: "new-value" });
+      // createBloomFilter loads the prior-session JSON, then merges in-session WAL on top.
+      // Bug: stale JSON overwrites the WAL-seeded bloom → "new-value" lost (false negative).
+      await col2.createBloomFilter("tag");
+
+      expect(col2.mightHave("tag", "new-value")).toBe(true);
+      // Bloom planner must not short-circuit to empty for in-session value
+      const result = await col2.find({ filter: { tag: "new-value" } });
+      expect(result.total).toBe(1);
+      expect(result.records[0]._id).toBe("new");
+    });
+
+    it("B1b — composite: in-session insert visible after createCompositeIndex loads prior-session JSON", async () => {
+      const schemaB1 = defineSchema({ name: "items" });
+
+      // Session 1: insert, createCompositeIndex, close → writes composite JSON
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col1 = await db.collection(schemaB1);
+      await col1.insert({ _id: "old", a: "x", b: "1" });
+      await col1.createCompositeIndex(["a", "b"]);
+      await db.close();
+
+      // Session 2: insert in-session record BEFORE calling createCompositeIndex
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection(schemaB1);
+      await col2.insert({ _id: "new", a: "y", b: "2" });
+      await col2.createCompositeIndex(["a", "b"]);
+
+      // The in-session record must be findable via the composite index.
+      // Note: result.total uses an approximation (candidateIds.size + store.count()) that
+      // can double-count WAL records also covered by the index — assert records array instead.
+      const result = await col2.find({ filter: { a: "y", b: "2" } });
+      expect(result.records.length).toBe(1);
+      expect(result.records[0]._id).toBe("new");
+    });
+  });
+
+  describe("B2 — composite filename collision: data.fields mismatch warns and rebuilds", () => {
+    it("B2 — schema ['a__b','c'] and ['a','b__c'] share filename; mismatch detected and rebuilt", async () => {
+      // ['a__b','c'] and ['a','b__c'] both join to 'a__b__c' via '__' separator,
+      // producing the same filename composite-a__b__c.json.
+      const schema1 = defineSchema({ name: "items", storageMode: "disk", compositeIndexes: [["a__b", "c"]] });
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col1 = await db.collection(schema1);
+      await col1.insert({ _id: "r1", "a__b": "v1", c: "v2" });
+      await db.close();
+
+      // Session 2: request ['a','b__c'] — same filename, different data.fields
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const schema2 = defineSchema({ name: "items", storageMode: "disk", compositeIndexes: [["a", "b__c"]] });
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection(schema2);
+      // Must fire a warning about the field mismatch
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("field mismatch"));
+      warnSpy.mockRestore();
+
+      // Must fall back to disk scan and correctly serve queries on ['a','b__c'].
+      // Note: result.total uses an approximation that can double-count WAL + index — assert records array.
+      await col2.insert({ _id: "r2", a: "x", "b__c": "y" });
+      const result = await col2.find({ filter: { a: "x", "b__c": "y" } });
+      expect(result.records.length).toBe(1);
+      expect(result.records[0]._id).toBe("r2");
+    });
+  });
 });
