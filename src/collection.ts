@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rm, mkdir, rename as fsRename, access } from "node:fs/promises";
+import { rm, mkdir, rename as fsRename, access, readFile, writeFile } from "node:fs/promises";
 import { join as pathJoin } from "node:path";
 import { Store, FsBackend } from "@backloghq/opslog";
 import type { Operation, StorageBackend } from "@backloghq/opslog";
@@ -293,6 +293,96 @@ export class Collection {
       }
       this.hnswIdx.add(id, vec);
     }
+  }
+
+  /**
+   * Persist the HNSW graph topology to `<dir>/hnsw/graph.bin` using an atomic rename dance.
+   * Only runs in disk mode (requires `_diskStore` and a populated `hnswIdx`).
+   * Errors are logged as warnings — persistence failure never throws to the caller.
+   */
+  private async persistHnsw(): Promise<void> {
+    if (!this.hnswIdx || this.hnswIdx.size === 0 || !this._dir || !this._diskStore) return;
+    const hnswDir = pathJoin(this._dir, "hnsw");
+    await mkdir(hnswDir, { recursive: true });
+    const graphBin = pathJoin(hnswDir, "graph.bin");
+    const graphBinNew = pathJoin(hnswDir, "graph.bin.new");
+    const graphBinOld = pathJoin(hnswDir, "graph.bin.old");
+    const buf = this.hnswIdx.toBuffer();
+    await writeFile(graphBinNew, buf);
+    // Atomic swap: old → .old, new → canon, rm .old
+    try { await fsRename(graphBin, graphBinOld); } catch { /* no existing graph.bin */ }
+    await fsRename(graphBinNew, graphBin);
+    await rm(graphBinOld, { force: true }).catch(() => {});
+  }
+
+  /**
+   * Try to load the HNSW graph topology from `<dir>/hnsw/graph.bin` and hydrate vectors
+   * from disk records. Only valid in disk mode. Includes crash recovery for interrupted writes.
+   *
+   * Returns `true` if the graph was loaded and installed as `this.hnswIdx`.
+   * Returns `false` on any error (absent file, format mismatch, stale nodeCount) — caller
+   * should fall back to `rebuildHnswFromDisk()`.
+   */
+  async loadHnswFromDisk(): Promise<boolean> {
+    if (!this._diskStore || !this.hnswIdx || !this._dir) return false;
+    const hnswDir = pathJoin(this._dir, "hnsw");
+    const graphBin = pathJoin(hnswDir, "graph.bin");
+    const graphBinNew = pathJoin(hnswDir, "graph.bin.new");
+    const graphBinOld = pathJoin(hnswDir, "graph.bin.old");
+
+    // Crash recovery: remove incomplete write (graph.bin.new means crash during writeFile/rename)
+    await rm(graphBinNew, { force: true }).catch(() => {});
+
+    // Crash recovery for the atomic swap:
+    //   graph.bin.old only → crash after rename(canon→old) but before rename(new→canon) → restore
+    //   both exist → crash after rename(new→canon) but before rm(.old) → rm leftover .old
+    const oldExists = await access(graphBinOld).then(() => true, () => false);
+    if (oldExists) {
+      const canonExists = await access(graphBin).then(() => true, () => false);
+      if (canonExists) {
+        await rm(graphBinOld, { force: true }).catch(() => {});
+      } else {
+        await fsRename(graphBinOld, graphBin).catch(() => {});
+      }
+    }
+
+    // Read graph file
+    let buf: Buffer;
+    try {
+      buf = await readFile(graphBin);
+    } catch {
+      return false; // file absent — normal on first open
+    }
+
+    // Deserialize — validates magic, format-version, M, and dimensions
+    let loadedIdx: HnswIndex;
+    let nodeCount: number;
+    try {
+      ({ idx: loadedIdx, nodeCount } = HnswIndex.fromBuffer(buf, this.hnswOpts(this.hnswIdx.dims)));
+    } catch (err) {
+      console.warn(`agentdb [${this.name}]: HNSW graph.bin invalid, rebuilding: ${(err as Error).message}`);
+      return false;
+    }
+
+    // Hydrate vectors from disk records — O(N) reads, no distance computations
+    let hydrated = 0;
+    for await (const [id, record] of this._diskStore.entries({ skipCache: true })) {
+      if (isExpired(record as StoredRecord)) continue;
+      const stored = (record as StoredRecord)[META_EMBEDDING] as { data: number[]; scale: number } | undefined;
+      if (!stored) continue;
+      const q = deserializeQuantized(stored);
+      const vec = Array.from(q.data).map((v) => v / q.scale);
+      if (loadedIdx.hydrateVector(id, vec)) hydrated++;
+    }
+
+    // Validate: every graph node must have been hydrated (catches stale graphs from crashes)
+    if (hydrated !== nodeCount) {
+      console.warn(`agentdb [${this.name}]: HNSW graph.bin stale (file nodes=${nodeCount}, hydrated=${hydrated}), rebuilding`);
+      return false;
+    }
+
+    this.hnswIdx = loadedIdx;
+    return true;
   }
 
   /** Get disk store (if in disk mode). */
@@ -908,6 +998,10 @@ export class Collection {
       await this.textIdx.close();
       this.textIdx = null;
     }
+    // Persist HNSW graph topology (disk mode only). Errors are logged, never thrown.
+    await this.persistHnsw().catch((err: unknown) => {
+      console.warn(`agentdb [${this.name}]: failed to persist HNSW graph: ${(err as Error).message}`);
+    });
     await this.store.close();
     this._opened = false;
   }
@@ -2063,17 +2157,19 @@ export class Collection {
         console.warn(`agentdb: embedUnembedded WAL batch ${Math.floor(i / batchSize)} failed: ${err}`);
         continue;
       }
+      // Pre-quantize so HNSW uses the same dequantized vectors as on reload.
+      const batchQ = vectors.map((v) => quantize(v));
       await this.store.batch(() => {
         for (let j = 0; j < batch.length; j++) {
           const { id, record } = batch[j];
-          const q = quantize(vectors[j]);
-          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
+          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(batchQ[j]) };
           this.store.set(id, updated);
         }
       });
       if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
       for (let j = 0; j < batch.length; j++) {
-        this.hnswIdx.add(batch[j].id, vectors[j]);
+        const { data, scale } = batchQ[j];
+        this.hnswIdx.add(batch[j].id, Array.from(data).map((v: number) => v / scale));
       }
       embedded += batch.length;
     }
@@ -2115,14 +2211,16 @@ export class Collection {
           diskBatch.length = 0;
           return;
         }
+        // Pre-quantize so HNSW uses the same dequantized vectors as on reload.
+        const diskBatchQ = vectors.map((v) => quantize(v));
         const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
-          const q = quantize(vectors[j]);
-          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(q) }];
+          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(diskBatchQ[j]) }];
         });
         await this._diskStore!.appendEmbeddings(updates);
         if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
         for (let j = 0; j < diskBatch.length; j++) {
-          this.hnswIdx!.add(diskBatch[j].id, vectors[j]);
+          const { data, scale } = diskBatchQ[j];
+          this.hnswIdx!.add(diskBatch[j].id, Array.from(data).map((v: number) => v / scale));
         }
         embedded += diskBatch.length;
         diskBatch.length = 0;
@@ -2188,17 +2286,19 @@ export class Collection {
         try { onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
         continue;
       }
+      // Pre-quantize so HNSW uses the same dequantized vectors as on reload.
+      const reembedBatchQ = vectors.map((v) => quantize(v));
       await this.store.batch(() => {
         for (let j = 0; j < batch.length; j++) {
           const { id, record } = batch[j];
-          const q = quantize(vectors[j]);
-          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(q) };
+          const updated = { ...record, [META_EMBEDDING]: serializeQuantized(reembedBatchQ[j]) };
           this.store.set(id, updated);
         }
       });
       if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
       for (let j = 0; j < batch.length; j++) {
-        this.hnswIdx!.add(batch[j].id, vectors[j]);
+        const { data, scale } = reembedBatchQ[j];
+        this.hnswIdx!.add(batch[j].id, Array.from(data).map((v: number) => v / scale));
       }
       embedded += batch.length;
       try { onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
@@ -2225,9 +2325,10 @@ export class Collection {
           try { onProgress?.({ completed: embedded + failed, total: null, phase: "disk" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
           return false;
         }
+        // Pre-quantize so HNSW uses the same dequantized vectors as on reload.
+        const reembedDiskBatchQ = vectors.map((v) => quantize(v));
         const updates: Array<[string, Record<string, unknown>]> = diskBatch.map((b, j) => {
-          const q = quantize(vectors[j]);
-          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(q) }];
+          return [b.id, { ...b.record, [META_EMBEDDING]: serializeQuantized(reembedDiskBatchQ[j]) }];
         });
         await this._diskStore!.appendEmbeddings(updates);
         // Mid-flight compaction: merge accumulated JSONL files when threshold hit,
@@ -2237,7 +2338,8 @@ export class Collection {
         }
         if (vectors.length > 0) this.ensureHnswDims(vectors[0]);
         for (let j = 0; j < diskBatch.length; j++) {
-          this.hnswIdx!.add(diskBatch[j].id, vectors[j]);
+          const { data, scale } = reembedDiskBatchQ[j];
+          this.hnswIdx!.add(diskBatch[j].id, Array.from(data).map((v: number) => v / scale));
         }
         embedded += diskBatch.length;
         diskBatch.length = 0;

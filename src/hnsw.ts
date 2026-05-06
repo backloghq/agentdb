@@ -84,6 +84,64 @@ interface SearchCandidate {
   distance: number;
 }
 
+// --- Serialization helpers ---
+
+const HNSW_MAGIC = 0x484E5347; // "HNSG"
+const HNSW_FORMAT_VERSION = 1;
+
+class BufWriter {
+  private chunks: Buffer[] = [];
+  private _byteLength = 0;
+
+  writeU32(v: number): void {
+    const b = Buffer.allocUnsafe(4);
+    b.writeUInt32LE(v, 0);
+    this.chunks.push(b);
+    this._byteLength += 4;
+  }
+
+  writeBytes(data: Buffer): void {
+    this.chunks.push(data);
+    this._byteLength += data.length;
+  }
+
+  /** Write a length-prefixed UTF-8 string (u32 byteLen + bytes). */
+  writeString(s: string): void {
+    const b = Buffer.from(s, "utf8");
+    this.writeU32(b.length);
+    this.writeBytes(b);
+  }
+
+  toBuffer(): Buffer {
+    return Buffer.concat(this.chunks, this._byteLength);
+  }
+}
+
+class BufReader {
+  private offset = 0;
+  constructor(private buf: Buffer) {}
+
+  readU32(): number {
+    if (this.offset + 4 > this.buf.length) throw new Error("HNSW graph.bin truncated");
+    const v = this.buf.readUInt32LE(this.offset);
+    this.offset += 4;
+    return v;
+  }
+
+  readBytes(len: number): Buffer {
+    if (this.offset + len > this.buf.length) throw new Error("HNSW graph.bin truncated");
+    const v = this.buf.subarray(this.offset, this.offset + len);
+    this.offset += len;
+    return v;
+  }
+
+  /** Read a length-prefixed UTF-8 string. */
+  readString(): string {
+    const len = this.readU32();
+    return this.readBytes(len).toString("utf8");
+  }
+}
+
 /**
  * HNSW index for approximate nearest neighbor search using cosine similarity.
  */
@@ -283,6 +341,94 @@ export class HnswIndex {
     return candidates
       .slice(0, k)
       .map((c) => ({ id: c.id, score: c.distance }));
+  }
+
+  // --- Persistence ---
+
+  /**
+   * Serialize the graph topology to a Buffer (vectors are NOT included — they live in records).
+   * Binary format: fixed header + per-node rows. See HNSW_FORMAT_VERSION for the schema.
+   */
+  toBuffer(): Buffer {
+    const w = new BufWriter();
+    w.writeU32(HNSW_MAGIC);
+    w.writeU32(HNSW_FORMAT_VERSION);
+    w.writeU32(this.M);
+    w.writeU32(this.dimensions);
+    w.writeU32(this.maxLayer);
+    // Entry point: length-prefixed string (0 bytes if null)
+    if (this.entryPoint) {
+      w.writeString(this.entryPoint);
+    } else {
+      w.writeU32(0);
+    }
+    w.writeU32(this.nodes.size);
+    for (const [id, node] of this.nodes) {
+      w.writeString(id);
+      w.writeU32(node.layer); // top layer for this node
+      for (let l = 0; l <= node.layer; l++) {
+        const nb = node.neighbors.get(l) ?? [];
+        w.writeU32(nb.length);
+        for (const nbId of nb) {
+          w.writeString(nbId);
+        }
+      }
+    }
+    return w.toBuffer();
+  }
+
+  /**
+   * Deserialize a graph from a Buffer produced by `toBuffer()`.
+   * Validates magic, format-version, M, and dimensions against `opts`.
+   * Throws on any mismatch or truncation.
+   * Returned nodes have `vector: []` — call `hydrateVector` for each node before searching.
+   */
+  static fromBuffer(buf: Buffer, opts: HnswOptions): { idx: HnswIndex; nodeCount: number } {
+    const r = new BufReader(buf);
+    const magic = r.readU32();
+    if (magic !== HNSW_MAGIC) throw new Error(`HNSW graph.bin: magic mismatch (got 0x${magic.toString(16)})`);
+    const version = r.readU32();
+    if (version !== HNSW_FORMAT_VERSION) throw new Error(`HNSW graph.bin: unsupported format version ${version}`);
+    const storedM = r.readU32();
+    const expectedM = opts.M ?? 16;
+    if (storedM !== expectedM) throw new Error(`HNSW graph.bin: M mismatch (file=${storedM}, opts=${expectedM})`);
+    const storedDims = r.readU32();
+    if (storedDims !== opts.dimensions) throw new Error(`HNSW graph.bin: dimensions mismatch (file=${storedDims}, opts=${opts.dimensions})`);
+    const maxLayer = r.readU32();
+    const epLen = r.readU32();
+    const entryPoint = epLen > 0 ? r.readBytes(epLen).toString("utf8") : null;
+    const nodeCount = r.readU32();
+
+    const idx = new HnswIndex(opts);
+    // Set topology fields directly (static method of same class can access private members)
+    idx.maxLayer = maxLayer;
+    idx.entryPoint = entryPoint;
+
+    for (let i = 0; i < nodeCount; i++) {
+      const id = r.readString();
+      const topLayer = r.readU32();
+      const neighbors = new Map<number, string[]>();
+      for (let l = 0; l <= topLayer; l++) {
+        const nbCount = r.readU32();
+        const nb: string[] = [];
+        for (let j = 0; j < nbCount; j++) nb.push(r.readString());
+        neighbors.set(l, nb);
+      }
+      idx.nodes.set(id, { id, vector: [], layer: topLayer, neighbors });
+    }
+    return { idx, nodeCount };
+  }
+
+  /**
+   * Set the vector for a node that was deserialized without one.
+   * Used during graph loading to hydrate topology from stored embeddings.
+   * Returns false if the id is not in this index.
+   */
+  hydrateVector(id: string, vector: number[]): boolean {
+    const node = this.nodes.get(id);
+    if (!node) return false;
+    node.vector = vector;
+    return true;
   }
 
   // --- Internal ---

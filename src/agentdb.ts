@@ -536,10 +536,14 @@ export class AgentDB {
       await diskStore.loadIndexes(col.getIndexManager());
 
       col.setDiskStore(diskStore);
-      // Rebuild HNSW from disk embeddings if an embedding provider is configured.
-      // In disk mode, open() is called with skipLoad=true so the WAL pass never
-      // runs — HNSW must be reconstructed from Parquet/JSONL entries instead.
-      await col.rebuildHnswFromDisk();
+      // Load or rebuild the HNSW graph. Try the persisted graph.bin sidecar first —
+      // O(N) reads to hydrate vectors, no distance computations. Fall back to the
+      // full rebuild (O(N × M × efConstruction) distance evaluations) when the sidecar
+      // is absent, invalid, or stale (nodeCount mismatch after a crash).
+      const hnswLoaded = await col.loadHnswFromDisk();
+      if (!hnswLoaded) {
+        await col.rebuildHnswFromDisk();
+      }
     } else {
       // Memory mode: normal open (load all records into Map)
       await col.open(colDir, {
