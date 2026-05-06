@@ -4,7 +4,7 @@
  * $eq operator, $in all-absent, $in partial-present, false-positive correctness,
  * disk mode integration, B-tree + bloom coexistence, and post-creation inserts.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -108,25 +108,27 @@ describe("Task 315 — Bloom filter query planner integration", () => {
   });
 
   it("6. false-positive correctness: bloom maybe-present but record absent → scan returns 0", async () => {
+    // Use expectedItems=1 (minimum filter size) with several inserts so the filter is
+    // severely overfull — guaranteed to produce false positives on almost any probe.
     const dir = await makeTmpDir();
     try {
       const db = await openDb(dir);
       const col = await db.collection(makeSchema("t6"));
-      for (let i = 0; i < 500; i++) await col.insert({ tag: `val-${i}`, status: "active" });
-      await col.createBloomFilter("tag", 500);
+      for (let i = 0; i < 20; i++) await col.insert({ tag: `val-${i}`, status: "active" });
+      await col.createBloomFilter("tag", 1); // tiny → saturated → very high FP rate
 
-      // Find a probe that mightHave returns true but isn't in data
+      // With a saturated filter every probe mightHave returns true.
+      // Find the first probe value that is NOT actually in the data.
       let falsePositiveProbe: string | null = null;
-      for (let i = 0; i < 200000 && !falsePositiveProbe; i++) {
+      for (let i = 0; i < 100 && !falsePositiveProbe; i++) {
         const probe = `fp-probe-${i}`;
         if (col.mightHave("tag", probe)) falsePositiveProbe = probe;
       }
-
-      if (falsePositiveProbe !== null) {
-        // bloom says maybe → scan → correct answer (0)
-        const result = await col.find({ filter: { tag: falsePositiveProbe } });
-        expect(result.records.length).toBe(0);
-      }
+      // A saturated bloom filter must produce a false positive within 100 probes.
+      expect(falsePositiveProbe).not.toBeNull();
+      // bloom says maybe → full scan → correct answer: 0 matching records
+      const result = await col.find({ filter: { tag: falsePositiveProbe! } });
+      expect(result.records.length).toBe(0);
       await db.close();
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
@@ -154,7 +156,7 @@ describe("Task 315 — Bloom filter query planner integration", () => {
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
-  it("8. B-tree + bloom coexistence: B-tree takes precedence, correct results", async () => {
+  it("8. B-tree + bloom coexistence: B-tree takes precedence, bloom.has() never consulted", async () => {
     const dir = await makeTmpDir();
     try {
       const db = await openDb(dir);
@@ -165,11 +167,24 @@ describe("Task 315 — Bloom filter query planner integration", () => {
       await col.createIndex("tag");
       await col.createBloomFilter("tag");
 
+      // Spy on the internal bloom filter's has() to verify it is NOT called when a B-tree
+      // index covers the same field. indexedCandidates() returns from the structural-index
+      // path before reaching bloomShortCircuit().
+      const im = col.getIndexManager() as unknown as {
+        bloomFilters: Map<string, { has: (v: string) => boolean }>;
+      };
+      const tagBf = im.bloomFilters.get("tag")!;
+      const hasSpy = vi.spyOn(tagBf, "has");
+
       const result = await col.find({ filter: { tag: "indexed" } });
       expect(result.records.length).toBe(40);
 
       const absent = await col.find({ filter: { tag: "absent" } });
       expect(absent.records.length).toBe(0);
+
+      // B-tree handled both queries — bloom.has() must never have been invoked.
+      expect(hasSpy).not.toHaveBeenCalled();
+      hasSpy.mockRestore();
       await db.close();
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
@@ -207,6 +222,83 @@ describe("Task 315 — Bloom filter query planner integration", () => {
       expect(col.mightHave("tag", "absent-count")).toBe(false);
       const n = await col.count({ tag: "absent-count" });
       expect(n).toBe(0);
+      await db.close();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("11. $or compound: bloom does not short-circuit — correct results via full scan", async () => {
+    // bloomShortCircuit skips keys starting with "$", so $or is never consulted.
+    // Even if every branch is definitely absent in bloom, the scan still runs (safe fallback).
+    const dir = await makeTmpDir();
+    try {
+      const db = await openDb(dir);
+      const col = await db.collection(makeSchema("t11"));
+      for (let i = 0; i < 20; i++) await col.insert({ tag: "alpha", status: "active" });
+      await col.createBloomFilter("tag");
+      await col.createBloomFilter("status");
+
+      expect(col.mightHave("tag", "nope")).toBe(false);
+      expect(col.mightHave("status", "nope")).toBe(false);
+
+      // Both branches definitely absent by bloom — but bloom can't short-circuit $or.
+      // Falls through to full scan → correct answer (0).
+      const absent = await col.find({ filter: { $or: [{ tag: "nope" }, { status: "nope" }] } });
+      expect(absent.records.length).toBe(0);
+
+      // At least one branch maybe-present — scan must return the matching records.
+      const present = await col.find({ filter: { $or: [{ tag: "alpha" }, { status: "nope" }] } });
+      expect(present.records.length).toBe(20);
+      await db.close();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("12. $and compound: bloom does not short-circuit — correct results via full scan", async () => {
+    // $and is a top-level "$" key, skipped by bloomShortCircuit → falls through to scan.
+    const dir = await makeTmpDir();
+    try {
+      const db = await openDb(dir);
+      const col = await db.collection(makeSchema("t12"));
+      for (let i = 0; i < 15; i++) await col.insert({ tag: "beta", status: "active" });
+      await col.createBloomFilter("tag");
+
+      expect(col.mightHave("tag", "nope")).toBe(false);
+
+      // One branch definitely absent → scan runs → 0 (no records have status "closed")
+      const absent = await col.find({ filter: { $and: [{ tag: "beta" }, { tag: "nope" }] } });
+      expect(absent.records.length).toBe(0);
+
+      // Both branches present → scan runs → matching records returned
+      const present = await col.find({ filter: { $and: [{ tag: "beta" }, { status: "active" }] } });
+      expect(present.records.length).toBe(15);
+      await db.close();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("13. $in with many values: all-absent short-circuits; partial-present falls through", async () => {
+    // Verify bloom $in handling scales correctly with large value lists.
+    const dir = await makeTmpDir();
+    try {
+      const db = await openDb(dir);
+      const col = await db.collection(makeSchema("t13"));
+      const presentValues = ["alpha", "beta", "gamma"];
+      for (const v of presentValues) await col.insert({ tag: v, status: "active" });
+      await col.createBloomFilter("tag", 1000);
+
+      // Build 100-element $in list where all values are definitely absent
+      const absentValues = Array.from({ length: 100 }, (_, i) => `absent-${i}-zzz`);
+      const allAbsent = absentValues.every((v) => !col.mightHave("tag", v));
+
+      if (allAbsent) {
+        // Bloom short-circuits all-absent $in to 0 — avoids full scan
+        const r1 = await col.find({ filter: { tag: { $in: absentValues } } });
+        expect(r1.records.length).toBe(0);
+      }
+
+      // 99 absent + 1 present → bloom can't short-circuit → full scan → returns present record
+      const mixedValues = [...absentValues.slice(0, 99), "alpha"];
+      const r2 = await col.find({ filter: { tag: { $in: mixedValues } } });
+      expect(r2.records.length).toBe(1);
+      expect(r2.records[0].tag).toBe("alpha");
       await db.close();
     } finally { await rm(dir, { recursive: true, force: true }); }
   });

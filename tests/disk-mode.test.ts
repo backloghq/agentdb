@@ -1142,4 +1142,134 @@ describe("Disk-backed mode", () => {
       expect(result.records[0]._id).toBe("r2");
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // v2.2.0 review fixes — commit 3 test gaps
+  // ---------------------------------------------------------------------------
+
+  describe("multiple composite indexes with overlapping fields", () => {
+    it("two composite indexes sharing a prefix field each serve their own query", async () => {
+      // Indexes on ["a","b"] and ["a","c"] both have "a" as first field.
+      // Queries on either combination must route to the correct index, not cross-contaminate.
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const schema = defineSchema({
+        name: "items",
+        compositeIndexes: [["a", "b"], ["a", "c"]],
+      });
+      const col = await db.collection(schema);
+
+      await col.insert({ _id: "r1", a: "x", b: "1", c: "P" });
+      await col.insert({ _id: "r2", a: "x", b: "2", c: "Q" });
+      await col.insert({ _id: "r3", a: "y", b: "1", c: "P" });
+
+      // ["a","b"] index
+      const ab1 = await col.find({ filter: { a: "x", b: "1" } });
+      expect(ab1.records.length).toBe(1);
+      expect(ab1.records[0]._id).toBe("r1");
+
+      const ab2 = await col.find({ filter: { a: "y", b: "1" } });
+      expect(ab2.records.length).toBe(1);
+      expect(ab2.records[0]._id).toBe("r3");
+
+      // ["a","c"] index
+      const ac1 = await col.find({ filter: { a: "x", c: "Q" } });
+      expect(ac1.records.length).toBe(1);
+      expect(ac1.records[0]._id).toBe("r2");
+
+      const ac2 = await col.find({ filter: { a: "x", c: "P" } });
+      expect(ac2.records.length).toBe(1);
+      expect(ac2.records[0]._id).toBe("r1");
+
+      await db.close();
+
+      // Reopen — both indexes loaded from persisted JSON, same results
+      db = new AgentDB(tmpDir, { storageMode: "disk" });
+      await db.init();
+      const col2 = await db.collection(schema);
+
+      const abReopen = await col2.find({ filter: { a: "x", b: "1" } });
+      expect(abReopen.records.length).toBe(1);
+      expect(abReopen.records[0]._id).toBe("r1");
+
+      const acReopen = await col2.find({ filter: { a: "x", c: "Q" } });
+      expect(acReopen.records.length).toBe(1);
+      expect(acReopen.records[0]._id).toBe("r2");
+    });
+  });
+
+  describe("composite index + persistEvery combined", () => {
+    it("composite index persists correctly while HNSW periodic flushes are active", async () => {
+      // A collection with a composite index on ["a","b"] AND hnsw.persistEvery=3.
+      // Both persistence mechanisms must operate independently without interfering.
+      const { mkdtemp: mktemp2, rm: rm2 } = await import("node:fs/promises");
+      const { tmpdir: td2 } = await import("node:os");
+      const { join: j2 } = await import("node:path");
+      const dir2 = await mktemp2(j2(td2(), "agentdb-combo-"));
+      try {
+        const { AgentDB: AgentDB2 } = await import("../src/agentdb.js");
+        const { defineSchema: ds2 } = await import("../src/schema.js");
+
+        const schema2 = ds2({
+          name: "combo",
+          fields: { title: { type: "string", searchable: true }, a: { type: "string" }, b: { type: "string" } },
+          storageMode: "disk",
+          compositeIndexes: [["a", "b"]],
+        });
+
+        // Stub embedding provider so HNSW flushes actually fire
+        const stubProvider = {
+          dimensions: 4,
+          async embed(texts: string[]): Promise<number[][]> {
+            return texts.map((t, i) => { const v = [i % 3, (i + 1) % 3, (i + 2) % 3, (i + 3) % 3]; const n = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) || 1; return v.map(x => x / n); });
+          },
+        };
+
+        let db2 = new AgentDB2(dir2, {
+          storageMode: "disk",
+          embeddings: { provider: stubProvider },
+          hnsw: { persistEvery: 3 },
+        });
+        await db2.init();
+        const col2 = await db2.collection(schema2);
+
+        // Insert 6 records — 2 HNSW flushes at add 3 and add 6
+        await col2.insert({ _id: "c1", title: "doc one", a: "x", b: "1" });
+        await col2.insert({ _id: "c2", title: "doc two", a: "x", b: "2" });
+        await col2.insert({ _id: "c3", title: "doc three", a: "y", b: "1" });
+        await col2.embedUnembedded();
+        await col2.insert({ _id: "c4", title: "doc four", a: "x", b: "1" });
+        await col2.insert({ _id: "c5", title: "doc five", a: "y", b: "2" });
+        await col2.insert({ _id: "c6", title: "doc six", a: "z", b: "1" });
+        await col2.embedUnembedded();
+        await col2.awaitHnswFlush();
+
+        // Composite index still correct
+        const q1 = await col2.find({ filter: { a: "x", b: "1" } });
+        expect(q1.records.length).toBe(2); // c1, c4
+        const ids1 = q1.records.map(r => r._id).sort();
+        expect(ids1).toEqual(["c1", "c4"]);
+
+        await db2.close();
+
+        // Reopen — composite index loaded from JSON, HNSW loaded from graph.bin
+        db2 = new AgentDB2(dir2, {
+          storageMode: "disk",
+          embeddings: { provider: stubProvider },
+          hnsw: { persistEvery: 3 },
+        });
+        await db2.init();
+        const col3 = await db2.collection(schema2);
+
+        const q2 = await col3.find({ filter: { a: "x", b: "1" } });
+        expect(q2.records.length).toBe(2);
+        expect(q2.records.map(r => r._id).sort()).toEqual(["c1", "c4"]);
+
+        expect((await col3.metrics()).hnswNodeCount).toBe(6);
+        await db2.close();
+      } finally {
+        await rm2(dir2, { recursive: true, force: true });
+      }
+    });
+  });
 });

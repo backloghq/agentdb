@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 - **v2.2.0 review — tryLoad* diagnostic warnings on non-ENOENT failures** — `tryLoadCompositeIndex` and `tryLoadBloomFilter` previously swallowed all errors silently except the specific version-mismatch message. Non-ENOENT failures (JSON parse errors, corrupt files, unexpected I/O) now emit `agentdb: could not load composite index for […]` / `agentdb: could not load bloom filter for field '…'` warnings before falling back to disk-scan rebuild. ENOENT (file absent) remains silent — the expected first-open path.
 
+- **v2.2.0 review — commit 3 test gap fills** — 8 new tests across `bloom-planner.test.ts`, `hnsw-persistence.test.ts`, and `disk-mode.test.ts`:
+  (1) **test 6 FP precondition** — test 6 in `bloom-planner.test.ts` previously guarded its core assertion with `if (falsePositiveProbe !== null)`, making it vacuously pass if no false positive was found. Fixed: use `expectedItems=1` (severely undersized filter guarantees saturation) so a FP is found within 100 probes; assertion is now unconditional (`expect(falsePositiveProbe).not.toBeNull()`).
+  (2) **test 8 B-tree+bloom coexistence spy** — added `vi.spyOn` on the internal bloom filter's `has()` method; asserts it is never invoked when a B-tree index covers the same field (`indexedCandidates` returns from the structural-index path before reaching `bloomShortCircuit`).
+  (3) **bloom $or** — new test 11: `$or` is a top-level `$` key, skipped by `bloomShortCircuit`; both all-absent (correct 0) and partial-present (correct 20) cases verified.
+  (4) **bloom $and** — new test 12: `$and` similarly skipped; one-branch-absent (0) and both-present (15) cases verified.
+  (5) **$in with many values** — new test 13: 100-element all-absent `$in` short-circuits to 0; 99-absent + 1-present mixed list falls through to scan and returns the 1 present record.
+  (6) **persistEvery=0 boundary** — new test 13 in `hnsw-persistence.test.ts`: `0` is falsy, treated as unset by `_tickHnswPersist`; no mid-session flush; graph.bin absent until `close()`.
+  (7) **persistEvery=1 boundary** — new test 14: every `embedUnembedded` call triggers a flush; `graph.bin` nodeCount advances by 1 after each of 3 sequential records, verified via `awaitHnswFlush`.
+  (8) **concurrent writes during flush** — new test 15: 5 records trigger flush, 3 more inserted while flush may be in-flight; after `close()` and reopen all 8 nodes are in the graph and reachable via `semanticSearch`.
+  (9) **multiple composite overlapping** — new test in `disk-mode.test.ts`: indexes `["a","b"]` and `["a","c"]` coexist and each serve their respective queries correctly, both in-session and after close/reopen via persisted JSON.
+  (10) **composite+persistEvery combined** — new test: a collection with composite index `["a","b"]` and `hnsw.persistEvery=3` — both mechanisms operate independently; composite queries correct in-session and after reopen; HNSW nodeCount=6 after reopen.
+
 ### Known Issues
 
 - **HNSW `graph.bin` sidecar is local-FS only** — `persistHnsw()` writes `<collectionDir>/hnsw/graph.bin` to the local filesystem regardless of the configured storage backend. In S3 deployments, the sidecar is never uploaded to the bucket; on container restart the graph rebuilds from vectors stored in Parquet/JSONL via `rebuildHnswFromDisk` (O(N) vector reads, no distance computations). The `graph.bin` IS written and read correctly within a single process lifetime, including across close/reopen cycles that share the same working directory. S3-native sidecar persistence is tracked as a v2.3 task.

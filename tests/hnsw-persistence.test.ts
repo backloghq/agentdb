@@ -466,4 +466,72 @@ describe("Task 318 — HNSW periodic-flush (persistEvery)", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("13. persistEvery=0 is treated as disabled (falsy) — no mid-session flush", async () => {
+    // 0 is falsy: _tickHnswPersist has `if (!threshold) return` → same as unset.
+    const dir = await makeTmpDir();
+    try {
+      const db = await openDb(dir, { persistEvery: 0 });
+      const col = await db.collection(schema);
+      for (let i = 0; i < 10; i++) await col.insert({ title: `doc-${i}` });
+      await col.embedUnembedded();
+      // No mid-session flush triggered — graph.bin must not exist yet.
+      expect(await graphBinNodeCount(dir)).toBeNull();
+      await db.close();
+      // close() always writes the authoritative snapshot.
+      expect(await graphBinNodeCount(dir)).toBe(10);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("14. persistEvery=1 flushes after every add — graph.bin advances with each record", async () => {
+    // persistEvery=1: counter threshold is 1 → fires after the very first add().
+    const dir = await makeTmpDir();
+    try {
+      const db = await openDb(dir, { persistEvery: 1, seed: 42 });
+      const col = await db.collection(schema);
+      for (let i = 0; i < 3; i++) {
+        await col.insert({ title: `single-${i}` });
+        await col.embedUnembedded();   // causes hnswIdx.add() → _tickHnswPersist fires
+        await col.awaitHnswFlush();    // wait for the flush this add triggered
+        expect(await graphBinNodeCount(dir)).toBe(i + 1);
+      }
+      await db.close();
+      expect(await graphBinNodeCount(dir)).toBe(3);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("15. concurrent writes during flush: inserts after trigger are not lost on close/reopen", async () => {
+    // Insert exactly persistEvery records (triggers flush), then insert more before the flush
+    // completes. All records must survive close() and be visible after reopen.
+    const dir = await makeTmpDir();
+    try {
+      const db = await openDb(dir, { persistEvery: 5 });
+      const col = await db.collection(schema);
+
+      // These 5 trigger the flush (last add() calls _tickHnswPersist).
+      for (let i = 0; i < 5; i++) await col.insert({ title: `pre-${i}` });
+      await col.embedUnembedded();
+
+      // These 3 arrive while the flush may still be in-flight.
+      for (let i = 0; i < 3; i++) await col.insert({ title: `concurrent-${i}` });
+      await col.embedUnembedded();
+
+      await col.awaitHnswFlush();
+      await db.close(); // authoritative close flush includes all 8
+
+      const db2 = await openDb(dir, { persistEvery: 5 });
+      const col2 = await db2.collection(schema);
+      expect((await col2.metrics()).hnswNodeCount).toBe(8);
+      // All 8 nodes reachable via semantic search
+      const results = await col2.semanticSearch("pre-0", { limit: 8 });
+      expect(results.records.length).toBe(8);
+      await db2.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
