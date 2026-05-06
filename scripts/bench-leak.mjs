@@ -18,6 +18,7 @@
  *   K. termlog segment count drops after compaction
  *   L. RateLimiter per-IP map behaviour
  *   M. bm25DocCount stable after same-session bm25Search (fix 310)
+ *   N. bloom mightHave() micro-bench: cold throughput + warm inlining (task 314)
  *
  * Each scenario records:
  *   - a deterministic counter (hnswNodeCount, monitor map size, listenerCount,
@@ -582,6 +583,53 @@ async function benchBm25CountSameSession() {
   return { N, phase1AfterSearch: phase1Count, phase2AfterReopen: phase2Count, pass };
 }
 
+// ---------- N. Bloom mightHave micro-benchmark (task 314) ----------------
+// Measures throughput and per-call latency for bloom filter existence checks.
+// Pass criteria: cold throughput >= 500K ops/sec (2µs/op average).
+// False-positive count measured as a sanity check (not a pass criterion).
+
+async function benchBloomMightHave() {
+  const { BloomFilter } = await import("../dist/bloom.js");
+
+  const N_ITEMS = 100_000;   // items seeded into the filter
+  const N_COLD  = 1_000_000; // probes for non-present values (cold throughput)
+  const N_WARM  = 100_000;   // repeated single-probe loop (V8 inlining / branch-prediction test)
+
+  // Seed the bloom filter
+  const bf = new BloomFilter(N_ITEMS);
+  for (let i = 0; i < N_ITEMS; i++) bf.add(`item-${i}`);
+
+  // Cold probes: 1M distinct values not in the filter.
+  const coldStart = performance.now();
+  let coldFp = 0;
+  for (let i = 0; i < N_COLD; i++) {
+    if (bf.has(`cold-probe-${i}`)) coldFp++;
+  }
+  const coldMs = performance.now() - coldStart;
+  const coldOpsPerSec = Math.round(N_COLD / (coldMs / 1000));
+  const coldAvgUs = +(coldMs * 1000 / N_COLD).toFixed(3);
+
+  // Warm probes: same value repeated — lets V8 inline and predict the branch.
+  const warmStart = performance.now();
+  let warmHits = 0;
+  for (let i = 0; i < N_WARM; i++) {
+    if (bf.has("warm-probe-fixed")) warmHits++;
+  }
+  const warmMs = performance.now() - warmStart;
+  const warmOpsPerSec = Math.round(N_WARM / (warmMs / 1000));
+
+  // Presence check: seeded values must all return true.
+  let seedMisses = 0;
+  for (let i = 0; i < 1000; i++) {
+    if (!bf.has(`item-${i}`)) seedMisses++;
+  }
+
+  const MIN_THROUGHPUT = 500_000; // 500K ops/sec = 2µs/op
+  const pass = coldOpsPerSec >= MIN_THROUGHPUT && seedMisses === 0;
+  console.log(`[N Bloom mightHave] cold: ${(coldOpsPerSec / 1e6).toFixed(2)}M ops/sec (${coldAvgUs}µs/op, ${coldFp} FP/${N_COLD}); warm: ${(warmOpsPerSec / 1e6).toFixed(2)}M ops/sec; seedMisses=${seedMisses} pass=${pass}`);
+  return { coldOpsPerSec, coldAvgUs, coldFalsePositives: coldFp, warmOpsPerSec, seedMisses, pass };
+}
+
 // ---------- main ----------------------------------------------------------
 
 async function main() {
@@ -604,8 +652,9 @@ async function main() {
   const k = await benchTermlogCompaction();
   const l = await benchRateLimiterMap();
   const m = await benchBm25CountSameSession();
+  const n = await benchBloomMightHave();
 
-  const out = { a, b, c, d, e, f, g, h, i, j, k, l, m };
+  const out = { a, b, c, d, e, f, g, h, i, j, k, l, m, n };
   console.log("\n# JSON RESULT:\n" + JSON.stringify(out));
 
   // Aggregate pass criteria. A-D don't carry an explicit `pass` field; derive from
@@ -624,6 +673,7 @@ async function main() {
     k: k.pass,
     l: l.lazyReaps,
     m: m.pass,
+    n: n.pass,
   };
   const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([id]) => id.toUpperCase());
   if (failed.length > 0) {
