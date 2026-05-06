@@ -13,8 +13,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from "@aws-sdk/client-s3";
-import { AgentDB } from "../src/agentdb.js";
+import { AgentDB, type AgentDBOptions } from "../src/agentdb.js";
 import { defineSchema } from "../src/schema.js";
+import type { EmbeddingProvider } from "../src/embeddings/types.js";
 
 const integration = process.env.S3_INTEGRATION === "1";
 const bucket = process.env.S3_TEST_BUCKET ?? "agentdb-test";
@@ -213,4 +214,227 @@ describe.skipIf(!integration)("AgentDB S3 + termlog-s3 integration", () => {
     await db.close();
     await cleanupPrefix(client, legacyPrefix);
   }, 60000);
+});
+
+// ---------------------------------------------------------------------------
+// Task 320 — S3 + v2.1 options matrix
+// Covers: mergeParquetThreshold, hnsw.maxLevel, filterCacheSize, composite
+// index round-trip, and HNSW sidecar locality investigation.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!integration)("AgentDB S3 — v2.1 options matrix (task 320)", () => {
+  let client: S3Client;
+  let s3Prefix: string;
+
+  /** Minimal 3-D mock provider: all texts → [0.1, 0.2, 0.3]. */
+  const mockProvider: EmbeddingProvider = {
+    dimensions: 3,
+    embed: async (texts: string[]) => texts.map(() => [0.1, 0.2, 0.3]),
+  };
+
+  /** Open a fresh AgentDB with an S3 backend scoped to `subprefix` within `s3Prefix`. */
+  async function makeS3Db(subprefix: string, extraOpts: Partial<AgentDBOptions> = {}): Promise<AgentDB> {
+    const { S3Backend } = await import("@backloghq/opslog-s3");
+    const prefix = `${s3Prefix}${subprefix}`;
+    const backend = new S3Backend({ bucket, prefix, client });
+    const db = new AgentDB(prefix, { backend, ...extraOpts });
+    await db.init();
+    return db;
+  }
+
+  /** List all S3 keys under a given prefix. */
+  async function listKeys(prefix: string): Promise<string[]> {
+    const keys: string[] = [];
+    let token: string | undefined;
+    do {
+      const list = await client.send(
+        new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }),
+      ) as { Contents?: Array<{ Key?: string }>; IsTruncated?: boolean; NextContinuationToken?: string };
+      for (const obj of list.Contents ?? []) {
+        if (obj.Key) keys.push(obj.Key);
+      }
+      token = list.IsTruncated ? list.NextContinuationToken : undefined;
+    } while (token);
+    return keys;
+  }
+
+  beforeAll(() => {
+    client = makeS3Client();
+    s3Prefix = `agentdb-s3-opts-${Date.now()}/`;
+  });
+
+  afterAll(async () => {
+    if (!client) return;
+    await cleanupPrefix(client, s3Prefix);
+    // AgentDB(prefix, …) creates a local directory mirroring the S3 prefix string.
+    // Clean up those accidental local FS artifacts (they are empty for non-disk tests;
+    // test 5 may leave hnsw/graph.bin there).
+    try {
+      const { rm } = await import("node:fs/promises");
+      // prefix looks like "agentdb-s3-opts-1234567890/" — strip trailing slash
+      const localTopDir = s3Prefix.replace(/\/$/, "").split("/")[0];
+      await rm(localTopDir, { recursive: true, force: true });
+    } catch { /* best-effort */ }
+    client.destroy();
+  });
+
+  it("mergeParquetThreshold=2 triggers full merge on 3rd close in S3 disk mode", async () => {
+    // Three close cycles:
+    //   Session 1 → no compactionMeta → full compact (parquetFiles=[])
+    //   Session 2 → parquetFileCount=0+1=1 < 2 → incremental (parquetFiles=[f2])
+    //   Session 3 → parquetFileCount=1+1=2 >= 2 → full merge  (parquetFiles=[])
+    // After session 3 all 20 records must survive the merge and the knob must be wired.
+    const subprefix = "t1-merge/";
+    const schema = defineSchema({ name: "items", storageMode: "disk" });
+
+    const db1 = await makeS3Db(subprefix, { mergeParquetThreshold: 2 });
+    const col1 = await db1.collection(schema);
+    for (let i = 0; i < 10; i++) await col1.insert({ _id: `r${i}`, n: i });
+    await db1.close();
+
+    const db2 = await makeS3Db(subprefix, { mergeParquetThreshold: 2 });
+    const col2 = await db2.collection(schema);
+    for (let i = 10; i < 15; i++) await col2.insert({ _id: `r${i}`, n: i });
+    await db2.close();
+
+    const db3 = await makeS3Db(subprefix, { mergeParquetThreshold: 2 });
+    const col3 = await db3.collection(schema);
+    for (let i = 15; i < 20; i++) await col3.insert({ _id: `r${i}`, n: i });
+    await db3.close();
+
+    // Verify
+    const db4 = await makeS3Db(subprefix, { mergeParquetThreshold: 2 });
+    const col4 = await db4.collection(schema);
+    expect(col4.getDiskStore()?.mergeParquetThreshold).toBe(2);
+    const all = await col4.find({});
+    expect(all.total).toBe(20);
+    await db4.close();
+
+    await cleanupPrefix(client, `${s3Prefix}${subprefix}`);
+  }, 120000);
+
+  it("hnsw.maxLevel honored in S3-backed collection", async () => {
+    // setEmbeddingProvider is called during _openCollection when an embedding provider
+    // is configured; it creates HnswIndex with opts.hnsw, so maxLevel flows through.
+    const db = await makeS3Db("t2-hnsw/", {
+      hnsw: { maxLevel: 4 },
+      embeddings: { provider: mockProvider },
+    });
+    const col = await db.collection(defineSchema({ name: "items" }));
+
+    const hnswIdx = col.getHnswIndex();
+    expect(hnswIdx).not.toBeNull();
+    expect(hnswIdx!.configMaxLevel).toBe(4);
+
+    await db.close();
+    await cleanupPrefix(client, `${s3Prefix}t2-hnsw/`);
+  }, 30000);
+
+  it("filterCacheSize=2 evicts at threshold in S3 collection", async () => {
+    // LRU cache of size 2: after compiling 3 distinct filter shapes the first is evicted.
+    // Re-querying the first shape triggers a 4th compilation (cache miss), not a hit.
+    const db = await makeS3Db("t3-filter/", { filterCacheSize: 2 });
+    const col = await db.collection(defineSchema({ name: "items" }));
+
+    expect(col.filterCacheSize).toBe(2);
+
+    // Insert two records so queries have something to scan (zero records would still
+    // compile filters but let's be realistic).
+    await col.insert({ _id: "a", status: "active", role: "admin", tier: "gold" });
+    await col.insert({ _id: "b", status: "inactive", role: "user", tier: "silver" });
+
+    await col.find({ status: "active" }); // compilation 1; cache: [status]
+    await col.find({ role: "admin" });    // compilation 2; cache: [status, role] (full)
+    await col.find({ tier: "gold" });     // compilation 3; evicts status; cache: [role, tier]
+    await col.find({ status: "active" }); // compilation 4 — status was evicted, must recompile
+
+    expect(col.metrics().filterCompilations).toBe(4);
+
+    await db.close();
+    await cleanupPrefix(client, `${s3Prefix}t3-filter/`);
+  }, 30000);
+
+  it("composite index on [category, priority] round-trips through S3 disk close/reopen", async () => {
+    // Session 1: insert records + close → saveIndexes writes composite-category__priority.json to S3.
+    // Session 2: reopen → tryLoadCompositeIndex reads from S3 (O(file-read) fast path).
+    // Validates that task 319's tryLoadCompositeIndex works against the S3 backend.
+    const subprefix = "t4-composite/";
+    const schema = defineSchema({
+      name: "items",
+      storageMode: "disk",
+      compositeIndexes: [["category", "priority"]],
+    });
+
+    const db1 = await makeS3Db(subprefix);
+    const col1 = await db1.collection(schema);
+    await col1.insert({ _id: "t1", category: "tech", priority: 1 });
+    await col1.insert({ _id: "t2", category: "tech", priority: 2 });
+    await col1.insert({ _id: "t3", category: "sci",  priority: 1 });
+    await col1.insert({ _id: "t4", category: "sci",  priority: 3 });
+    await db1.close();
+
+    // Reopen: tryLoadCompositeIndex reads indexes/composite-category__priority.json from S3
+    const db2 = await makeS3Db(subprefix);
+    const col2 = await db2.collection(schema);
+
+    const exact = await col2.find({ category: "tech", priority: 1 });
+    expect(exact.records.length).toBe(1);
+    expect(exact.records[0]._id).toBe("t1");
+
+    const techAll = await col2.find({ category: "tech" });
+    expect(techAll.total).toBe(2);
+
+    await db2.close();
+    await cleanupPrefix(client, `${s3Prefix}${subprefix}`);
+  }, 90000);
+
+  it("HNSW graph.bin sidecar is FS-only in S3 disk mode (not stored as an S3 object)", async () => {
+    // Investigation result:
+    //   persistHnsw() uses node:path.join(_dir, "hnsw/graph.bin") where _dir is the
+    //   local-FS path passed to AgentDB (the same string used as the S3 prefix).
+    //   In S3 disk mode this creates a LOCAL binary file — no S3 object is written.
+    //
+    // Implication: HNSW graph persistence does NOT survive container restarts in S3
+    // deployments — each fresh container rebuilds the graph from the S3-stored
+    // _embedding fields (rebuildHnswFromDisk). This is the intended fallback path.
+    //
+    // S3-native sidecar (backend.writeBlob for graph.bin) is tracked as a v2.3 task.
+    const subprefix = "t5-hnsw-s3/";
+    const schema = defineSchema({ name: "items", storageMode: "disk" });
+
+    // Session 1: insert, embed, close
+    const db1 = await makeS3Db(subprefix, {
+      storageMode: "disk",
+      embeddings: { provider: mockProvider },
+    });
+    const col1 = await db1.collection(schema);
+    await col1.insert({ _id: "h1", title: "alpha embedding" });
+    await col1.insert({ _id: "h2", title: "beta embedding" });
+    await col1.insert({ _id: "h3", title: "gamma embedding" });
+    await col1.embedUnembedded();
+    expect(col1.getHnswIndex()?.size).toBe(3);
+    await db1.close(); // triggers persistHnsw → LOCAL FS, not S3
+
+    // Verify: S3 has no keys under any hnsw/ path for this collection
+    const allKeys = await listKeys(`${s3Prefix}${subprefix}`);
+    const hnswS3Keys = allKeys.filter((k) => k.includes("/hnsw/"));
+    expect(hnswS3Keys).toHaveLength(0);
+
+    // Reopen: in the same process the local sidecar IS accessible (same CWD),
+    // so loadHnswFromDisk succeeds. A fresh container would fall back to
+    // rebuildHnswFromDisk (reads _embedding from S3 Parquet). Either way the
+    // graph is available and semantic search works.
+    const db2 = await makeS3Db(subprefix, {
+      storageMode: "disk",
+      embeddings: { provider: mockProvider },
+    });
+    const col2 = await db2.collection(schema);
+    expect(col2.getHnswIndex()?.size).toBe(3);
+
+    const hits = await col2.searchByVector([0.1, 0.2, 0.3]);
+    expect(hits.records.length).toBeGreaterThan(0);
+
+    await db2.close();
+    await cleanupPrefix(client, `${s3Prefix}${subprefix}`);
+  }, 90000);
 });
