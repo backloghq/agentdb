@@ -19,6 +19,7 @@
  *   L. RateLimiter per-IP map behaviour
  *   M. bm25DocCount stable after same-session bm25Search (fix 310)
  *   N. bloom mightHave() micro-bench: cold throughput + warm inlining (task 314)
+ *   O. HNSW persistEvery: embedUnembedded() time with vs without periodic flush (task 318)
  *
  * Each scenario records:
  *   - a deterministic counter (hnswNodeCount, monitor map size, listenerCount,
@@ -630,6 +631,73 @@ async function benchBloomMightHave() {
   return { coldOpsPerSec, coldAvgUs, coldFalsePositives: coldFp, warmOpsPerSec, seedMisses, pass };
 }
 
+async function benchHnswPersistEvery() {
+  // Scenario O: HNSW periodic-flush overhead (task 318).
+  // Measures embedUnembedded() time with vs without persistEvery.
+  // Pass criterion: ratio < 3x (flush is async, should not serialize embed loop).
+  const { defineSchema } = await import("../dist/schema.js");
+
+  /** Minimal 8-dim deterministic embedding provider. */
+  const hashProv = {
+    dimensions: 8,
+    async embed(texts) {
+      return texts.map((t) => {
+        let h = 5381;
+        for (let i = 0; i < t.length; i++) h = (Math.imul(h, 33) ^ t.charCodeAt(i)) >>> 0;
+        let s = h || 1;
+        const v = Array.from({ length: 8 }, () => {
+          s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+          return (s >>> 0) / 0x100000000 * 2 - 1;
+        });
+        const norm = Math.sqrt(v.reduce((a, x) => a + x * x, 0)) || 1;
+        return v.map((x) => x / norm);
+      });
+    },
+  };
+
+  const schema = defineSchema({
+    name: "bench-o",
+    fields: { title: { type: "string", searchable: true } },
+    storageMode: "disk",
+  });
+
+  const N = 1000;
+  const PERSIST_EVERY = 100; // 10 flushes during embed
+
+  // Baseline: no periodic flush
+  const dir1 = await mkdtemp(join(tmpdir(), "agentdb-bench-o-base-"));
+  const db1 = new AgentDB(dir1, { embeddings: { provider: hashProv } });
+  await db1.init();
+  const col1 = await db1.collection(schema);
+  for (let i = 0; i < N; i++) await col1.insert({ title: `bench-o-base-${i}` });
+  const t0 = performance.now();
+  await col1.embedUnembedded();
+  const baseMs = performance.now() - t0;
+  await db1.close();
+  await rm(dir1, { recursive: true, force: true });
+
+  // With periodic flush
+  const dir2 = await mkdtemp(join(tmpdir(), "agentdb-bench-o-flush-"));
+  const db2 = new AgentDB(dir2, {
+    embeddings: { provider: hashProv },
+    hnsw: { persistEvery: PERSIST_EVERY },
+  });
+  await db2.init();
+  const col2 = await db2.collection(schema);
+  for (let i = 0; i < N; i++) await col2.insert({ title: `bench-o-flush-${i}` });
+  const t1 = performance.now();
+  await col2.embedUnembedded();
+  const flushMs = performance.now() - t1;
+  await col2.awaitHnswFlush();
+  await db2.close();
+  await rm(dir2, { recursive: true, force: true });
+
+  const ratio = +(flushMs / baseMs).toFixed(2);
+  const pass = ratio < 3;
+  console.log(`[O HNSW persistEvery] base=${baseMs.toFixed(1)}ms flush=${flushMs.toFixed(1)}ms ratio=${ratio}x pass=${pass}`);
+  return { baseMs: +baseMs.toFixed(1), flushMs: +flushMs.toFixed(1), ratio, pass };
+}
+
 // ---------- main ----------------------------------------------------------
 
 async function main() {
@@ -653,8 +721,9 @@ async function main() {
   const l = await benchRateLimiterMap();
   const m = await benchBm25CountSameSession();
   const n = await benchBloomMightHave();
+  const o = await benchHnswPersistEvery();
 
-  const out = { a, b, c, d, e, f, g, h, i, j, k, l, m, n };
+  const out = { a, b, c, d, e, f, g, h, i, j, k, l, m, n, o };
   console.log("\n# JSON RESULT:\n" + JSON.stringify(out));
 
   // Aggregate pass criteria. A-D don't carry an explicit `pass` field; derive from
@@ -674,6 +743,7 @@ async function main() {
     l: l.lazyReaps,
     m: m.pass,
     n: n.pass,
+    o: o.pass,
   };
   const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([id]) => id.toUpperCase());
   if (failed.length > 0) {

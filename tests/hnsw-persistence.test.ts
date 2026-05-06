@@ -1,7 +1,8 @@
 /**
- * Tests for HNSW graph persistence (task 313).
+ * Tests for HNSW graph persistence (task 313) and periodic-flush (task 318).
  * Verifies: round-trip, crash recovery, mismatch fallback, missing sidecar,
- * crash-mid-write recovery, and determinism across load vs rebuild with seed.
+ * crash-mid-write recovery, determinism across load vs rebuild with seed,
+ * and persistEvery periodic-flush behavior.
  *
  * All tests use disk mode (persistence only applies to disk-backed collections).
  * Uses hashProvider (8-dim, deterministic) from hnsw-options.test.ts.
@@ -44,13 +45,24 @@ async function makeTmpDir(): Promise<string> {
 }
 
 /** Open a disk-mode AgentDB with the hashProvider. */
-async function openDb(dir: string, hnswOpts?: { seed?: number }): Promise<AgentDB> {
+async function openDb(dir: string, hnswOpts?: { seed?: number; persistEvery?: number }): Promise<AgentDB> {
   const db = new AgentDB(dir, {
     embeddings: { provider: hashProvider },
     hnsw: hnswOpts,
   });
   await db.init();
   return db;
+}
+
+/** Read graph.bin and return nodeCount, or null if file absent. */
+async function graphBinNodeCount(dbDir: string): Promise<number | null> {
+  try {
+    const buf = await readFile(join(dbDir, "collections", "sem", "hnsw", "graph.bin"));
+    const { nodeCount } = HnswIndex.fromBuffer(buf, { dimensions: 8 });
+    return nodeCount;
+  } catch {
+    return null;
+  }
 }
 
 describe("Task 313 — HNSW graph persistence", () => {
@@ -265,6 +277,167 @@ describe("Task 313 — HNSW graph persistence", () => {
       await db3.close().catch(() => {});
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Task 318 — HNSW periodic-flush (persistEvery)", () => {
+  it("8. persistEvery=5 writes graph.bin mid-session (two sequential flushes before close)", async () => {
+    const dir = await makeTmpDir();
+    try {
+      const db = await openDb(dir, { persistEvery: 5 });
+      const col = await db.collection(schema);
+
+      // Batch 1: 5 records → tick 5 triggers first flush
+      for (let i = 0; i < 5; i++) await col.insert({ title: `doc-a-${i}` });
+      await col.embedUnembedded();
+      await col.awaitHnswFlush();
+
+      const count1 = await graphBinNodeCount(dir);
+      expect(count1).toBe(5); // flushed mid-session
+
+      // Batch 2: 5 more records → tick 5 triggers second flush
+      for (let i = 5; i < 10; i++) await col.insert({ title: `doc-a-${i}` });
+      await col.embedUnembedded();
+      await col.awaitHnswFlush();
+
+      const count2 = await graphBinNodeCount(dir);
+      expect(count2).toBe(10); // updated mid-session
+
+      // close() writes the authoritative final state
+      await db.close();
+      expect(await graphBinNodeCount(dir)).toBe(10);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("9. persistEvery undefined: no mid-session flush — v2.1.1 behavior preserved", async () => {
+    const dir = await makeTmpDir();
+    try {
+      const db = await openDb(dir); // no persistEvery
+      const col = await db.collection(schema);
+
+      for (let i = 0; i < 20; i++) await col.insert({ title: `doc-b-${i}` });
+      await col.embedUnembedded();
+
+      // Mid-session: no periodic flush fired — file should not exist yet
+      expect(await graphBinNodeCount(dir)).toBeNull();
+
+      await db.close();
+      // close() writes the first and only snapshot
+      expect(await graphBinNodeCount(dir)).toBe(20);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("10. mid-session graph.bin produced by periodic flush is valid and loadable", async () => {
+    const dir = await makeTmpDir();
+    try {
+      const db = await openDb(dir, { persistEvery: 10 });
+      const col = await db.collection(schema);
+
+      // Insert 10 → tick 10 → flush
+      for (let i = 0; i < 10; i++) await col.insert({ title: `doc-c-${i}` });
+      await col.embedUnembedded();
+      await col.awaitHnswFlush();
+
+      // File must exist with 10 nodes
+      const count = await graphBinNodeCount(dir);
+      expect(count).toBe(10);
+
+      // Insert 5 more (counter = 5, no second flush yet)
+      for (let i = 10; i < 15; i++) await col.insert({ title: `doc-c-${i}` });
+      await col.embedUnembedded();
+
+      // graph.bin still reflects the LAST flush (10 nodes) because threshold not reached again
+      expect(await graphBinNodeCount(dir)).toBe(10);
+      // Live HNSW has 15
+      expect(col.getHnswIndex()!.size).toBe(15);
+
+      await db.close();
+      // close() persists the full final state
+      expect(await graphBinNodeCount(dir)).toBe(15);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("11. bounded crash exposure: gap between persisted and live ≤ persistEvery at all times", async () => {
+    const dir = await makeTmpDir();
+    try {
+      const PERSIST_EVERY = 10;
+      const db = await openDb(dir, { persistEvery: PERSIST_EVERY });
+      const col = await db.collection(schema);
+
+      // Two complete flush cycles
+      for (let i = 0; i < PERSIST_EVERY; i++) await col.insert({ title: `doc-d-${i}` });
+      await col.embedUnembedded();
+      await col.awaitHnswFlush();
+      expect(await graphBinNodeCount(dir)).toBe(PERSIST_EVERY); // persisted = live
+
+      for (let i = PERSIST_EVERY; i < 2 * PERSIST_EVERY; i++) await col.insert({ title: `doc-d-${i}` });
+      await col.embedUnembedded();
+      await col.awaitHnswFlush();
+      expect(await graphBinNodeCount(dir)).toBe(2 * PERSIST_EVERY); // persisted = live
+
+      // Insert 7 more — below threshold, no flush
+      const EXTRA = 7;
+      for (let i = 2 * PERSIST_EVERY; i < 2 * PERSIST_EVERY + EXTRA; i++) {
+        await col.insert({ title: `doc-d-${i}` });
+      }
+      await col.embedUnembedded();
+
+      const persisted = await graphBinNodeCount(dir);
+      const live = col.getHnswIndex()!.size;
+      expect(persisted).toBe(2 * PERSIST_EVERY); // last flushed state
+      expect(live).toBe(2 * PERSIST_EVERY + EXTRA);
+      // Crash would lose at most EXTRA records, which is < persistEvery
+      expect(live - persisted!).toBeLessThanOrEqual(PERSIST_EVERY);
+
+      await db.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("12. async flush does not serialize the embed path (non-blocking)", async () => {
+    const dir1 = await makeTmpDir();
+    const dir2 = await makeTmpDir();
+    try {
+      const ITERS = 300;
+      const schema2 = defineSchema({
+        name: "sem",
+        fields: { title: { type: "string", searchable: true } },
+        storageMode: "disk",
+      });
+
+      // Baseline: no periodic flush
+      const db1 = await openDb(dir1);
+      const col1 = await db1.collection(schema2);
+      for (let i = 0; i < ITERS; i++) await col1.insert({ title: `doc-e-${i}` });
+      const t0 = Date.now();
+      await col1.embedUnembedded();
+      const baseMs = Date.now() - t0;
+      await db1.close();
+
+      // With periodic flush every 30 records (10 flushes during embed)
+      const db2 = await openDb(dir2, { persistEvery: 30 });
+      const col2 = await db2.collection(schema2);
+      for (let i = 0; i < ITERS; i++) await col2.insert({ title: `doc-e-${i}` });
+      const t1 = Date.now();
+      await col2.embedUnembedded();
+      const flushMs = Date.now() - t1;
+      await col2.awaitHnswFlush();
+      await db2.close();
+
+      // Flush is async: embed loop should not be serialized by flush I/O.
+      // Allow 3× baseline + 2s constant for CI variance.
+      expect(flushMs).toBeLessThan(baseMs * 3 + 2000);
+    } finally {
+      await rm(dir1, { recursive: true, force: true });
+      await rm(dir2, { recursive: true, force: true });
     }
   });
 });

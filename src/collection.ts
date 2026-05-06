@@ -170,7 +170,7 @@ export interface CollectionOptions {
   /** Number of incremental JSONL delta files before triggering a full merge (default: 8). Overrides AgentDBOptions.mergeJsonlThreshold for this collection. */
   mergeJsonlThreshold?: number;
   /** HNSW index parameters for approximate nearest neighbor search. Overrides AgentDBOptions.hnsw for this collection. */
-  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number };
+  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number; seed?: number; persistEvery?: number };
 }
 
 /** Change event emitted after mutations. */
@@ -243,6 +243,10 @@ export class Collection {
   private _filterCache!: FilterCacheHandle;
   // findTruncations counter — incremented each time find() hits the maxFindLimit cap.
   private _findTruncations = 0;
+  // HNSW periodic-flush: counts user-facing add() calls since last persist.
+  private _hnswPersistCounter = 0;
+  private _hnswFlushInProgress = false;
+  private _hnswFlushPromise: Promise<void> | null = null;
   // Write mode captured from open() options for metrics() reporting.
   private _writeMode: "immediate" | "group" | "async" = "immediate";
 
@@ -293,6 +297,39 @@ export class Collection {
       }
       this.hnswIdx.add(id, vec);
     }
+  }
+
+  /**
+   * Await any in-progress periodic HNSW flush. Resolves immediately when no flush is pending.
+   * Called by `close()` before the final persist to avoid a redundant concurrent write.
+   * Also exposed for tests to synchronize after triggering periodic flushes.
+   */
+  awaitHnswFlush(): Promise<void> {
+    return this._hnswFlushPromise ?? Promise.resolve();
+  }
+
+  /**
+   * Increment the periodic-persist counter and fire an async flush when the threshold is reached.
+   * Only fires in disk mode when `hnsw.persistEvery` is configured. If a flush is already
+   * in progress, the counter resets but the flush is skipped — the ongoing flush will write
+   * the current state before returning. Crash window = at most `persistEvery` un-persisted adds
+   * (or up to `2 × persistEvery` if a concurrent flush was in progress when the threshold fired).
+   */
+  private _tickHnswPersist(): void {
+    const threshold = this.opts.hnsw?.persistEvery;
+    if (!threshold) return;
+    if (++this._hnswPersistCounter < threshold) return;
+    this._hnswPersistCounter = 0;
+    if (this._hnswFlushInProgress) return;
+    this._hnswFlushInProgress = true;
+    this._hnswFlushPromise = this.persistHnsw()
+      .catch((err: unknown) => {
+        console.warn(`agentdb [${this.name}]: periodic HNSW flush failed: ${(err as Error).message}`);
+      })
+      .finally(() => {
+        this._hnswFlushInProgress = false;
+        this._hnswFlushPromise = null;
+      });
   }
 
   /**
@@ -998,6 +1035,8 @@ export class Collection {
       await this.textIdx.close();
       this.textIdx = null;
     }
+    // Wait for any in-progress periodic flush, then write the authoritative close-time snapshot.
+    await this.awaitHnswFlush();
     // Persist HNSW graph topology (disk mode only). Errors are logged, never thrown.
     await this.persistHnsw().catch((err: unknown) => {
       console.warn(`agentdb [${this.name}]: failed to persist HNSW graph: ${(err as Error).message}`);
@@ -2170,6 +2209,7 @@ export class Collection {
       for (let j = 0; j < batch.length; j++) {
         const { data, scale } = batchQ[j];
         this.hnswIdx.add(batch[j].id, Array.from(data).map((v: number) => v / scale));
+        this._tickHnswPersist();
       }
       embedded += batch.length;
     }
@@ -2221,6 +2261,7 @@ export class Collection {
         for (let j = 0; j < diskBatch.length; j++) {
           const { data, scale } = diskBatchQ[j];
           this.hnswIdx!.add(diskBatch[j].id, Array.from(data).map((v: number) => v / scale));
+          this._tickHnswPersist();
         }
         embedded += diskBatch.length;
         diskBatch.length = 0;
@@ -2299,6 +2340,7 @@ export class Collection {
       for (let j = 0; j < batch.length; j++) {
         const { data, scale } = reembedBatchQ[j];
         this.hnswIdx!.add(batch[j].id, Array.from(data).map((v: number) => v / scale));
+        this._tickHnswPersist();
       }
       embedded += batch.length;
       try { onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
@@ -2340,6 +2382,7 @@ export class Collection {
         for (let j = 0; j < diskBatch.length; j++) {
           const { data, scale } = reembedDiskBatchQ[j];
           this.hnswIdx!.add(diskBatch[j].id, Array.from(data).map((v: number) => v / scale));
+          this._tickHnswPersist();
         }
         embedded += diskBatch.length;
         diskBatch.length = 0;
@@ -2403,6 +2446,7 @@ export class Collection {
       try { this.hnswIdx.remove(id); } catch { /* not in index yet */ }
     }
     this.hnswIdx.add(id, vector);
+    this._tickHnswPersist();
     this.emitChange("upsert", [id]);
   }
 
