@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [2.1.1] - 2026-05-06
 
+### Added
+
+- **`scripts/bench-leak.mjs` — targeted memory-leak regression bench** — 12 scenarios covering the v2.1.1 leak fixes (HNSW orphans, MemoryMonitor on eviction, close() listeners, subscription pins) plus bounded-surface verifications (filter cache LRU, record cache LRU, audit ring buffer, MCP session cleanup, HNSW dedup on update, opslog WAL drain, termlog compaction, RateLimiter lazy sweep). Run via `npm run bench:leak` — deterministic, ~10s total, JSON output for CI parsing. Each scenario reports counter-based PASS/FAIL plus RSS/heap deltas for diagnostic visibility.
+
 ### Fixed
 
 - **Task 303 — MemoryMonitor stale entries on LRU eviction** — `AgentDB.evictLru()` was closing the collection and removing its listener but not removing it from the `MemoryMonitor`. Evicted collections therefore accumulated zero-byte phantom entries in `memoryStats().collections` for the process lifetime. Fixed by calling `this.memoryMonitor.remove(evict)` before closing, matching the cleanup already done in `dropCollection`. 1 new test: open 3 collections with `maxOpenCollections:2`, force eviction of the LRU, assert the evicted name is absent from `memoryStats().collections`. Test count: 1468 → 1469.
