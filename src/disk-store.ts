@@ -531,6 +531,87 @@ export class DiskStore {
     for (const { data } of array) {
       await this.backend.writeBlob(`indexes/array-${data.field}.json`, Buffer.from(JSON.stringify(data)));
     }
+    // Composite indexes — one file per composite (fields joined with "__" for safe filenames)
+    for (const data of indexManager.serializeCompositeIndexes()) {
+      const safeKey = data.fields.join("__");
+      await this.backend.writeBlob(
+        `indexes/composite-${safeKey}.json`,
+        Buffer.from(JSON.stringify({ version: 1, ...data })),
+      );
+    }
+    // Bloom filters — one file per field
+    for (const data of indexManager.serializeBloomFilters()) {
+      await this.backend.writeBlob(
+        `indexes/bloom-${data.field}.json`,
+        Buffer.from(JSON.stringify(data)),
+      );
+    }
+  }
+
+  /**
+   * Try to load a composite index from its persisted JSON file.
+   * Returns true if the file existed and was loaded successfully.
+   * Returns false (and logs a warning on version mismatch) so the caller falls back to
+   * the v2.1.1 O(N) disk scan.
+   */
+  async tryLoadCompositeIndex(indexManager: IndexManager, fields: string[]): Promise<boolean> {
+    const safeKey = fields.join("__");
+    try {
+      const content = await this.backend.readBlob(`indexes/composite-${safeKey}.json`);
+      const data = JSON.parse(content.toString("utf-8")) as { version: number; fields?: unknown; entries?: unknown };
+      // Guard against __ separator collision (e.g. field "foo__bar" vs fields ["foo","bar"]
+      // both produce the same filename). Validate stored fields match the requested fields
+      // exactly — if they don't, rebuild from disk rather than silently loading wrong data (B2).
+      if (!Array.isArray(data.fields) ||
+          data.fields.length !== fields.length ||
+          !(data.fields as unknown[]).every((f, i) => f === fields[i])) {
+        console.warn(
+          `agentdb: composite index field mismatch in indexes/composite-${safeKey}.json ` +
+          `(file: ${JSON.stringify(data.fields)}, requested: ${JSON.stringify(fields)}) — rebuilding from disk`,
+        );
+        return false;
+      }
+      // fields validated above — cast is safe
+      indexManager.loadCompositeIndex(
+        data as { version: number; fields: string[]; entries: Array<{ key: unknown; ids: string[] }> },
+      ); // throws on version mismatch
+      return true;
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("Unsupported composite")) {
+        console.warn(`agentdb: composite index version mismatch, rebuilding from disk: ${err.message}`);
+      } else if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        // File exists but couldn't be parsed or applied — log for diagnostics (B2 polish).
+        console.warn(
+          `agentdb: could not load composite index for [${fields.join(", ")}], rebuilding from disk: ${err}`,
+        );
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Try to load a bloom filter from its persisted JSON file.
+   * Returns true if the file existed and was loaded successfully.
+   * Returns false (and logs a warning on version mismatch) so the caller falls back to
+   * the v2.1.1 O(N) disk scan.
+   */
+  async tryLoadBloomFilter(indexManager: IndexManager, field: string): Promise<boolean> {
+    try {
+      const content = await this.backend.readBlob(`indexes/bloom-${field}.json`);
+      const data = JSON.parse(content.toString("utf-8"));
+      indexManager.loadBloomFilter(data); // throws on version mismatch
+      return true;
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("Unsupported BloomFilter")) {
+        console.warn(`agentdb: bloom filter version mismatch, rebuilding from disk: ${err.message}`);
+      } else if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        // File exists but couldn't be parsed or applied — log for diagnostics (B2 polish).
+        console.warn(
+          `agentdb: could not load bloom filter for field '${field}', rebuilding from disk: ${err}`,
+        );
+      }
+      return false;
+    }
   }
 
   /** Discover persisted index files for lazy loading. Actual deserialization deferred to first query. */

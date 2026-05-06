@@ -152,7 +152,8 @@ export class IndexManager {
 
   /** Update all indexes for a record change. Call after every insert/update/delete. */
   updateIndexes(id: string, oldRecord: StoredRecord | undefined, newRecord: StoredRecord | undefined): void {
-    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0 && this.arrayIndexes.size === 0) return;
+    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0 &&
+        this.arrayIndexes.size === 0 && this.bloomFilters.size === 0) return;
     const oldClean = oldRecord ? stripMeta(oldRecord) : undefined;
     const newClean = newRecord && !isExpired(newRecord) ? stripMeta(newRecord) : undefined;
     for (const [field, idx] of this.btreeIndexes) {
@@ -178,14 +179,24 @@ export class IndexManager {
       const newVal = newClean ? getNestedValue(newClean, field) : undefined;
       idx.update(id, oldVal, newVal);
     }
+    // Bloom filters: add new value only (bloom has no remove — stale entries cause false
+    // positives, not false negatives, so query correctness is preserved).
+    for (const [field, bf] of this.bloomFilters) {
+      if (newClean) {
+        const newVal = getNestedValue(newClean, field);
+        if (newVal !== undefined) bf.add(String(newVal));
+      }
+    }
   }
 
   /** Rebuild all indexes from scratch. Single pass over all records. */
   rebuildAll(entries: Iterable<[string, StoredRecord]>): void {
-    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0 && this.arrayIndexes.size === 0) return;
+    if (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0 &&
+        this.arrayIndexes.size === 0 && this.bloomFilters.size === 0) return;
     for (const [, idx] of this.btreeIndexes) idx.clear();
     for (const [, { idx }] of this.compositeIndexes) idx.clear();
     for (const [, idx] of this.arrayIndexes) idx.clear();
+    for (const [, bf] of this.bloomFilters) bf.clear();
     for (const [id, record] of entries) {
       if (isExpired(record)) continue;
       const clean = stripMeta(record);
@@ -198,6 +209,10 @@ export class IndexManager {
       }
       for (const [field, idx] of this.arrayIndexes) {
         idx.add(id, getNestedValue(clean, field));
+      }
+      for (const [field, bf] of this.bloomFilters) {
+        const value = getNestedValue(clean, field);
+        if (value !== undefined) bf.add(String(value));
       }
     }
   }
@@ -230,6 +245,13 @@ export class IndexManager {
           idx.add(id, getNestedValue(clean, field));
         }
       }
+      // Bloom: add new value (no remove — false positives from stale entries are safe).
+      for (const [field, bf] of this.bloomFilters) {
+        if (clean) {
+          const value = getNestedValue(clean, field);
+          if (value !== undefined) bf.add(String(value));
+        }
+      }
     }
     return cleanRecords;
   }
@@ -253,10 +275,20 @@ export class IndexManager {
 
   /**
    * Try to narrow candidates using indexes.
-   * Returns a Set of candidate IDs or null for full scan.
+   * Returns a Set of candidate IDs (possibly empty = short-circuit to no results) or null for full scan.
+   *
+   * Strategy (in order):
+   *   1. Composite index — most selective; covers multi-field equality.
+   *   2. Array index — for $contains predicates.
+   *   3. B-tree indexes — single/multi-field equality and range.
+   *   4. Bloom filter short-circuit — if a field's bloom says "definitely not present",
+   *      returns an empty Set to skip the full scan entirely. Only fires when no structural
+   *      index covered the filter (step 1–3 returned nothing).
+   *   5. null — full scan.
    */
   indexedCandidates(filter: Filter): Set<string> | null {
-    if (!filter || (this.btreeIndexes.size === 0 && this.compositeIndexes.size === 0 && this.arrayIndexes.size === 0)) return null;
+    const hasStructuralIndexes = this.btreeIndexes.size > 0 || this.compositeIndexes.size > 0 || this.arrayIndexes.size > 0;
+    if (!filter || (!hasStructuralIndexes && this.bloomFilters.size === 0)) return null;
 
     let filterObj: Record<string, unknown>;
     if (typeof filter === "string") {
@@ -265,71 +297,113 @@ export class IndexManager {
       filterObj = filter;
     }
 
-    // Try composite indexes first (more selective)
-    const compositeResult = this.compositeIndexedCandidates(filterObj);
-    if (compositeResult) return compositeResult;
+    if (hasStructuralIndexes) {
+      // Try composite indexes first (more selective)
+      const compositeResult = this.compositeIndexedCandidates(filterObj);
+      if (compositeResult) return compositeResult;
 
-    // Check array indexes for $contains
+      // Check array indexes for $contains
+      for (const [key, value] of Object.entries(filterObj)) {
+        if (key.startsWith("$") || key.startsWith("+")) continue;
+        const arrIdx = this.arrayIndexes.get(key);
+        if (!arrIdx) continue;
+        if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+          const ops = value as Record<string, unknown>;
+          if ("$contains" in ops) {
+            return new Set(arrIdx.lookup(String(ops.$contains)));
+          }
+        }
+      }
+
+      // Collect candidates from ALL matching single-field indexes, then intersect
+      const candidateSets: Set<string>[] = [];
+
+      for (const [key, value] of Object.entries(filterObj)) {
+        if (key.startsWith("$") || key.startsWith("+")) continue;
+        const idx = this.btreeIndexes.get(key);
+        if (!idx) continue;
+
+        let candidates: Set<string> | null = null;
+
+        if (value === null || typeof value !== "object") {
+          candidates = idx.eq(value);
+        } else if (!Array.isArray(value)) {
+          const ops = value as Record<string, unknown>;
+          const opKeys = Object.keys(ops);
+          if (opKeys.length === 0 || !opKeys.every((k) => k === "$gt" || k === "$gte" || k === "$lt" || k === "$lte")) continue;
+
+          const hasGt = "$gt" in ops;
+          const hasGte = "$gte" in ops;
+          const hasLt = "$lt" in ops;
+          const hasLte = "$lte" in ops;
+
+          if ((hasGt || hasGte) && (hasLt || hasLte)) {
+            candidates = idx.range(hasGt ? ops.$gt : ops.$gte, hasLt ? ops.$lt : ops.$lte);
+            if (hasGt) { for (const id of idx.eq(ops.$gt)) candidates.delete(id); }
+            if (hasLt) { for (const id of idx.eq(ops.$lt)) candidates.delete(id); }
+          } else if (hasGt) candidates = idx.gt(ops.$gt);
+          else if (hasGte) candidates = idx.gte(ops.$gte);
+          else if (hasLt) candidates = idx.lt(ops.$lt);
+          else if (hasLte) candidates = idx.lte(ops.$lte);
+        }
+
+        if (candidates) candidateSets.push(candidates);
+      }
+
+      if (candidateSets.length > 0) {
+        if (candidateSets.length === 1) return candidateSets[0];
+        // Intersect all candidate sets — start with smallest for efficiency
+        candidateSets.sort((a, b) => a.size - b.size);
+        const result = new Set(candidateSets[0]);
+        for (let i = 1; i < candidateSets.length; i++) {
+          for (const id of result) {
+            if (!candidateSets[i].has(id)) result.delete(id);
+          }
+          if (result.size === 0) return result;
+        }
+        return result;
+      }
+    }
+
+    // No structural index matched — check bloom filters for equality-predicate short-circuit.
+    // Returns an empty Set (definitely absent) or null (fall through to full scan).
+    if (this.bloomFilters.size > 0) {
+      return this.bloomShortCircuit(filterObj);
+    }
+
+    return null;
+  }
+
+  /**
+   * Check bloom filters for top-level equality predicates that can definitively short-circuit.
+   * Returns an empty Set if any field's bloom filter says "definitely not present".
+   * Returns null (fall through to full scan) if no bloom filter can reject.
+   *
+   * Eligible predicates: implicit $eq (primitive value), explicit $eq, $in (all-absent only).
+   * False positives (bloom says maybe but record absent) fall through to scan — correct by design.
+   */
+  private bloomShortCircuit(filterObj: Record<string, unknown>): Set<string> | null {
     for (const [key, value] of Object.entries(filterObj)) {
       if (key.startsWith("$") || key.startsWith("+")) continue;
-      const arrIdx = this.arrayIndexes.get(key);
-      if (!arrIdx) continue;
-      if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      const bf = this.bloomFilters.get(key);
+      if (!bf) continue;
+
+      if (value === null || typeof value !== "object") {
+        // Implicit $eq: { field: primitiveValue }
+        if (!bf.has(String(value))) return new Set();
+      } else if (!Array.isArray(value)) {
         const ops = value as Record<string, unknown>;
-        if ("$contains" in ops) {
-          return new Set(arrIdx.lookup(String(ops.$contains)));
+        if ("$eq" in ops) {
+          // Explicit $eq: { field: { $eq: value } }
+          if (!bf.has(String(ops.$eq))) return new Set();
+        } else if ("$in" in ops && Array.isArray(ops.$in) && (ops.$in as unknown[]).length > 0) {
+          // $in: short-circuit only if ALL values are definitely absent
+          const vals = ops.$in as unknown[];
+          if (vals.every((v) => !bf.has(String(v)))) return new Set();
         }
       }
     }
-
-    // Collect candidates from ALL matching single-field indexes, then intersect
-    const candidateSets: Set<string>[] = [];
-
-    for (const [key, value] of Object.entries(filterObj)) {
-      if (key.startsWith("$") || key.startsWith("+")) continue;
-      const idx = this.btreeIndexes.get(key);
-      if (!idx) continue;
-
-      let candidates: Set<string> | null = null;
-
-      if (value === null || typeof value !== "object") {
-        candidates = idx.eq(value);
-      } else if (!Array.isArray(value)) {
-        const ops = value as Record<string, unknown>;
-        const opKeys = Object.keys(ops);
-        if (opKeys.length === 0 || !opKeys.every((k) => k === "$gt" || k === "$gte" || k === "$lt" || k === "$lte")) continue;
-
-        const hasGt = "$gt" in ops;
-        const hasGte = "$gte" in ops;
-        const hasLt = "$lt" in ops;
-        const hasLte = "$lte" in ops;
-
-        if ((hasGt || hasGte) && (hasLt || hasLte)) {
-          candidates = idx.range(hasGt ? ops.$gt : ops.$gte, hasLt ? ops.$lt : ops.$lte);
-          if (hasGt) { for (const id of idx.eq(ops.$gt)) candidates.delete(id); }
-          if (hasLt) { for (const id of idx.eq(ops.$lt)) candidates.delete(id); }
-        } else if (hasGt) candidates = idx.gt(ops.$gt);
-        else if (hasGte) candidates = idx.gte(ops.$gte);
-        else if (hasLt) candidates = idx.lt(ops.$lt);
-        else if (hasLte) candidates = idx.lte(ops.$lte);
-      }
-
-      if (candidates) candidateSets.push(candidates);
-    }
-
-    if (candidateSets.length === 0) return null;
-    if (candidateSets.length === 1) return candidateSets[0];
-
-    // Intersect all candidate sets — start with smallest for efficiency
-    candidateSets.sort((a, b) => a.size - b.size);
-    const result = new Set(candidateSets[0]);
-    for (let i = 1; i < candidateSets.length; i++) {
-      for (const id of result) {
-        if (!candidateSets[i].has(id)) result.delete(id);
-      }
-      if (result.size === 0) return result;
-    }
-    return result;
+    return null;
   }
 
   /** Check if a filter is fully covered by indexes (all fields have indexes). */
@@ -417,5 +491,38 @@ export class IndexManager {
   /** Load array index from serialized data. */
   loadArrayIndex(data: ReturnType<ArrayIndex["toJSON"]>): void {
     this.arrayIndexes.set(data.field, ArrayIndex.fromJSON(data));
+  }
+
+  /** Serialize all composite indexes for disk persistence. */
+  serializeCompositeIndexes(): Array<{ fields: string[]; entries: Array<{ key: unknown; ids: string[] }> }> {
+    return [...this.compositeIndexes.values()].map(({ fields, idx }) => ({
+      fields,
+      entries: idx.toJSON().entries,
+    }));
+  }
+
+  /** Serialize all bloom filters for disk persistence. */
+  serializeBloomFilters(): Array<ReturnType<BloomFilter["toJSON"]>> {
+    return [...this.bloomFilters.entries()].map(([field, bf]) => bf.toJSON(field));
+  }
+
+  /**
+   * Load a composite index from serialized JSON (fast path — skips O(N) disk scan).
+   * Replaces the empty index shell created by createCompositeIndex with persisted data.
+   */
+  loadCompositeIndex(data: { version: number; fields: string[]; entries: Array<{ key: unknown; ids: string[] }> }): void {
+    if (data.version !== 1) throw new Error(`Unsupported composite index version ${data.version}`);
+    const { fields, entries } = data;
+    const key = compositeIndexKey(fields);
+    const idx = BTreeIndex.fromJSON({ field: key, entries });
+    this.compositeIndexes.set(key, { fields, idx });
+  }
+
+  /**
+   * Load a bloom filter from serialized JSON (fast path — skips O(N) disk scan).
+   * Replaces the empty filter created by createBloomFilter with persisted data.
+   */
+  loadBloomFilter(data: ReturnType<BloomFilter["toJSON"]>): void {
+    this.bloomFilters.set(data.field, BloomFilter.fromJSON(data));
   }
 }

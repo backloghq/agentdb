@@ -340,3 +340,86 @@ describe("Task 311 — HNSW determinism via seeded PRNG", () => {
     expect(results[0].id).toBe("x");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 317 — efSearch recall differential
+// ---------------------------------------------------------------------------
+
+describe("Task 317 — efSearch recall differential", () => {
+  it("efSearch=5 has measurably worse recall@10 than efSearch=200 on a sparse graph", () => {
+    // 1000 random normalized vectors in 32D. Graph built with efConstruction=10
+    // (sparse — low-quality neighbor connections). Ground truth by exact cosine search.
+    // efSearch=5 → beam width max(5,10)=10; efSearch=200 → beam width 200.
+    // Sparse graph means beam width matters: narrow beam misses true neighbors, wide beam finds them.
+    // Recall differential must be ≥ 10pp (0.10).
+    const DIMS = 32;
+    const N_VECS = 1000;
+    const N_QUERIES = 50;
+    const K = 10;
+    const SEED = 42;
+
+    // mulberry32 PRNG — same algorithm as hnsw.ts so inserts are reproducible
+    let s = SEED;
+    const rng = (): number => {
+      s = (s + 0x6D2B79F5) | 0;
+      let t = Math.imul(s ^ (s >>> 15), 1 | s);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+
+    const normalize = (v: number[]): number[] => {
+      const n = Math.sqrt(v.reduce((a, x) => a + x * x, 0)) || 1;
+      return v.map((x) => x / n);
+    };
+
+    // 1000 random normalized vectors (dataset)
+    const allVecs: Array<{ id: string; vec: number[] }> = Array.from({ length: N_VECS }, (_, i) =>
+      ({ id: `v${i}`, vec: normalize(Array.from({ length: DIMS }, () => rng() * 2 - 1)) }),
+    );
+
+    // 50 query vectors (disjoint from dataset — generated after dataset)
+    const queries: number[][] = Array.from({ length: N_QUERIES }, () =>
+      normalize(Array.from({ length: DIMS }, () => rng() * 2 - 1)),
+    );
+
+    const cosine = (a: number[], b: number[]): number =>
+      a.reduce((sum, x, i) => sum + x * b[i], 0);
+
+    // Ground truth: exact top-K per query
+    const groundTruth: Set<string>[] = queries.map((q) => {
+      const scored = allVecs.map((v) => ({ id: v.id, sim: cosine(q, v.vec) }));
+      scored.sort((a, b) => b.sim - a.sim);
+      return new Set(scored.slice(0, K).map((x) => x.id));
+    });
+
+    // Build HNSW with efConstruction=10 (sparse graph) and seed for determinism.
+    // Both indexes use the same construction parameters so topology is identical.
+    const buildIdx = (efSearch: number): HnswIndex =>
+      new HnswIndex({ dimensions: DIMS, M: 8, efConstruction: 10, efSearch, seed: SEED });
+
+    const idxLow  = buildIdx(5);   // efSearch=5  → beam width max(5,10)=10
+    const idxHigh = buildIdx(200); // efSearch=200 → beam width 200
+    for (const { id, vec } of allVecs) {
+      idxLow.add(id, vec);
+      idxHigh.add(id, vec);
+    }
+
+    // Average recall@K across all queries
+    let recallLow = 0;
+    let recallHigh = 0;
+    for (let qi = 0; qi < N_QUERIES; qi++) {
+      const gt = groundTruth[qi];
+      const lowHits  = idxLow.search(queries[qi], K).filter((r) => gt.has(r.id)).length;
+      const highHits = idxHigh.search(queries[qi], K).filter((r) => gt.has(r.id)).length;
+      recallLow  += lowHits  / K;
+      recallHigh += highHits / K;
+    }
+    recallLow  /= N_QUERIES;
+    recallHigh /= N_QUERIES;
+
+    // High efSearch must produce meaningfully better recall (≥10pp gap, seed-deterministic)
+    expect(recallHigh).toBeGreaterThan(recallLow + 0.10);
+    // High efSearch should produce good absolute recall on a sparse graph (≥50%)
+    expect(recallHigh).toBeGreaterThanOrEqual(0.50);
+  });
+});

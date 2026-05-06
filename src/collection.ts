@@ -170,7 +170,7 @@ export interface CollectionOptions {
   /** Number of incremental JSONL delta files before triggering a full merge (default: 8). Overrides AgentDBOptions.mergeJsonlThreshold for this collection. */
   mergeJsonlThreshold?: number;
   /** HNSW index parameters for approximate nearest neighbor search. Overrides AgentDBOptions.hnsw for this collection. */
-  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number };
+  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number; seed?: number; persistEvery?: number; persistTimeoutMs?: number };
 }
 
 /** Change event emitted after mutations. */
@@ -243,6 +243,10 @@ export class Collection {
   private _filterCache!: FilterCacheHandle;
   // findTruncations counter — incremented each time find() hits the maxFindLimit cap.
   private _findTruncations = 0;
+  // HNSW periodic-flush: counts user-facing add() calls since last persist.
+  private _hnswPersistCounter = 0;
+  private _hnswFlushInProgress = false;
+  private _hnswFlushPromise: Promise<void> | null = null;
   // Write mode captured from open() options for metrics() reporting.
   private _writeMode: "immediate" | "group" | "async" = "immediate";
 
@@ -296,18 +300,67 @@ export class Collection {
   }
 
   /**
+   * Await any in-progress periodic HNSW flush. Resolves when the flush completes or when
+   * `timeoutMs` elapses, whichever comes first. If `timeoutMs` is omitted, falls back to
+   * `hnsw.persistTimeoutMs` from collection options. With no timeout configured, waits
+   * indefinitely. When the timeout fires the flush continues in the background — the next
+   * `close()` will still write a correct authoritative snapshot.
+   *
+   * Called by `close()` before the final persist to avoid a redundant concurrent write.
+   * Also exposed for tests to synchronize after triggering periodic flushes.
+   *
+   * @internal
+   */
+  awaitHnswFlush(timeoutMs?: number): Promise<void> {
+    const flush = this._hnswFlushPromise;
+    if (!flush) return Promise.resolve();
+    const timeout = timeoutMs ?? this.opts.hnsw?.persistTimeoutMs;
+    if (!timeout) return flush;
+    return Promise.race([
+      flush,
+      new Promise<void>((resolve) => setTimeout(resolve, timeout)),
+    ]);
+  }
+
+  /**
+   * Increment the periodic-persist counter and fire an async flush when the threshold is reached.
+   * Only fires in disk mode when `hnsw.persistEvery` is configured. If a flush is already
+   * in progress, the counter resets but the flush is skipped — the ongoing flush will write
+   * the current state before returning. Crash window = at most `persistEvery` un-persisted adds
+   * (or up to `2 × persistEvery` if a concurrent flush was in progress when the threshold fired).
+   */
+  private _tickHnswPersist(): void {
+    const threshold = this.opts.hnsw?.persistEvery;
+    if (!threshold) return;
+    if (++this._hnswPersistCounter < threshold) return;
+    this._hnswPersistCounter = 0;
+    if (this._hnswFlushInProgress) return;
+    this._hnswFlushInProgress = true;
+    this._hnswFlushPromise = this.persistHnsw()
+      .catch((err: unknown) => {
+        console.warn(`agentdb [${this.name}]: periodic HNSW flush failed: ${(err as Error).message}`);
+      })
+      .finally(() => {
+        this._hnswFlushInProgress = false;
+        this._hnswFlushPromise = null;
+      });
+  }
+
+  /**
    * Persist the HNSW graph topology to `<dir>/hnsw/graph.bin` using an atomic rename dance.
    * Only runs in disk mode (requires `_diskStore` and a populated `hnswIdx`).
    * Errors are logged as warnings — persistence failure never throws to the caller.
    */
   private async persistHnsw(): Promise<void> {
     if (!this.hnswIdx || this.hnswIdx.size === 0 || !this._dir || !this._diskStore) return;
+    // Capture topology synchronously before the first await so that concurrent hnswIdx.add()
+    // calls that run during async I/O cannot produce a torn snapshot (H1).
+    const buf = this.hnswIdx.toBuffer();
     const hnswDir = pathJoin(this._dir, "hnsw");
     await mkdir(hnswDir, { recursive: true });
     const graphBin = pathJoin(hnswDir, "graph.bin");
     const graphBinNew = pathJoin(hnswDir, "graph.bin.new");
     const graphBinOld = pathJoin(hnswDir, "graph.bin.old");
-    const buf = this.hnswIdx.toBuffer();
     await writeFile(graphBinNew, buf);
     // Atomic swap: old → .old, new → canon, rm .old
     try { await fsRename(graphBin, graphBinOld); } catch { /* no existing graph.bin */ }
@@ -998,6 +1051,11 @@ export class Collection {
       await this.textIdx.close();
       this.textIdx = null;
     }
+    // Wait for any in-progress periodic flush, then write the authoritative close-time snapshot.
+    // Use _hnswFlushPromise directly (not awaitHnswFlush) so that a configured persistTimeoutMs
+    // is never applied here: at close time we must wait for the orphan flush to complete before
+    // calling persistHnsw(), otherwise both share graph.bin.new and can collide (B-NEW).
+    await this._hnswFlushPromise;
     // Persist HNSW graph topology (disk mode only). Errors are logged, never thrown.
     await this.persistHnsw().catch((err: unknown) => {
       console.warn(`agentdb [${this.name}]: failed to persist HNSW graph: ${(err as Error).message}`);
@@ -2069,11 +2127,28 @@ export class Collection {
   dropIndex(field: string): boolean { return this.indexes.dropIndex(field); }
   listIndexes(): string[] { return this.indexes.listIndexes(); }
   async createCompositeIndex(fields: string[]): Promise<void> {
-    this.indexes.createCompositeIndex(fields, this.store.entries());
-    // In disk mode the in-memory store is empty (skipLoad: true). Backfill the index from
-    // Parquet/JSONL so composite-field queries can use the index rather than returning zero results.
     if (this._diskStore) {
-      await this.indexes.populateCompositeIndexFromDisk(fields, this._diskStore.entries({ skipCache: true }));
+      // Snapshot WAL before any async work — store.entries() includes in-session inserts/deletes (B1).
+      const walEntries = [...this.store.entries()] as Array<[string, StoredRecord]>;
+      // Fast path: load from persisted JSON written on last close.
+      const loaded = await this._diskStore.tryLoadCompositeIndex(this.indexes, fields);
+      if (loaded) {
+        // Historical records loaded from JSON. Merge in-session WAL on top so that inserts
+        // made in the current session before this call are reflected immediately.
+        if (walEntries.length > 0) {
+          await this.indexes.populateCompositeIndexFromDisk(
+            fields,
+            (async function* () { for (const e of walEntries) yield e; })(),
+          );
+        }
+      } else {
+        // v2.1.1 fallback (absent file or version mismatch): build shell from WAL then
+        // backfill from full disk scan (Parquet + JSONL).
+        this.indexes.createCompositeIndex(fields, walEntries);
+        await this.indexes.populateCompositeIndexFromDisk(fields, this._diskStore.entries({ skipCache: true }));
+      }
+    } else {
+      this.indexes.createCompositeIndex(fields, this.store.entries());
     }
   }
   dropCompositeIndex(fields: string[]): boolean { return this.indexes.dropCompositeIndex(fields); }
@@ -2082,11 +2157,26 @@ export class Collection {
   dropArrayIndex(field: string): boolean { return this.indexes.dropArrayIndex(field); }
   listArrayIndexes(): string[] { return this.indexes.listArrayIndexes(); }
   async createBloomFilter(field: string, expectedItems = 10000): Promise<void> {
-    this.indexes.createBloomFilter(field, this.store.entries(), expectedItems);
-    // In disk mode the in-memory store is empty. Backfill so the bloom filter reflects
-    // all persisted records, not just the empty in-memory store.
     if (this._diskStore) {
-      await this.indexes.populateBloomFilterFromDisk(field, this._diskStore.entries({ skipCache: true }));
+      // Snapshot WAL before any async work — store.entries() includes in-session inserts/deletes (B1).
+      const walEntries = [...this.store.entries()] as Array<[string, StoredRecord]>;
+      // Fast path: load from persisted JSON written on last close.
+      const loaded = await this._diskStore.tryLoadBloomFilter(this.indexes, field);
+      if (loaded) {
+        // Historical bits loaded from JSON. Merge in-session WAL on top.
+        if (walEntries.length > 0) {
+          await this.indexes.populateBloomFilterFromDisk(
+            field,
+            (async function* () { for (const e of walEntries) yield e; })(),
+          );
+        }
+      } else {
+        // v2.1.1 fallback: build fresh filter from WAL then seed from full disk scan.
+        this.indexes.createBloomFilter(field, walEntries, expectedItems);
+        await this.indexes.populateBloomFilterFromDisk(field, this._diskStore.entries({ skipCache: true }));
+      }
+    } else {
+      this.indexes.createBloomFilter(field, this.store.entries(), expectedItems);
     }
   }
   mightHave(field: string, value: string): boolean { return this.indexes.mightHave(field, value); }
@@ -2170,6 +2260,7 @@ export class Collection {
       for (let j = 0; j < batch.length; j++) {
         const { data, scale } = batchQ[j];
         this.hnswIdx.add(batch[j].id, Array.from(data).map((v: number) => v / scale));
+        this._tickHnswPersist();
       }
       embedded += batch.length;
     }
@@ -2221,6 +2312,7 @@ export class Collection {
         for (let j = 0; j < diskBatch.length; j++) {
           const { data, scale } = diskBatchQ[j];
           this.hnswIdx!.add(diskBatch[j].id, Array.from(data).map((v: number) => v / scale));
+          this._tickHnswPersist();
         }
         embedded += diskBatch.length;
         diskBatch.length = 0;
@@ -2299,6 +2391,7 @@ export class Collection {
       for (let j = 0; j < batch.length; j++) {
         const { data, scale } = reembedBatchQ[j];
         this.hnswIdx!.add(batch[j].id, Array.from(data).map((v: number) => v / scale));
+        this._tickHnswPersist();
       }
       embedded += batch.length;
       try { onProgress?.({ completed: embedded + failed, total: walTotal, phase: "wal" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
@@ -2340,6 +2433,7 @@ export class Collection {
         for (let j = 0; j < diskBatch.length; j++) {
           const { data, scale } = reembedDiskBatchQ[j];
           this.hnswIdx!.add(diskBatch[j].id, Array.from(data).map((v: number) => v / scale));
+          this._tickHnswPersist();
         }
         embedded += diskBatch.length;
         diskBatch.length = 0;
@@ -2403,6 +2497,7 @@ export class Collection {
       try { this.hnswIdx.remove(id); } catch { /* not in index yet */ }
     }
     this.hnswIdx.add(id, vector);
+    this._tickHnswPersist();
     this.emitChange("upsert", [id]);
   }
 

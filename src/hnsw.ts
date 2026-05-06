@@ -70,6 +70,25 @@ export interface HnswOptions {
    * both a fixed seed AND a deterministic insert sequence.
    */
   seed?: number;
+  /**
+   * Persist the full HNSW graph every N additions. When set, Collection performs an async
+   * full-graph flush to `hnsw/graph.bin` after every `persistEvery` calls to `add()` from
+   * user-facing embedding paths. Bounds crash exposure to at most `persistEvery` un-persisted
+   * records. Default `undefined` — flush only on `close()` (v2.1.1 behavior).
+   *
+   * Trade-off: write amplification. Each flush rewrites the ENTIRE graph. At 1M nodes with
+   * `persistEvery=1000`, a 1k-record batch causes 1k full-graph rewrites; set higher for large
+   * graphs (e.g. `persistEvery: 100_000`) to amortize cost. Leave unset for batch ingest where
+   * a single final `close()` is sufficient.
+   */
+  persistEvery?: number;
+  /**
+   * Maximum milliseconds to wait for a periodic HNSW flush before `awaitHnswFlush()` resolves
+   * anyway. When the timeout fires, the flush continues in the background — the next `close()`
+   * or `awaitHnswFlush()` call will observe the completed state. Unset = wait indefinitely
+   * (default, v2.1.1 behavior). Useful in time-sensitive paths that must not block on I/O.
+   */
+  persistTimeoutMs?: number;
 }
 
 interface HnswNode {

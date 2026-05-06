@@ -78,8 +78,8 @@ export interface AgentDBOptions {
   mergeParquetThreshold?: number;
   /** Number of incremental JSONL delta files before triggering a full merge (default: 8). Per-collection override via CollectionOptions.mergeJsonlThreshold. */
   mergeJsonlThreshold?: number;
-  /** HNSW index parameters (M, efConstruction, efSearch, maxLevel). Applied to all collections as a default. Per-collection override via CollectionOptions.hnsw. */
-  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number };
+  /** HNSW index parameters (M, efConstruction, efSearch, maxLevel, seed, persistEvery). Applied to all collections as a default. Per-collection override via CollectionOptions.hnsw. */
+  hnsw?: { M?: number; efConstruction?: number; efSearch?: number; maxLevel?: number; seed?: number; persistEvery?: number; persistTimeoutMs?: number };
   /**
    * Per-collection option overrides, keyed by collection name.
    *
@@ -497,8 +497,28 @@ export class AgentDB {
       // If no Parquet data yet, do initial compaction from snapshot
       if (!diskStore.hasParquetData) {
         const recordMap = new Map<string, Record<string, unknown>>();
-        for await (const [id, record] of store.streamSnapshot()) {
-          recordMap.set(id, record);
+        // opslog's streamSnapshot() reads the snapshot from the local filesystem regardless of
+        // the configured storage backend (opslog bug: streamSnapshotFile hardcodes FS reads).
+        // With S3Backend, the snapshot lives in S3 and the local path doesn't exist → ENOENT.
+        //
+        // Safety: in disk mode the store is always opened with skipLoad:true +
+        // checkpointOnClose:false, so opslog never writes a compacted snapshot after the initial
+        // empty Map created by initFreshStore(). The snapshot is therefore always empty in disk
+        // mode — all records arrive via getWalOps() below, which routes through the backend and
+        // is S3-aware. Catching ENOENT here preserves the empty-map semantics for S3 without
+        // changing FS behavior (FS never throws ENOENT here because the snapshot is on local FS).
+        //
+        // Caveat: a memory→disk migration on S3 backend where the opslog snapshot has compacted
+        // records would silently drop those records here. That path was already broken (ENOENT)
+        // before this catch; it is not made worse. Proper fix: opslog should route streamSnapshot
+        // through backend.loadSnapshot() for non-FS backends (tracked in agentdb-v2-3 backlog).
+        try {
+          for await (const [id, record] of store.streamSnapshot()) {
+            recordMap.set(id, record);
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          // Expected with S3 backend — snapshot is in S3, not local FS. Proceed with empty map.
         }
         // Apply WAL ops on top of snapshot — O(1) per op via Map
         for await (const op of store.getWalOps()) {

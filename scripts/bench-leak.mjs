@@ -18,6 +18,8 @@
  *   K. termlog segment count drops after compaction
  *   L. RateLimiter per-IP map behaviour
  *   M. bm25DocCount stable after same-session bm25Search (fix 310)
+ *   N. bloom mightHave() micro-bench: cold throughput + warm inlining (task 314)
+ *   O. HNSW persistEvery: embedUnembedded() time with vs without periodic flush (task 318)
  *
  * Each scenario records:
  *   - a deterministic counter (hnswNodeCount, monitor map size, listenerCount,
@@ -582,6 +584,120 @@ async function benchBm25CountSameSession() {
   return { N, phase1AfterSearch: phase1Count, phase2AfterReopen: phase2Count, pass };
 }
 
+// ---------- N. Bloom mightHave micro-benchmark (task 314) ----------------
+// Measures throughput and per-call latency for bloom filter existence checks.
+// Pass criteria: cold throughput >= 500K ops/sec (2µs/op average).
+// False-positive count measured as a sanity check (not a pass criterion).
+
+async function benchBloomMightHave() {
+  const { BloomFilter } = await import("../dist/bloom.js");
+
+  const N_ITEMS = 100_000;   // items seeded into the filter
+  const N_COLD  = 1_000_000; // probes for non-present values (cold throughput)
+  const N_WARM  = 100_000;   // repeated single-probe loop (V8 inlining / branch-prediction test)
+
+  // Seed the bloom filter
+  const bf = new BloomFilter(N_ITEMS);
+  for (let i = 0; i < N_ITEMS; i++) bf.add(`item-${i}`);
+
+  // Cold probes: 1M distinct values not in the filter.
+  const coldStart = performance.now();
+  let coldFp = 0;
+  for (let i = 0; i < N_COLD; i++) {
+    if (bf.has(`cold-probe-${i}`)) coldFp++;
+  }
+  const coldMs = performance.now() - coldStart;
+  const coldOpsPerSec = Math.round(N_COLD / (coldMs / 1000));
+  const coldAvgUs = +(coldMs * 1000 / N_COLD).toFixed(3);
+
+  // Warm probes: same value repeated — lets V8 inline and predict the branch.
+  const warmStart = performance.now();
+  let warmHits = 0;
+  for (let i = 0; i < N_WARM; i++) {
+    if (bf.has("warm-probe-fixed")) warmHits++;
+  }
+  const warmMs = performance.now() - warmStart;
+  const warmOpsPerSec = Math.round(N_WARM / (warmMs / 1000));
+
+  // Presence check: seeded values must all return true.
+  let seedMisses = 0;
+  for (let i = 0; i < 1000; i++) {
+    if (!bf.has(`item-${i}`)) seedMisses++;
+  }
+
+  const MIN_THROUGHPUT = 500_000; // 500K ops/sec = 2µs/op
+  const pass = coldOpsPerSec >= MIN_THROUGHPUT && seedMisses === 0;
+  console.log(`[N Bloom mightHave] cold: ${(coldOpsPerSec / 1e6).toFixed(2)}M ops/sec (${coldAvgUs}µs/op, ${coldFp} FP/${N_COLD}); warm: ${(warmOpsPerSec / 1e6).toFixed(2)}M ops/sec; seedMisses=${seedMisses} pass=${pass}`);
+  return { coldOpsPerSec, coldAvgUs, coldFalsePositives: coldFp, warmOpsPerSec, seedMisses, pass };
+}
+
+async function benchHnswPersistEvery() {
+  // Scenario O: HNSW periodic-flush overhead (task 318).
+  // Measures embedUnembedded() time with vs without persistEvery.
+  // Pass criterion: ratio < 3x (flush is async, should not serialize embed loop).
+  const { defineSchema } = await import("../dist/schema.js");
+
+  /** Minimal 8-dim deterministic embedding provider. */
+  const hashProv = {
+    dimensions: 8,
+    async embed(texts) {
+      return texts.map((t) => {
+        let h = 5381;
+        for (let i = 0; i < t.length; i++) h = (Math.imul(h, 33) ^ t.charCodeAt(i)) >>> 0;
+        let s = h || 1;
+        const v = Array.from({ length: 8 }, () => {
+          s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+          return (s >>> 0) / 0x100000000 * 2 - 1;
+        });
+        const norm = Math.sqrt(v.reduce((a, x) => a + x * x, 0)) || 1;
+        return v.map((x) => x / norm);
+      });
+    },
+  };
+
+  const schema = defineSchema({
+    name: "bench-o",
+    fields: { title: { type: "string", searchable: true } },
+    storageMode: "disk",
+  });
+
+  const N = 1000;
+  const PERSIST_EVERY = 100; // 10 flushes during embed
+
+  // Baseline: no periodic flush
+  const dir1 = await mkdtemp(join(tmpdir(), "agentdb-bench-o-base-"));
+  const db1 = new AgentDB(dir1, { embeddings: { provider: hashProv } });
+  await db1.init();
+  const col1 = await db1.collection(schema);
+  for (let i = 0; i < N; i++) await col1.insert({ title: `bench-o-base-${i}` });
+  const t0 = performance.now();
+  await col1.embedUnembedded();
+  const baseMs = performance.now() - t0;
+  await db1.close();
+  await rm(dir1, { recursive: true, force: true });
+
+  // With periodic flush
+  const dir2 = await mkdtemp(join(tmpdir(), "agentdb-bench-o-flush-"));
+  const db2 = new AgentDB(dir2, {
+    embeddings: { provider: hashProv },
+    hnsw: { persistEvery: PERSIST_EVERY },
+  });
+  await db2.init();
+  const col2 = await db2.collection(schema);
+  for (let i = 0; i < N; i++) await col2.insert({ title: `bench-o-flush-${i}` });
+  const t1 = performance.now();
+  await col2.embedUnembedded();
+  const flushMs = performance.now() - t1;
+  await col2.awaitHnswFlush();
+  await db2.close();
+  await rm(dir2, { recursive: true, force: true });
+
+  const ratio = +(flushMs / baseMs).toFixed(2);
+  const pass = ratio < 3;
+  console.log(`[O HNSW persistEvery] base=${baseMs.toFixed(1)}ms flush=${flushMs.toFixed(1)}ms ratio=${ratio}x pass=${pass}`);
+  return { baseMs: +baseMs.toFixed(1), flushMs: +flushMs.toFixed(1), ratio, pass };
+}
+
 // ---------- main ----------------------------------------------------------
 
 async function main() {
@@ -604,8 +720,10 @@ async function main() {
   const k = await benchTermlogCompaction();
   const l = await benchRateLimiterMap();
   const m = await benchBm25CountSameSession();
+  const n = await benchBloomMightHave();
+  const o = await benchHnswPersistEvery();
 
-  const out = { a, b, c, d, e, f, g, h, i, j, k, l, m };
+  const out = { a, b, c, d, e, f, g, h, i, j, k, l, m, n, o };
   console.log("\n# JSON RESULT:\n" + JSON.stringify(out));
 
   // Aggregate pass criteria. A-D don't carry an explicit `pass` field; derive from
@@ -624,6 +742,8 @@ async function main() {
     k: k.pass,
     l: l.lazyReaps,
     m: m.pass,
+    n: n.pass,
+    o: o.pass,
   };
   const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([id]) => id.toUpperCase());
   if (failed.length > 0) {

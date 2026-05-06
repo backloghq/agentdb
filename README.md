@@ -1168,6 +1168,17 @@ try {
 
 Returns `{ rebuiltDocCount: N }`. Requires admin permission.
 
+**What's new in v2.2:**
+- **Bloom filter query planner integration** — equality predicates (`{ field: value }`, `$eq`, `$in`) auto-consult `mightHave` and short-circuit definite-misses to empty result before scan. Bloom filters now bound to the field's index; the planner picks structural indexes (B-tree, composite, array) first and only falls to bloom when no structural match. False positives fall through to scan correctly.
+- **`HnswOptions.persistEvery`** — configurable periodic flush of the HNSW graph sidecar for bounded crash exposure on long-running ingest. Default `undefined` (close-only, v2.1.1 behavior). Pair with `persistTimeoutMs` to bound non-close-time waits on slow backends.
+- **Composite + bloom durable persistence** — `<dir>/indexes/composite-{fields}.json` and `<dir>/indexes/bloom-{field}.json` mirror the existing B-tree/array persistence pattern. Lazy load on first use; v2.1.1 disk-iter populate retained as fallback. Field-set validation guards against filename collisions.
+- **HNSW determinism via `seed`** propagated correctly through `CollectionOptions.hnsw.seed` and `AgentDBOptions.hnsw.seed` (latent omission in v2.1.1 fixed).
+- **Bloom maintenance fixes** in `IndexManager.updateIndexes`/`rebuildAll`/`incrementalUpdate` — bloom filters now correctly track post-creation inserts/updates/deletes (was silent stale state pre-v2.2).
+- **Diagnostic warnings** on corrupt JSON / non-ENOENT errors when loading persisted indexes (was silent fall-back).
+- **Targeted leak bench scenario N** for bloom `mightHave()` latency, plus scenario O for HNSW `persistEvery` write-amplification ratio.
+
+Known issue: HNSW `graph.bin` sidecar persists to local FS regardless of backend; in S3 deployments with ephemeral container FS, the sidecar is lost on restart and HNSW rebuilds from quantized embeddings (no data loss, just slower cold start). S3-native sidecar deferred to v2.3.
+
 **What's new in v2.1.1 (patch):**
 - HNSW graph persistence — disk-mode collections now persist the graph to `<dir>/hnsw/graph.bin` on close and load it on reopen, eliminating the O(N) rebuild for embedded collections
 - HNSW determinism — new `HnswOptions.seed` for reproducible layer assignments across processes
