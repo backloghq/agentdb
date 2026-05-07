@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-05-07
+
 ### Changed
 
 - **`db_archive_list` returns `Array<{ name, recordCount }>` instead of `string[]`** — admin/operator views needed the count alongside the segment name. The default path loads each segment to compute counts; pass `details:false` to get back to a names-only listing (`recordCount: -1` sentinel) without per-segment loads. New library method `Collection.listArchiveSegmentsDetailed()` is the underlying API; existing `listArchiveSegments(): string[]` is unchanged. Output schema is a breaking change for tool callers that consumed the old `segments: string[]`.
