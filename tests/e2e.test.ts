@@ -10,11 +10,17 @@ import { createInterface } from "node:readline";
  * Lightweight MCP client that talks to the AgentDB server over stdio.
  * Sends JSON-RPC requests sequentially and matches responses by id.
  */
+interface ProgressNotification {
+  method: "notifications/progress";
+  params: { progressToken: string | number; progress: number; total?: number };
+}
+
 class TestMcpClient {
   private proc: ChildProcess;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private nextId = 1;
   private ready = false;
+  private notificationListeners = new Map<string | number, (n: ProgressNotification) => void>();
 
   constructor(dataDir: string) {
     this.proc = spawn("node", [join(__dirname, "..", "dist", "mcp", "cli.js"), "--path", dataDir], {
@@ -29,6 +35,10 @@ class TestMcpClient {
           const { resolve } = this.pending.get(msg.id)!;
           this.pending.delete(msg.id);
           resolve(msg);
+        } else if (msg.method === "notifications/progress" && msg.params) {
+          const token = msg.params.progressToken;
+          const listener = this.notificationListeners.get(token);
+          if (listener) listener(msg as ProgressNotification);
         }
       } catch {
         // Ignore non-JSON lines
@@ -89,6 +99,31 @@ class TestMcpClient {
       throw new Error(`Tool ${tool} error: ${content[0].text}`);
     }
     return JSON.parse(content[0].text);
+  }
+
+  async callWithProgress(
+    tool: string,
+    args: Record<string, unknown>,
+    progressToken: string | number,
+  ): Promise<ProgressNotification[]> {
+    if (!this.ready) throw new Error("Client not initialized");
+    const events: ProgressNotification[] = [];
+    this.notificationListeners.set(progressToken, (n) => events.push(n));
+    try {
+      const response = await this.request("tools/call", {
+        name: tool,
+        arguments: args,
+        _meta: { progressToken },
+      });
+      const result = response.result as Record<string, unknown>;
+      if (result?.isError) {
+        const content = result.content as Array<{ type: string; text: string }>;
+        throw new Error(`Tool ${tool} error: ${content[0].text}`);
+      }
+      return events;
+    } finally {
+      this.notificationListeners.delete(progressToken);
+    }
   }
 
   async close(): Promise<void> {
@@ -426,12 +461,36 @@ describe("E2E: MCP Server", () => {
       collections: { imported: { records: exported.collections.users.records.slice(0, 2) } },
     };
 
-    const result = await client.call("db_import", { data: importData }) as { collections: number; records: number };
+    const result = await client.call("db_import", { data: importData }) as {
+      collections: number; records: number; inserted: number; overwritten: number; skipped: number; errors: unknown[];
+    };
     expect(result.collections).toBe(1);
     expect(result.records).toBe(2);
+    expect(result.inserted).toBe(2);
+    expect(result.overwritten).toBe(0);
+    expect(result.skipped).toBe(0);
+    expect(result.errors).toEqual([]);
 
     const count = await client.call("db_count", { collection: "imported" }) as { count: number };
     expect(count.count).toBe(2);
+  });
+
+  it("db_import emits notifications/progress when progressToken is supplied", async () => {
+    const importData = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      collections: {
+        prog_import: { records: Array.from({ length: 5 }, (_, i) => ({ _id: `r${i}`, n: i })) },
+      },
+    };
+    const events = await client.callWithProgress("db_import", { data: importData }, "ptok-import");
+    expect(events.length).toBe(5);
+    expect(events.every((e) => e.params.progressToken === "ptok-import")).toBe(true);
+    expect(events[events.length - 1].params.progress).toBe(5);
+    expect(events[events.length - 1].params.total).toBe(5);
+
+    const count = await client.call("db_count", { collection: "prog_import" }) as { count: number };
+    expect(count.count).toBe(5);
   });
 
   // --- Error handling ---

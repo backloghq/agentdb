@@ -302,6 +302,10 @@ describe("AgentDB", () => {
       const result = await db2.import(data);
       expect(result.collections).toBe(1);
       expect(result.records).toBe(2);
+      expect(result.inserted).toBe(2);
+      expect(result.overwritten).toBe(0);
+      expect(result.skipped).toBe(0);
+      expect(result.errors).toEqual([]);
 
       const users2 = await db2.collection("users");
       expect((await users2.findOne("a"))?.name).toBe("Alice");
@@ -319,8 +323,9 @@ describe("AgentDB", () => {
         exportedAt: new Date().toISOString(),
         collections: { users: { records: [{ _id: "a", name: "Imported" }] } },
       };
-      await db.import(data);
+      const result = await db.import(data);
       expect((await users.findOne("a"))?.name).toBe("Original"); // not overwritten
+      expect(result).toMatchObject({ inserted: 0, overwritten: 0, skipped: 1, errors: [] });
     });
 
     it("import with overwrite replaces existing records", async () => {
@@ -332,8 +337,24 @@ describe("AgentDB", () => {
         exportedAt: new Date().toISOString(),
         collections: { users: { records: [{ _id: "a", name: "Imported" }] } },
       };
-      await db.import(data, { overwrite: true });
+      const result = await db.import(data, { overwrite: true });
       expect((await users.findOne("a"))?.name).toBe("Imported");
+      expect(result).toMatchObject({ inserted: 0, overwritten: 1, skipped: 0, errors: [] });
+    });
+
+    it("import counts records without _id as skipped", async () => {
+      const data = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        collections: {
+          users: { records: [
+            { _id: "a", name: "WithId" },
+            { name: "NoId" }, // missing _id
+          ] },
+        },
+      };
+      const result = await db.import(data);
+      expect(result).toMatchObject({ records: 2, inserted: 1, skipped: 1, errors: [] });
     });
   });
 

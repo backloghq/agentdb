@@ -125,6 +125,22 @@ export interface ExportData {
   collections: Record<string, { records: Record<string, unknown>[] }>;
 }
 
+/** Structured result returned by {@link AgentDB.import}. */
+export interface ImportResult {
+  /** Number of collections processed. */
+  collections: number;
+  /** Total number of records present in the input (across all collections). */
+  records: number;
+  /** Records newly created (insert path). */
+  inserted: number;
+  /** Records replaced via upsert (only when `overwrite:true`). */
+  overwritten: number;
+  /** Records skipped — either missing `_id`, or already-existing without `overwrite:true`. */
+  skipped: number;
+  /** Per-record failures (insert/upsert threw). Empty when no errors occurred. */
+  errors: Array<{ collection: string; id?: string; error: string }>;
+}
+
 interface MetaManifest {
   collections: string[];
   dropped: string[];
@@ -1012,31 +1028,42 @@ export class AgentDB {
   }
 
   /** Import collections from export data. Skips existing records by default. */
-  async import(data: ExportData, opts?: { overwrite?: boolean; onProgress?: ProgressCallback }): Promise<{ collections: number; records: number }> {
+  async import(data: ExportData, opts?: { overwrite?: boolean; onProgress?: ProgressCallback }): Promise<ImportResult> {
     await this._ensureInit();
     const onProgress = opts?.onProgress;
-    let totalRecords = 0;
     const colNames = Object.keys(data.collections);
     const grandTotal = colNames.reduce((n, name) => n + (data.collections[name].records.length), 0);
+    let processed = 0;
+    let inserted = 0;
+    let overwritten = 0;
+    let skipped = 0;
+    const errors: ImportResult["errors"] = [];
     for (const name of colNames) {
       const col = await this.collection(name);
       const records = data.collections[name].records;
       for (const record of records) {
-        const id = record._id as string;
-        if (!id) continue;
-        if (opts?.overwrite) {
-          await col.upsert(id, record);
-        } else {
-          if (!(await col.findOne(id))) {
+        const id = record._id as string | undefined;
+        try {
+          if (!id) {
+            skipped++;
+          } else if (opts?.overwrite) {
+            await col.upsert(id, record);
+            overwritten++;
+          } else if (!(await col.findOne(id))) {
             await col.insert(record);
+            inserted++;
+          } else {
+            skipped++;
           }
+        } catch (e) {
+          errors.push({ collection: name, id, error: e instanceof Error ? e.message : String(e) });
         }
-        totalRecords++;
-        try { onProgress?.({ completed: totalRecords, total: grandTotal, phase: "importing" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
+        processed++;
+        try { onProgress?.({ completed: processed, total: grandTotal, phase: "importing" }); } catch (e) { console.error("agentdb: onProgress callback threw:", e); }
       }
       // Per-record inserts already drove tl.add() — no rebuild needed.
     }
-    return { collections: colNames.length, records: totalRecords };
+    return { collections: colNames.length, records: grandTotal, inserted, overwritten, skipped, errors };
   }
 
   /** Close all open collections and write metadata. */
