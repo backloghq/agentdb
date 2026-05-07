@@ -33,13 +33,24 @@ export function getArchiveTools(db: AgentDB): AgentTool[] {
     {
       name: "db_archive_list",
       title: "List Archive Segments",
-      description: "List available archive segments for a collection. Segments are named by time period (e.g. '2026-Q1'). Use db_archive_load to view records in a segment." + API_NOTE,
-      schema: z.object({ collection: collectionParam }),
-      outputSchema: z.object({ segments: z.array(z.string()) }),
+      description: "List available archive segments for a collection with record counts. Segments are named by time period (e.g. '2026-Q1'). Pass details:false to skip per-segment record counts (faster — names only). Use db_archive_load to view records in a segment." + API_NOTE,
+      schema: z.object({
+        collection: collectionParam,
+        details: z.boolean().optional().default(true).meta({ description: "Include record counts per segment (default: true). Set false to skip per-segment loads." }),
+      }),
+      outputSchema: z.object({
+        segments: z.array(z.object({ name: z.string(), recordCount: z.number() })),
+      }),
       annotations: READ,
       execute: safe("db_archive_list", READ)(async (args) => {
         const col = await db.collection(args.collection as string);
-        return { segments: col.listArchiveSegments() };
+        const details = args.details !== false;
+        if (details) {
+          return { segments: await col.listArchiveSegmentsDetailed() };
+        }
+        return {
+          segments: col.listArchiveSegments().map((name) => ({ name, recordCount: -1 })),
+        };
       }),
     },
 

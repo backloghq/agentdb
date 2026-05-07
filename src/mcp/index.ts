@@ -43,7 +43,11 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
 
   const tools = getTools(db);
 
+  // Tools the MCP layer registers with custom handlers (skipped in the generic loop).
+  const MCP_CUSTOM_TOOLS = new Set(["db_import"]);
+
   for (const tool of tools) {
+    if (MCP_CUSTOM_TOOLS.has(tool.name)) continue;
     server.registerTool(
       tool.name,
       {
@@ -55,6 +59,40 @@ export function createMcpServer(db: AgentDB, subscriptions?: SubscriptionManager
       },
       async (args) => {
         const result = await tool.execute(args);
+        return { ...result };
+      },
+    );
+  }
+
+  // db_import: forward MCP progress notifications when the client supplies a progressToken.
+  // Mutates args.onProgress before delegating to the framework-agnostic tool, which db.import()
+  // honors via opts.onProgress in the library layer.
+  const importTool = tools.find((t) => t.name === "db_import");
+  if (importTool) {
+    server.registerTool(
+      importTool.name,
+      {
+        title: importTool.title,
+        description: importTool.description,
+        inputSchema: importTool.schema as z.ZodObject,
+        outputSchema: importTool.outputSchema as z.ZodObject | undefined,
+        annotations: importTool.annotations,
+      },
+      async (args, extra) => {
+        const progressToken = extra?._meta?.progressToken;
+        if (progressToken !== undefined && extra?.sendNotification) {
+          (args as Record<string, unknown>)._mcpProgress = (event: { completed: number; total: number | null }) => {
+            extra.sendNotification({
+              method: "notifications/progress",
+              params: {
+                progressToken,
+                progress: event.completed,
+                total: event.total ?? undefined,
+              },
+            }).catch(() => { /* notification delivery failures are non-fatal */ });
+          };
+        }
+        const result = await importTool.execute(args);
         return { ...result };
       },
     );
@@ -240,8 +278,9 @@ export async function startHttp(
       if (origin && (allowAll || allowed.has(origin))) {
         res.setHeader("Access-Control-Allow-Origin", allowAll ? "*" : origin);
         if (!allowAll) res.setHeader("Vary", "Origin");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version");
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+        res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
       }
       if (req.method === "OPTIONS") { res.status(204).end(); return; }
       next();

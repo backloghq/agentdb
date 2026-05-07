@@ -26,7 +26,7 @@ export function getBackupTools(db: AgentDB): AgentTool[] {
     {
       name: "db_import",
       title: "Import Collections",
-      description: "Import collections from a previously exported JSON backup (from db_export). Creates collections if they don't exist. By default, skips records with existing _id; set overwrite:true to replace them." + API_NOTE,
+      description: "Import collections from a previously exported JSON backup (from db_export). Creates collections if they don't exist. By default, skips records with existing _id; set overwrite:true to replace them. Returns per-outcome counts (inserted/overwritten/skipped) and per-record errors." + API_NOTE,
       schema: z.object({
         data: z.object({
           version: z.number(),
@@ -35,11 +35,23 @@ export function getBackupTools(db: AgentDB): AgentTool[] {
         }).meta({ description: "Export data from db_export" }),
         overwrite: z.boolean().optional().default(false).meta({ description: "Overwrite existing records (default: skip)" }),
       }),
-      outputSchema: z.object({ collections: z.number(), records: z.number() }),
+      outputSchema: z.object({
+        collections: z.number(),
+        records: z.number(),
+        inserted: z.number(),
+        overwritten: z.number(),
+        skipped: z.number(),
+        errors: z.array(z.object({
+          collection: z.string(),
+          id: z.string().optional(),
+          error: z.string(),
+        })),
+      }),
       annotations: DESTRUCTIVE,
       execute: safe("db_import", DESTRUCTIVE)(async (args) => {
         const data = args.data as { version: number; exportedAt: string; collections: Record<string, { records: Record<string, unknown>[] }> };
-        return db.import(data, { overwrite: args.overwrite as boolean });
+        const onProgress = args._mcpProgress as ((event: { completed: number; total: number | null; phase: string }) => void) | undefined;
+        return db.import(data, { overwrite: args.overwrite as boolean, onProgress });
       }),
     },
   ];

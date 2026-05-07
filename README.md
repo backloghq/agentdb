@@ -1168,6 +1168,12 @@ try {
 
 Returns `{ rebuiltDocCount: N }`. Requires admin permission.
 
+**What's new in v2.2.1:**
+- **MCP HTTP CORS** allows the spec-required `MCP-Protocol-Version` request header and exposes `Mcp-Session-Id` to browser fetch clients (origin policy unchanged — still configurable via `--cors` / `AGENTDB_HTTP_CORS` / `http.cors`).
+- **`db_archive_list` returns `Array<{ name, recordCount }>`** for admin/operator views. Pass `details:false` to skip per-segment loads (`recordCount: -1` sentinel) for fast names-only listing. New `Collection.listArchiveSegmentsDetailed()` library method; existing `listArchiveSegments(): string[]` unchanged.
+- **`db.import()` / `db_import` returns structured `ImportResult`** — `{ collections, records, inserted, overwritten, skipped, errors[] }` instead of `{ collections, records }`. Records without `_id` are now counted under `skipped` (previously dropped silently); per-record insert/upsert throws are captured in `errors[]` instead of aborting. New `ImportResult` type exported.
+- **`db_import` MCP tool emits `notifications/progress`** when the client supplies `progressToken` in `_meta`. The library `db.import()` already supported `onProgress`; the MCP tool now forwards each event as a JSON-RPC progress notification with `{ progressToken, progress, total }`.
+
 **What's new in v2.2:**
 - **Bloom filter query planner integration** — equality predicates (`{ field: value }`, `$eq`, `$in`) auto-consult `mightHave` and short-circuit definite-misses to empty result before scan. Bloom filters now bound to the field's index; the planner picks structural indexes (B-tree, composite, array) first and only falls to bloom when no structural match. False positives fall through to scan correctly.
 - **`HnswOptions.persistEvery`** — configurable periodic flush of the HNSW graph sidecar for bounded crash exposure on long-running ingest. Default `undefined` (close-only, v2.1.1 behavior). Pair with `persistTimeoutMs` to bound non-close-time waits on slow backends.
