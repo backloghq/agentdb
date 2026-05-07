@@ -105,6 +105,19 @@ describe("MCP HTTP Transport", () => {
       expect(res.headers.get("access-control-allow-methods")).toBe(
         "GET, POST, DELETE, OPTIONS",
       );
+      expect(res.headers.get("access-control-allow-headers")).toContain(
+        "MCP-Protocol-Version",
+      );
+    });
+
+    it("exposes Mcp-Session-Id to browser clients", async () => {
+      await setup({ corsOrigins: ["https://example.com"] });
+      const res = await fetch(`http://127.0.0.1:${port}/health`, {
+        headers: { Origin: "https://example.com" },
+      });
+      expect(res.headers.get("access-control-expose-headers")).toBe(
+        "Mcp-Session-Id",
+      );
     });
   });
 

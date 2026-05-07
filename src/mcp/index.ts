@@ -240,8 +240,9 @@ export async function startHttp(
       if (origin && (allowAll || allowed.has(origin))) {
         res.setHeader("Access-Control-Allow-Origin", allowAll ? "*" : origin);
         if (!allowAll) res.setHeader("Vary", "Origin");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version");
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+        res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
       }
       if (req.method === "OPTIONS") { res.status(204).end(); return; }
       next();
