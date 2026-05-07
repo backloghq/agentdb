@@ -52,6 +52,13 @@ describe("Tool Definitions — archive", () => {
 
       const segments = await exec("db_archive_list", { collection: "logs" });
       expect(segments.segments.length).toBeGreaterThan(0);
+      expect(segments.segments[0]).toMatchObject({ recordCount: 1 });
+      expect(typeof segments.segments[0].name).toBe("string");
+
+      // details:false skips per-segment loads (recordCount = -1 sentinel)
+      const namesOnly = await exec("db_archive_list", { collection: "logs", details: false });
+      expect(namesOnly.segments[0].recordCount).toBe(-1);
+      expect(typeof namesOnly.segments[0].name).toBe("string");
 
       const loaded = await exec("db_archive_load", {
         collection: "logs",

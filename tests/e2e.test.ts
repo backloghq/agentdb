@@ -368,9 +368,11 @@ describe("E2E: MCP Server", () => {
     expect(count.count).toBe(1);
   });
 
-  it("db_archive_list returns segments", async () => {
-    const result = await client.call("db_archive_list", { collection: "logs" }) as { segments: string[] };
+  it("db_archive_list returns segments with record counts", async () => {
+    const result = await client.call("db_archive_list", { collection: "logs" }) as { segments: Array<{ name: string; recordCount: number }> };
     expect(result.segments.length).toBeGreaterThan(0);
+    expect(result.segments[0]).toMatchObject({ recordCount: 1 });
+    expect(typeof result.segments[0].name).toBe("string");
   });
 
   it("db_archive_load reads archived records", async () => {

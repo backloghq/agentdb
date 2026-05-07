@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Changed
+
+- **`db_archive_list` returns `Array<{ name, recordCount }>` instead of `string[]`** — admin/operator views needed the count alongside the segment name. The default path loads each segment to compute counts; pass `details:false` to get back to a names-only listing (`recordCount: -1` sentinel) without per-segment loads. New library method `Collection.listArchiveSegmentsDetailed()` is the underlying API; existing `listArchiveSegments(): string[]` is unchanged. Output schema is a breaking change for tool callers that consumed the old `segments: string[]`.
+
 ### Fixed
 
 - **MCP HTTP CORS — missing `MCP-Protocol-Version` allowed header and unexposed `Mcp-Session-Id` response header** — browser MCP clients send `MCP-Protocol-Version` on every request after the spec's protocol-version negotiation; the previous CORS allow-list rejected it. The `Mcp-Session-Id` response header (set by the Streamable HTTP transport on initialize) was not exposed via `Access-Control-Expose-Headers`, so browser fetch clients could not read it back to use on subsequent requests. Both are MCP protocol requirements, not policy — origins remain configurable via `--cors` / `AGENTDB_HTTP_CORS` / `http.cors` (unchanged). 2 new tests in `mcp-transport.test.ts` cover the allow-headers and expose-headers values.

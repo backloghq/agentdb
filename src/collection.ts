@@ -1869,6 +1869,27 @@ export class Collection {
   }
 
   /**
+   * List archive segments with record counts. Loads each segment to compute
+   * counts; intended for admin/operator views, not hot paths. For just the
+   * segment names without I/O, use {@link listArchiveSegments}.
+   */
+  async listArchiveSegmentsDetailed(): Promise<Array<{ name: string; recordCount: number }>> {
+    const names = this.store.listArchiveSegments();
+    const out: Array<{ name: string; recordCount: number }> = [];
+    for (const name of names) {
+      try {
+        const records = await this.store.loadArchive(name);
+        out.push({ name, recordCount: records.size });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`agentdb: could not stat archive segment '${name}': ${msg}`);
+        out.push({ name, recordCount: -1 });
+      }
+    }
+    return out;
+  }
+
+  /**
    * Full-text search across all string fields.
    * Requires textSearch: true in collection options.
    * Returns records matching ALL query terms (AND semantics).
