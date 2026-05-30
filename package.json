@@ -1,6 +1,6 @@
 {
   "name": "@backloghq/agentdb",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "AI-first embedded database for LLM agents. Library-first architecture with framework-agnostic tool definitions and MCP adapter.",
   "type": "module",
   "exports": {
@@ -56,13 +56,13 @@
   "sideEffects": false,
   "dependencies": {
     "@backloghq/opslog": "^0.8.1",
-    "@backloghq/termlog": "^0.1.2",
+    "@backloghq/termlog": "^0.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "express": "^5.2.1",
-    "hyparquet": "^1.25.6",
-    "hyparquet-writer": "^0.13.0",
-    "jose": "^6.2.2",
-    "zod": "^4.3.6"
+    "hyparquet": "^1.26.0",
+    "hyparquet-writer": "^0.15.6",
+    "jose": "^6.2.3",
+    "zod": "^4.4.3"
   },
   "optionalDependencies": {
     "@backloghq/opslog-s3": "^0.4.1"
@@ -76,15 +76,15 @@
     }
   },
   "devDependencies": {
-    "@aws-sdk/client-s3": "^3.1028.0",
+    "@aws-sdk/client-s3": "^3.1057.0",
     "@backloghq/termlog-s3": "^0.1.0",
     "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.6",
-    "@types/node": "^25.6.0",
-    "@vitest/coverage-v8": "^4.1.4",
-    "eslint": "^10.2.0",
-    "typescript": "~6.0.2",
-    "typescript-eslint": "^8.58.1",
-    "vitest": "^4.1.4"
+    "@types/node": "^25.9.1",
+    "@vitest/coverage-v8": "^4.1.7",
+    "eslint": "^10.4.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.60.0",
+    "vitest": "^4.1.7"
   }
 }

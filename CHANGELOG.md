@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-05-30
+
+### Added
+
+- **Multi-writer text index** — agentdb now threads `AgentDBOptions.agentId` through to the underlying `TermLog`, enabling concurrent processes to share one `text/` directory without contending on the single-writer `.lock`. When `agentId` is set, the index uses per-agent files (`manifest-<agentId>.json`, `seg-<agentId>-NNNNNN.seg`, `docids-<agentId>.snap/.log`, `.lock-<agentId>`) and a `slots.json` registry that partitions the uint32 numId namespace into 4096 1M-doc slots so colliding numIds across writers are structurally impossible. Each collection's reader view is the union of own + every other agent's committed segments. Requires `@backloghq/termlog ^0.2.0`.
+- **`Collection.refresh()` in multi-writer mode now picks up other agents' BM25 writes** via the new `TermLog.refresh()` rather than the heavyweight `rebuildTextIndex()`. The cheap path scans for newly committed external manifests + docids files and merges them into the in-memory reader snapshot. Legacy single-writer mode continues to call `rebuildTextIndex()` because it has no other-agent view to merge.
+- **Cross-agent updates and removes** — when a writer in multi-writer mode mutates a docId that another agent originally indexed, the existing external numId is tombstoned in this writer's next segment and a fresh own-slot numId is allocated. Readers apply tombstones across the union, so old content drops out of search results immediately on the next refresh.
+- **Auto-migration on `LegacyIndexError`** — opening a v2.2.x text index (`text/manifest.json`) with an `agentId` set automatically detects `termlog.LegacyIndexError`, calls `TermLog.migrateLegacy()` to convert the layout to per-agent files (assigning the migrating agent slot 0), and reopens. A one-line `console.warn` records the conversion. Multi-writer S3 termlog backends are not touched by auto-migration (S3 mode has its own layout).
+- **Per-write text-index flush in multi-writer mode** — every `Collection.insert`/`upsert`/`delete` that touches the text index now triggers an immediate `textIdx.flush()` when `agentId` is set, so cross-agent visibility on the next `refresh()` reflects the latest writes. Legacy single-writer mode preserves the existing 1000-doc buffered flush for batch ingest throughput.
+- **8 new tests in `tests/multi-writer-text.test.ts`** — concurrent agent open, federated read via `refresh()`, cross-agent update tombstoning, on-disk file layout assertion, legacy auto-migration on first agentId open, federated `docCount`, same-agent IndexLockedError still raised, mixed-state legacy handling (orphan `manifest.json` ignored).
+
+### Changed
+
+- **Bumped `@backloghq/termlog` from `^0.1.2` to `^0.2.0`** — the new minor adds opt-in multi-writer mode (per-agent manifests/segments/docids, slot registry, `refresh()`, `migrateLegacy`). All existing termlog APIs unchanged; legacy single-writer behavior preserved when `agentId` is omitted.
+
+### Compatibility
+
+- Multi-writer mode is opt-in via `AgentDBOptions.agentId`. Callers that don't set it experience byte-identical behavior to 2.2.x — same file names, same lock, same docid layout. All 1529 pre-existing tests continue to pass unchanged; 1537 total after the new multi-writer suite.
+- Legacy v2.2.x text indexes with `agentId` set on next open auto-migrate to the multi-writer layout in place; no manual migration step. Single-writer indexes opened without `agentId` are unaffected.
+
 ## [2.2.1] - 2026-05-07
 
 ### Changed
