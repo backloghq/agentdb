@@ -6,7 +6,7 @@ import type { Operation, StorageBackend } from "@backloghq/opslog";
 import type { DiskStore } from "./disk-store.js";
 import { getNestedValue } from "./filter.js";
 // parseCompactFilter used by IndexManager (imported there directly)
-import { TermLog } from "@backloghq/termlog";
+import { TermLog, LegacyIndexError } from "@backloghq/termlog";
 import { rrf } from "./rrf.js";
 import { ViewManager } from "./view.js";
 import type { ViewDefinition } from "./view.js";
@@ -212,6 +212,13 @@ export class Collection {
   private _opened = false;
   private opts: CollectionOptions;
   private textIdx: TermLog | null = null;
+  /**
+   * Agent id captured at open() time. When set, TermLog is opened in
+   * multi-writer mode (per-agent files + slot-partitioned numIds + federated
+   * reader view). Mirrors the opslog agent id so opslog's per-agent WAL files
+   * and termlog's per-agent manifests stay aligned.
+   */
+  private _termlogAgentId: string | undefined;
   /** During an FS-mode rebuildTextIndex run, this is the new index being built.
    *  All live writes (insert/update/delete) shadow-write here so concurrent mutations
    *  are captured. Null when no rebuild is in progress. */
@@ -447,6 +454,47 @@ export class Collection {
   /** Get the text index (TermLog handle). */
   getTextIndex(): TermLog | null { return this.textIdx; }
 
+  /**
+   * Open a TermLog with the captured agent id, auto-migrating a legacy
+   * single-writer index to the per-agent layout when needed.
+   *
+   * The migration path fires when:
+   *   - An `agentId` is captured (multi-writer mode opt-in by the caller).
+   *   - The backend is local FS (S3 termlog has no legacy layout to migrate).
+   *   - `TermLog.open` throws `LegacyIndexError`, indicating a leftover
+   *     `manifest.json` from a single-writer install (e.g. backlog 2.4.x).
+   *
+   * Migration is one-time per index; subsequent opens go straight through.
+   * In legacy single-writer mode (no agentId), this is a thin pass-through.
+   */
+  private async openTermlogWithLegacyMigration(textDir: string): Promise<TermLog> {
+    const k1 = this.opts.bm25K1 ?? 1.2;
+    const b  = this.opts.bm25B ?? 0.75;
+    const baseOpts = {
+      dir: textDir,
+      backend: this._termlogBackend,
+      k1,
+      b,
+      agentId: this._termlogAgentId,
+    };
+    try {
+      return await TermLog.open(baseOpts);
+    } catch (err) {
+      const isLegacy = err instanceof LegacyIndexError ||
+                       (err instanceof Error && err.name === "LegacyIndexError");
+      const canMigrate = isLegacy &&
+                         this._termlogAgentId !== undefined &&
+                         this._termlogBackend === undefined; // FS only
+      if (!canMigrate) throw err;
+      console.warn(
+        `agentdb [${this.name}]: migrating legacy single-writer text index in ${textDir} ` +
+        `to multi-writer layout (agent=${this._termlogAgentId}). One-time conversion.`,
+      );
+      await TermLog.migrateLegacy(textDir, this._termlogAgentId!);
+      return await TermLog.open(baseOpts);
+    }
+  }
+
   /** Get the HNSW index (if an embedding provider is configured). */
   getHnswIndex(): HnswIndex | null { return this.hnswIdx; }
 
@@ -611,6 +659,7 @@ export class Collection {
         this.textIdx = await TermLog.open({
           dir: textDir,
           backend: this._termlogBackend,
+          agentId: this._termlogAgentId,
           k1: this.opts.bm25K1 ?? 1.2,
           b: this.opts.bm25B ?? 0.75,
         });
@@ -672,6 +721,7 @@ export class Collection {
     await mkdir(textNewDir, { recursive: true });
     const newIdx = await TermLog.open({
       dir: textNewDir,
+      agentId: this._termlogAgentId,
       k1: this.opts.bm25K1 ?? 1.2,
       b: this.opts.bm25B ?? 0.75,
     });
@@ -761,6 +811,7 @@ export class Collection {
         if (hadExistingIndex) {
           this.textIdx = await TermLog.open({
             dir: textDir,
+            agentId: this._termlogAgentId,
             k1: this.opts.bm25K1 ?? 1.2,
             b: this.opts.bm25B ?? 0.75,
           }).catch((reopenErr: unknown) => {
@@ -778,6 +829,7 @@ export class Collection {
       }
       this.textIdx = await TermLog.open({
         dir: textDir,
+        agentId: this._termlogAgentId,
         k1: this.opts.bm25K1 ?? 1.2,
         b: this.opts.bm25B ?? 0.75,
       });
@@ -825,7 +877,14 @@ export class Collection {
    * so concurrent inserts/updates are captured in the new index during a rebuildTextIndex run.
    */
   private async textIndexAdd(id: string, text: string): Promise<void> {
-    if (this.textIdx) await this.textIdx.add(id, text);
+    if (this.textIdx) {
+      await this.textIdx.add(id, text);
+      // Multi-writer mode: flush every text-index mutation immediately so the
+      // segment becomes visible to other agents on the next refresh. The
+      // legacy single-writer path keeps the default 1000-doc buffer for batch
+      // ingest speed.
+      if (this._termlogAgentId !== undefined) await this.textIdx.flush();
+    }
     if (this._rebuildingIdx) await this._rebuildingIdx.add(id, text);
   }
 
@@ -834,7 +893,10 @@ export class Collection {
    * progress). See `textIndexAdd` for rationale.
    */
   private async textIndexRemove(id: string): Promise<void> {
-    if (this.textIdx) await this.textIdx.remove(id);
+    if (this.textIdx) {
+      await this.textIdx.remove(id);
+      if (this._termlogAgentId !== undefined) await this.textIdx.flush();
+    }
     if (this._rebuildingIdx) await this._rebuildingIdx.remove(id);
   }
 
@@ -932,6 +994,7 @@ export class Collection {
     await this.store.open(dir, options);
     this._opened = true;
     this._dir = dir;
+    this._termlogAgentId = options?.agentId;
     if (options?.writeMode) this._writeMode = options.writeMode;
     if (options?.backend) {
       this.backend = options.backend;
@@ -1001,12 +1064,7 @@ export class Collection {
         }
         await mkdir(textDir, { recursive: true });
       }
-      this.textIdx = await TermLog.open({
-        dir: textDir,
-        backend: this._termlogBackend,
-        k1: this.opts.bm25K1 ?? 1.2,
-        b: this.opts.bm25B ?? 0.75,
-      });
+      this.textIdx = await this.openTermlogWithLegacyMigration(textDir);
       termlogAlreadyIndexed = this.textIdx.docCount() > 0;
     }
 
@@ -1756,7 +1814,16 @@ export class Collection {
    */
   async refresh(): Promise<void> {
     await this.store.refresh();
-    await this.rebuildTextIndex();
+    // In multi-writer mode the text index is federated across per-agent
+    // manifests — a cheap `TermLog.refresh()` picks up other writers' commits
+    // without rebuilding the whole index. Fall back to the heavyweight rebuild
+    // only in legacy single-writer mode where the index has no other-agent
+    // view to merge.
+    if (this.textIdx && this._termlogAgentId !== undefined) {
+      await this.textIdx.refresh();
+    } else if (this.opts.textSearch) {
+      await this.rebuildTextIndex();
+    }
     this.rebuildBTreeIndexes();
     this.emitChange("update", []);
   }
